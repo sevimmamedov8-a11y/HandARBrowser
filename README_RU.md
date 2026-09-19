@@ -1,6 +1,6 @@
-# HandAR Vision — V25 Stereo World-Locked AR
+# HandAR Vision — V26 Stereo World-Locked AR
 
-V25 сделан именно как стерео-режим для телефонных VR-очков: на дисплее есть **два независимых WKWebView**, по одному на каждый глаз. Это не один WebView, разрезанный пополам.
+V26 сделан именно как стерео-режим для телефонных VR-очков: на дисплее есть **два независимых WKWebView**, по одному на каждый глаз. Это не один WebView, разрезанный пополам.
 
 ## Режим
 
@@ -32,4 +32,11 @@ V25 сделан именно как стерео-режим для телефо
 
 Это iPhone-прототип телефонных AR/VR-очков. Он использует реальный ARKit world tracking и ARAnchor, но физически у iPhone один дисплей и одна задняя камера, поэтому это не может буквально воспроизвести оптическую систему Apple Vision Pro.
 
-Официальная модель пространственного интерфейса Vision Pro строится вокруг окон, объёмов и immersive spaces; V25 переносит эту идею на iPhone, используя ARKit/RealityKit и отдельный WebView на каждый глаз. citeturn709092search0turn709092search6
+Официальная модель пространственного интерфейса Vision Pro строится вокруг окон, объёмов и immersive spaces; V26 переносит эту идею на iPhone, используя ARKit/RealityKit и отдельный WebView на каждый глаз. citeturn709092search0turn709092search6
+
+
+## V26
+Один логический WKWebView рендерится как одно пространственное полотно в двух прозрачных SCNView для левого и правого глаза. ARSCNView занимает весь экран как AR-подложка, а ARKit world tracking фиксирует полотно в мире.
+
+## V26 — VR-style stereo compositor
+V26 uses one logical WKWebView as the browser surface. The page is captured into one texture and rendered twice by two independent transparent SceneKit eye views with separate stereo cameras. A full-screen ARSCNView provides the AR camera passthrough. ARKit world tracking anchors the browser plane in world space, and hand input is mapped onto that plane with ARCamera.unprojectPoint.

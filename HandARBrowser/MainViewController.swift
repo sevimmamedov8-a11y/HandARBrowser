@@ -1,9 +1,10 @@
 import UIKit
 import AVFoundation
 import ARKit
-import RealityKit
+import SceneKit
 import Vision
 import WebKit
+import simd
 
 struct HandSample {
     let indexTip: CGPoint
@@ -12,29 +13,69 @@ struct HandSample {
 }
 
 final class MainViewController: UIViewController {
-    private let tracking = ARTrackingManager()
+    private let tracking = ARStereoTrackingManager()
     private let hands = HandTracker()
     private let input = WebInputBridge()
 
-    private var arView: ARView!
-    private let eyeLeft = EyeDisplayView()
-    private let eyeRight = EyeDisplayView()
-    private let cursorLeft = CursorView()
-    private let cursorRight = CursorView()
+    // One logical browser surface, rendered independently by two stereo eye views.
+    private let browser: WKWebView = {
+        let config = WKWebViewConfiguration()
+        config.defaultWebpagePreferences.allowsContentJavaScript = true
+        config.allowsInlineMediaPlayback = true
+        config.mediaTypesRequiringUserActionForPlayback = []
+
+        let controller = WKUserContentController()
+        if let path = Bundle.main.path(forResource: "WebInput", ofType: "js"),
+           let js = try? String(contentsOfFile: path, encoding: .utf8) {
+            controller.addUserScript(
+                WKUserScript(
+                    source: js,
+                    injectionTime: .atDocumentStart,
+                    forMainFrameOnly: false
+                )
+            )
+        }
+        config.userContentController = controller
+
+        let webView = WKWebView(frame: .zero, configuration: config)
+        webView.isOpaque = false
+        webView.backgroundColor = .black
+        webView.scrollView.backgroundColor = .black
+        webView.scrollView.alwaysBounceVertical = true
+        webView.customUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15"
+        return webView
+    }()
+    private var browserTimer: Timer?
+    private var snapshotInProgress = false
+
+    private let arSceneView = ARSCNView(frame: .zero)
+    private let leftEyeView = SCNView(frame: .zero)
+    private let rightEyeView = SCNView(frame: .zero)
+
+    private let leftScene = SCNScene()
+    private let rightScene = SCNScene()
+    private let leftPlaneNode = SCNNode()
+    private let rightPlaneNode = SCNNode()
+    private let leftCursorNode = SCNNode()
+    private let rightCursorNode = SCNNode()
+    private let leftCameraNode = SCNNode()
+    private let rightCameraNode = SCNNode()
+
+    private let leftMaterial = SCNMaterial()
+    private let rightMaterial = SCNMaterial()
+
     private let menu = MainMenuView()
 
     private var inAR = false
     private var browserAnchor: ARAnchor?
-    private var browserAnchorEntity: AnchorEntity?
+    private var browserWorldTransform: simd_float4x4?
     private var lastCenterGestureTime: CFTimeInterval = 0
-    private var didRequestInitialAnchor = false
+    private var didCreateInitialAnchor = false
 
-    // Smaller world-locked browser window, positioned comfortably in front of the user.
-    private let browserWorldWidth: Float = 0.92
-    private let browserWorldHeight: Float = 0.52
-    private let browserWorldDistance: Float = 1.45
-
-    // Each eye has its own independent WebView and a tiny binocular offset.
+    // Physical-looking spatial browser: smaller than the previous versions.
+    private let browserWorldWidth: Float = 0.82
+    private let browserWorldHeight: Float = 0.47
+    private let browserWorldDistance: Float = 1.55
     private let eyeSeparation: Float = 0.064
 
     override var prefersStatusBarHidden: Bool { true }
@@ -51,36 +92,22 @@ final class MainViewController: UIViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
+        configureBrowser()
+        configureScenes()
         buildInterface()
         wireServices()
     }
 
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        requestLandscapeMode()
+    }
+
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
-
-        arView.frame = view.bounds
-        menu.frame = view.bounds
-
-        let halfWidth = max(view.bounds.width * 0.5, 1)
-        eyeLeft.frame = CGRect(
-            x: 0,
-            y: 0,
-            width: halfWidth,
-            height: view.bounds.height
-        )
-        eyeRight.frame = CGRect(
-            x: halfWidth,
-            y: 0,
-            width: max(view.bounds.width - halfWidth, 1),
-            height: view.bounds.height
-        )
-
-        cursorLeft.bounds.size = CGSize(width: 20, height: 20)
-        cursorRight.bounds.size = CGSize(width: 20, height: 20)
-
-        guard !view.bounds.isEmpty else { return }
+        layoutViews()
         tracking.setInterfaceOrientation(currentInterfaceOrientation())
-        reprojectBrowser()
+        updateEyeCameras()
     }
 
     override func viewWillTransition(
@@ -88,13 +115,17 @@ final class MainViewController: UIViewController {
         with coordinator: UIViewControllerTransitionCoordinator
     ) {
         super.viewWillTransition(to: size, with: coordinator)
-
-        coordinator.animate(alongsideTransition: { _ in
+        coordinator.animate(alongsideTransition: { [weak self] _ in
+            self?.tracking.setInterfaceOrientation(self?.currentInterfaceOrientation() ?? .landscapeRight)
+        }) { [weak self] _ in
+            guard let self else { return }
             self.tracking.setInterfaceOrientation(self.currentInterfaceOrientation())
-        }) { _ in
-            self.tracking.setInterfaceOrientation(self.currentInterfaceOrientation())
-            self.reprojectBrowser()
+            self.updateEyeCameras()
         }
+    }
+
+    deinit {
+        browserTimer?.invalidate()
     }
 
     private func currentInterfaceOrientation() -> UIInterfaceOrientation {
@@ -104,50 +135,155 @@ final class MainViewController: UIViewController {
     private func buildInterface() {
         view.backgroundColor = .black
 
-        // ARView is the real AR passthrough/world-tracking layer.
-        arView = ARView(
-            frame: view.bounds,
-            cameraMode: .ar,
-            automaticallyConfigureSession: false
-        )
-        arView.backgroundColor = .black
-        arView.isHidden = true
-        arView.isUserInteractionEnabled = false
-        arView.renderOptions.insert(.disableMotionBlur)
-        arView.session = tracking.session
-        view.addSubview(arView)
+        // Full-screen AR camera background. The stereo views are transparent overlays.
+        arSceneView.frame = view.bounds
+        arSceneView.session = tracking.session
+        arSceneView.scene = SCNScene()
+        arSceneView.backgroundColor = .black
+        arSceneView.isOpaque = true
+        arSceneView.clipsToBounds = true
+        arSceneView.contentMode = .scaleAspectFill
+        arSceneView.autoenablesDefaultLighting = false
+        arSceneView.rendersCameraGrain = false
+        arSceneView.rendersMotionBlur = false
+        arSceneView.isUserInteractionEnabled = false
+        view.addSubview(browser)
+        view.addSubview(arSceneView)
 
-        // Important: these are two independent display surfaces, not one WebView split in half.
-        eyeLeft.isHidden = true
-        eyeRight.isHidden = true
-        view.addSubview(eyeLeft)
-        view.addSubview(eyeRight)
+        leftEyeView.isOpaque = false
+        leftEyeView.backgroundColor = .clear
+        leftEyeView.scene = leftScene
+        leftEyeView.pointOfView = leftCameraNode
+        leftEyeView.autoenablesDefaultLighting = false
+        leftEyeView.allowsCameraControl = false
+        leftEyeView.isUserInteractionEnabled = false
+        leftEyeView.rendersContinuously = true
+        leftEyeView.isPlaying = true
+        view.addSubview(leftEyeView)
 
-        cursorLeft.isHidden = true
-        cursorRight.isHidden = true
-        eyeLeft.addSubview(cursorLeft)
-        eyeRight.addSubview(cursorRight)
+        rightEyeView.isOpaque = false
+        rightEyeView.backgroundColor = .clear
+        rightEyeView.scene = rightScene
+        rightEyeView.pointOfView = rightCameraNode
+        rightEyeView.autoenablesDefaultLighting = false
+        rightEyeView.allowsCameraControl = false
+        rightEyeView.isUserInteractionEnabled = false
+        rightEyeView.rendersContinuously = true
+        rightEyeView.isPlaying = true
+        view.addSubview(rightEyeView)
 
         menu.onEnter = { [weak self] in
             self?.requestCameraAndEnterAR()
         }
         view.addSubview(menu)
+
+        setARVisible(false)
+    }
+
+    private func layoutViews() {
+        let bounds = view.bounds
+        arSceneView.frame = bounds
+
+        let halfWidth = max(bounds.width * 0.5, 1)
+        leftEyeView.frame = CGRect(x: 0, y: 0, width: halfWidth, height: bounds.height)
+        rightEyeView.frame = CGRect(
+            x: halfWidth,
+            y: 0,
+            width: max(bounds.width - halfWidth, 1),
+            height: bounds.height
+        )
+
+        // The hidden browser is rendered behind the AR camera so its snapshots remain live.
+        let browserSize = CGSize(
+            width: max(bounds.width - 80, 480),
+            height: max(bounds.height - 80, 320)
+        )
+        browser.frame = CGRect(
+            x: (bounds.width - browserSize.width) * 0.5,
+            y: (bounds.height - browserSize.height) * 0.5,
+            width: browserSize.width,
+            height: browserSize.height
+        )
+
+        menu.frame = bounds
+    }
+
+    private func configureBrowser() {
+        browser.navigationDelegate = self
+        browser.uiDelegate = self
+        browser.load(URLRequest(url: Self.homeURL))
+    }
+
+    private func configureScenes() {
+        configureEyeScene(leftScene, planeNode: leftPlaneNode, cursorNode: leftCursorNode, material: leftMaterial)
+        configureEyeScene(rightScene, planeNode: rightPlaneNode, cursorNode: rightCursorNode, material: rightMaterial)
+
+        let leftCamera = SCNCamera()
+        leftCamera.zNear = 0.01
+        leftCamera.zFar = 100.0
+        leftCameraNode.camera = leftCamera
+
+        let rightCamera = SCNCamera()
+        rightCamera.zNear = 0.01
+        rightCamera.zFar = 100.0
+        rightCameraNode.camera = rightCamera
+
+        leftScene.rootNode.addChildNode(leftCameraNode)
+        rightScene.rootNode.addChildNode(rightCameraNode)
+    }
+
+    private func configureEyeScene(
+        _ scene: SCNScene,
+        planeNode: SCNNode,
+        cursorNode: SCNNode,
+        material: SCNMaterial
+    ) {
+        scene.background.contents = UIColor.clear
+        scene.rootNode.childNodes.forEach { $0.removeFromParentNode() }
+
+        let geometry = SCNPlane(
+            width: CGFloat(browserWorldWidth),
+            height: CGFloat(browserWorldHeight)
+        )
+        geometry.firstMaterial = material
+        geometry.widthSegmentCount = 1
+        geometry.heightSegmentCount = 1
+
+        material.lightingModel = .constant
+        material.isDoubleSided = true
+        material.diffuse.contents = UIColor.black
+        material.emission.contents = UIColor.black
+        material.specular.contents = UIColor.black
+        material.shininess = 0
+
+        planeNode.geometry = geometry
+        scene.rootNode.addChildNode(planeNode)
+
+        let cursorGeometry = SCNSphere(radius: 0.011)
+        cursorGeometry.segmentCount = 12
+        let cursorMaterial = SCNMaterial()
+        cursorMaterial.lightingModel = .constant
+        cursorMaterial.isDoubleSided = true
+        cursorMaterial.diffuse.contents = UIColor.white
+        cursorMaterial.emission.contents = UIColor.white
+        cursorGeometry.firstMaterial = cursorMaterial
+        cursorNode.geometry = cursorGeometry
+        cursorNode.isHidden = true
+        scene.rootNode.addChildNode(cursorNode)
     }
 
     private func wireServices() {
-        eyeLeft.webView.navigationDelegate = self
-        eyeRight.webView.navigationDelegate = self
-        eyeLeft.webView.uiDelegate = self
-        eyeRight.webView.uiDelegate = self
-        input.mirror = [eyeLeft.webView, eyeRight.webView]
+        browser.navigationDelegate = self
+        browser.uiDelegate = self
 
         tracking.onFrame = { [weak self] pixelBuffer, orientation in
             self?.hands.process(pixelBuffer: pixelBuffer, orientation: orientation)
         }
 
-        tracking.onPose = { [weak self] cameraTransform in
+        tracking.onCamera = { [weak self] frame in
             DispatchQueue.main.async {
-                self?.ensureBrowserAnchor(using: cameraTransform)
+                self?.updateEyeCameras(using: frame)
+                self?.ensureBrowserAnchor(using: frame.camera.transform)
             }
         }
 
@@ -156,7 +292,8 @@ final class MainViewController: UIViewController {
                 guard let self, self.inAR else { return }
                 guard self.browserAnchor?.identifier == anchor.identifier else { return }
                 self.browserAnchor = anchor
-                self.reprojectBrowser()
+                self.browserWorldTransform = anchor.transform
+                self.applyBrowserWorldTransform()
             }
         }
 
@@ -171,6 +308,10 @@ final class MainViewController: UIViewController {
             DispatchQueue.main.async {
                 self?.handleHands(left: left, right: right)
             }
+        }
+
+        browserTimer = Timer.scheduledTimer(withTimeInterval: 0.20, repeats: true) { [weak self] _ in
+            self?.updateBrowserSnapshot()
         }
     }
 
@@ -188,7 +329,11 @@ final class MainViewController: UIViewController {
             AVCaptureDevice.requestAccess(for: .video) { [weak self] allowed in
                 DispatchQueue.main.async {
                     guard let self else { return }
-                    allowed ? self.enterAR() : self.showAlert("Нужен доступ к задней камере для AR.")
+                    if allowed {
+                        self.enterAR()
+                    } else {
+                        self.showAlert("Нужен доступ к задней камере для AR.")
+                    }
                 }
             }
         case .denied, .restricted:
@@ -200,31 +345,30 @@ final class MainViewController: UIViewController {
 
     private func enterAR() {
         guard !inAR else { return }
-
         inAR = true
-        didRequestInitialAnchor = false
         lastCenterGestureTime = 0
+        didCreateInitialAnchor = false
+        browserAnchor = nil
+        browserWorldTransform = nil
 
-        setNeedsUpdateOfSupportedInterfaceOrientations()
         requestLandscapeMode()
+        setARVisible(true)
 
-        eyeLeft.isHidden = false
-        eyeRight.isHidden = false
-        arView.isHidden = false
-        menu.isHidden = true
-        menu.isUserInteractionEnabled = false
-        cursorLeft.isHidden = true
-        cursorRight.isHidden = true
+        tracking.setInterfaceOrientation(currentInterfaceOrientation())
+        tracking.start()
 
-        eyeLeft.load(url: Self.homeURL)
-        eyeRight.load(url: Self.homeURL)
+        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+    }
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { [weak self] in
-            guard let self, self.inAR else { return }
-            self.tracking.setInterfaceOrientation(self.currentInterfaceOrientation())
-            self.tracking.start()
-            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-        }
+    private func setARVisible(_ visible: Bool) {
+        arSceneView.isHidden = !visible
+        leftEyeView.isHidden = !visible
+        rightEyeView.isHidden = !visible
+        browser.isHidden = false
+        menu.isHidden = visible
+        menu.isUserInteractionEnabled = !visible
+        leftCursorNode.isHidden = true
+        rightCursorNode.isHidden = true
     }
 
     private func leaveARToMenu() {
@@ -233,21 +377,14 @@ final class MainViewController: UIViewController {
         if let anchor = browserAnchor {
             tracking.remove(anchor: anchor)
         }
+
         browserAnchor = nil
-        browserAnchorEntity?.removeFromParent()
-        browserAnchorEntity = nil
-        didRequestInitialAnchor = false
+        browserWorldTransform = nil
+        didCreateInitialAnchor = false
         inAR = false
 
-        arView.isHidden = true
-        eyeLeft.isHidden = true
-        eyeRight.isHidden = true
-        cursorLeft.isHidden = true
-        cursorRight.isHidden = true
-
-        menu.isHidden = false
-        menu.isUserInteractionEnabled = true
-        setNeedsUpdateOfSupportedInterfaceOrientations()
+        setARVisible(false)
+        requestLandscapeMode()
     }
 
     private func requestLandscapeMode() {
@@ -259,114 +396,104 @@ final class MainViewController: UIViewController {
     }
 
     private func ensureBrowserAnchor(using cameraTransform: simd_float4x4) {
-        guard inAR, !didRequestInitialAnchor else { return }
-        guard view.bounds.width > view.bounds.height else { return }
+        guard inAR, !didCreateInitialAnchor else { return }
+        guard view.bounds.width > view.bounds.height, view.bounds.width > 100 else { return }
 
-        didRequestInitialAnchor = true
-
-        let cameraPosition = SIMD3<Float>(
+        let position = SIMD3<Float>(
             cameraTransform.columns.3.x,
             cameraTransform.columns.3.y,
             cameraTransform.columns.3.z
         )
-
         let forward = simd_normalize(SIMD3<Float>(
             -cameraTransform.columns.2.x,
             -cameraTransform.columns.2.y,
             -cameraTransform.columns.2.z
         ))
 
-        var anchorTransform = cameraTransform
-        anchorTransform.columns.3 = SIMD4<Float>(
-            cameraPosition + forward * browserWorldDistance,
-            1
-        )
+        var transform = cameraTransform
+        transform.columns.3 = SIMD4<Float>(position + forward * browserWorldDistance, 1)
 
         let anchor = ARAnchor(
-            name: "HandAR_Browser_WorldAnchor",
-            transform: anchorTransform
+            name: "HandAR_Stereo_Browser",
+            transform: transform
         )
 
         browserAnchor = anchor
+        browserWorldTransform = transform
+        didCreateInitialAnchor = true
         tracking.add(anchor: anchor)
-
-        // RealityKit uses the same ARAnchor, so the spatial object has a real world-space anchor.
-        let anchorEntity = AnchorEntity(anchor: anchor)
-        browserAnchorEntity = anchorEntity
-        arView.scene.addAnchor(anchorEntity)
-
-        reprojectBrowser()
+        applyBrowserWorldTransform()
     }
 
-    private func reprojectBrowser() {
-        guard
-            inAR,
-            let anchor = browserAnchor,
-            view.bounds.width > view.bounds.height,
-            view.bounds.width > 2
-        else { return }
+    private func applyBrowserWorldTransform() {
+        guard let transform = browserWorldTransform else { return }
+        leftPlaneNode.simdWorldTransform = transform
+        rightPlaneNode.simdWorldTransform = transform
+    }
 
-        let transform = anchor.transform
+    private func updateEyeCameras(using frame: ARFrame? = nil) {
+        guard let frame = frame ?? tracking.latestFrameCopy else { return }
+        guard view.bounds.width > 100, view.bounds.height > 100 else { return }
+
+        let orientation = currentInterfaceOrientation()
+        let fullWidth = view.bounds.width
+        let halfWidth = max(fullWidth * 0.5, 1)
+        let eyeSize = CGSize(width: halfWidth, height: view.bounds.height)
+
+        var leftTransform = frame.camera.transform
+        var rightTransform = frame.camera.transform
+
+        let rightAxis = simd_normalize(SIMD3<Float>(
+            frame.camera.transform.columns.0.x,
+            frame.camera.transform.columns.0.y,
+            frame.camera.transform.columns.0.z
+        ))
         let center = SIMD3<Float>(
-            transform.columns.3.x,
-            transform.columns.3.y,
-            transform.columns.3.z
+            frame.camera.transform.columns.3.x,
+            frame.camera.transform.columns.3.y,
+            frame.camera.transform.columns.3.z
         )
-        let right = simd_normalize(SIMD3<Float>(
-            transform.columns.0.x,
-            transform.columns.0.y,
-            transform.columns.0.z
-        ))
-        let up = simd_normalize(SIMD3<Float>(
-            transform.columns.1.x,
-            transform.columns.1.y,
-            transform.columns.1.z
-        ))
 
-        let halfW = browserWorldWidth * 0.5
-        let halfH = browserWorldHeight * 0.5
-        let tl = center - right * halfW + up * halfH
-        let tr = center + right * halfW + up * halfH
-        let bl = center - right * halfW - up * halfH
-        let br = center + right * halfW - up * halfH
+        leftTransform.columns.3 = SIMD4<Float>(center - rightAxis * (eyeSeparation * 0.5), 1)
+        rightTransform.columns.3 = SIMD4<Float>(center + rightAxis * (eyeSeparation * 0.5), 1)
 
-        let halfScreen = view.bounds.width * 0.5
-        projectEye(
-            eye: eyeLeft,
-            points: (tl, tr, bl, br),
-            eyeOffset: +eyeSeparation * 0.5,
-            originX: 0
+        leftCameraNode.simdWorldTransform = leftTransform
+        rightCameraNode.simdWorldTransform = rightTransform
+
+        let leftProjection = frame.camera.projectionMatrix(
+            for: orientation,
+            viewportSize: eyeSize,
+            zNear: 0.01,
+            zFar: 100
         )
-        projectEye(
-            eye: eyeRight,
-            points: (tl, tr, bl, br),
-            eyeOffset: -eyeSeparation * 0.5,
-            originX: halfScreen
+        let rightProjection = frame.camera.projectionMatrix(
+            for: orientation,
+            viewportSize: eyeSize,
+            zNear: 0.01,
+            zFar: 100
         )
+
+        leftCameraNode.camera?.projectionTransform = SCNMatrix4FromMat4(leftProjection)
+        rightCameraNode.camera?.projectionTransform = SCNMatrix4FromMat4(rightProjection)
     }
 
-    private func projectEye(
-        eye: EyeDisplayView,
-        points: (SIMD3<Float>, SIMD3<Float>, SIMD3<Float>, SIMD3<Float>),
-        eyeOffset: Float,
-        originX: CGFloat
-    ) {
-        let viewport = view.bounds.size
-        guard viewport.width > 20, viewport.height > 20 else { return }
+    private func updateBrowserSnapshot() {
+        guard inAR, !snapshotInProgress else { return }
+        snapshotInProgress = true
 
-        guard
-            let p0 = tracking.projectWorldPoint(points.0, viewportSize: viewport, eyeOffset: eyeOffset),
-            let p1 = tracking.projectWorldPoint(points.1, viewportSize: viewport, eyeOffset: eyeOffset),
-            let p2 = tracking.projectWorldPoint(points.2, viewportSize: viewport, eyeOffset: eyeOffset),
-            let p3 = tracking.projectWorldPoint(points.3, viewportSize: viewport, eyeOffset: eyeOffset)
-        else { return }
+        let configuration = WKSnapshotConfiguration()
+        browser.takeSnapshot(with: configuration) { [weak self] image, _ in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.snapshotInProgress = false
+                guard let image else { return }
 
-        eye.setProjectedQuad(
-            topLeft: CGPoint(x: p0.x - originX, y: p0.y),
-            topRight: CGPoint(x: p1.x - originX, y: p1.y),
-            bottomLeft: CGPoint(x: p2.x - originX, y: p2.y),
-            bottomRight: CGPoint(x: p3.x - originX, y: p3.y)
-        )
+                self.leftMaterial.diffuse.contents = image
+                self.leftMaterial.emission.contents = image
+                self.rightMaterial.diffuse.contents = image
+                self.rightMaterial.emission.contents = image
+            }
+        }
     }
 
     private func handleHands(left: HandSample?, right: HandSample?) {
@@ -376,66 +503,135 @@ final class MainViewController: UIViewController {
             let now = CACurrentMediaTime()
             if now - lastCenterGestureTime > 1.0 {
                 lastCenterGestureTime = now
-                if let anchor = browserAnchor {
-                    tracking.remove(anchor: anchor)
-                }
-                browserAnchor = nil
-                browserAnchorEntity?.removeFromParent()
-                browserAnchorEntity = nil
-                didRequestInitialAnchor = false
+                resetBrowserAnchor()
                 UIImpactFeedbackGenerator(style: .light).impactOccurred()
             }
-            releasePointers()
-            cursorLeft.isHidden = true
-            cursorRight.isHidden = true
+            releasePointer()
+            hideCursor()
             return
         }
 
         guard let sample = right ?? left else {
-            releasePointers()
-            cursorLeft.isHidden = true
-            cursorRight.isHidden = true
+            releasePointer()
+            hideCursor()
             return
         }
 
-        guard let screenPoint = tracking.screenPoint(
+        guard let fullPoint = tracking.screenPoint(
             forVisionPoint: CGPoint(x: sample.indexTip.x, y: 1 - sample.indexTip.y),
             viewportSize: view.bounds.size
         ) else {
-            releasePointers()
-            cursorLeft.isHidden = true
-            cursorRight.isHidden = true
+            releasePointer()
+            hideCursor()
             return
         }
 
-        let activeEye = screenPoint.x < view.bounds.midX ? eyeLeft : eyeRight
-        let localPoint = activeEye.convert(screenPoint, from: view)
-
-        guard let normalized = activeEye.normalizedPoint(fromEyePoint: localPoint) else {
-            releasePointers()
-            cursorLeft.isHidden = true
-            cursorRight.isHidden = true
+        guard let worldPoint = tracking.worldPointOnBrowser(
+            screenPoint: fullPoint,
+            viewportSize: view.bounds.size,
+            planeTransform: browserPlaneForUnprojection()
+        ) else {
+            releasePointer()
+            hideCursor()
             return
         }
 
-        cursorLeft.isHidden = false
-        cursorRight.isHidden = false
-        cursorLeft.center = eyeLeft.eyePoint(fromNormalized: normalized)
-        cursorRight.center = eyeRight.eyePoint(fromNormalized: normalized)
-        cursorLeft.setPressed(sample.isPinching)
-        cursorRight.setPressed(sample.isPinching)
+        guard let transform = browserWorldTransform else {
+            releasePointer()
+            hideCursor()
+            return
+        }
 
-        input.updateBoth(
-            normalizedPoint: normalized,
+        let center = SIMD3<Float>(
+            transform.columns.3.x,
+            transform.columns.3.y,
+            transform.columns.3.z
+        )
+        let rightAxis = simd_normalize(SIMD3<Float>(
+            transform.columns.0.x,
+            transform.columns.0.y,
+            transform.columns.0.z
+        ))
+        let upAxis = simd_normalize(SIMD3<Float>(
+            transform.columns.1.x,
+            transform.columns.1.y,
+            transform.columns.1.z
+        ))
+
+        let delta = worldPoint - center
+        let localX = simd_dot(delta, rightAxis)
+        let localY = simd_dot(delta, upAxis)
+        let normalizedX = localX / browserWorldWidth + 0.5
+        let normalizedY = 0.5 - localY / browserWorldHeight
+
+        guard normalizedX >= 0, normalizedX <= 1, normalizedY >= 0, normalizedY <= 1 else {
+            releasePointer()
+            hideCursor()
+            return
+        }
+
+        leftCursorNode.simdPosition = worldPoint
+        rightCursorNode.simdPosition = worldPoint
+        leftCursorNode.isHidden = false
+        rightCursorNode.isHidden = false
+
+        input.update(
+            normalizedPoint: CGPoint(x: normalizedX, y: normalizedY),
             pinch: sample.isPinching,
-            left: eyeLeft.webView,
-            right: eyeRight.webView
+            webView: browser
         )
     }
 
-    private func releasePointers() {
-        input.release(pointerID: 1, webView: eyeLeft.webView)
-        input.release(pointerID: 2, webView: eyeRight.webView)
+    private func browserPlaneForUnprojection() -> simd_float4x4? {
+        guard let transform = browserWorldTransform else { return nil }
+
+        let right = SIMD3<Float>(
+            transform.columns.0.x,
+            transform.columns.0.y,
+            transform.columns.0.z
+        )
+        let up = SIMD3<Float>(
+            transform.columns.1.x,
+            transform.columns.1.y,
+            transform.columns.1.z
+        )
+        let normal = SIMD3<Float>(
+            transform.columns.2.x,
+            transform.columns.2.y,
+            transform.columns.2.z
+        )
+        let center = SIMD3<Float>(
+            transform.columns.3.x,
+            transform.columns.3.y,
+            transform.columns.3.z
+        )
+
+        // ARCamera.unprojectPoint uses the local XZ plane, whose local Y is its normal.
+        var result = matrix_identity_float4x4
+        result.columns.0 = SIMD4<Float>(right, 0)
+        result.columns.1 = SIMD4<Float>(normal, 0)
+        result.columns.2 = SIMD4<Float>(up, 0)
+        result.columns.3 = SIMD4<Float>(center, 1)
+        return result
+    }
+
+    private func resetBrowserAnchor() {
+        if let anchor = browserAnchor {
+            tracking.remove(anchor: anchor)
+        }
+
+        browserAnchor = nil
+        browserWorldTransform = nil
+        didCreateInitialAnchor = false
+    }
+
+    private func hideCursor() {
+        leftCursorNode.isHidden = true
+        rightCursorNode.isHidden = true
+    }
+
+    private func releasePointer() {
+        input.release(webView: browser)
     }
 
     private func showAlert(_ message: String) {
@@ -452,21 +648,7 @@ final class MainViewController: UIViewController {
 
 extension MainViewController: WKNavigationDelegate, WKUIDelegate {
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        guard let url = webView.url else { return }
-        let other = webView === eyeLeft.webView ? eyeRight.webView : eyeLeft.webView
-        if other.url?.absoluteString != url.absoluteString {
-            other.load(URLRequest(url: url))
-        }
-    }
-
-    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {}
-
-    func webView(
-        _ webView: WKWebView,
-        decidePolicyFor navigationAction: WKNavigationAction,
-        decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
-    ) {
-        decisionHandler(.allow)
+        updateBrowserSnapshot()
     }
 
     func webView(
@@ -480,17 +662,23 @@ extension MainViewController: WKNavigationDelegate, WKUIDelegate {
     }
 }
 
-final class ARTrackingManager: NSObject, ARSessionDelegate {
+final class ARStereoTrackingManager: NSObject, ARSessionDelegate {
     let session = ARSession()
 
-    private var latestFrame: ARFrame?
     private let frameLock = NSLock()
+    private var latestFrame: ARFrame?
     private var interfaceOrientation: UIInterfaceOrientation = .landscapeRight
 
     var onFrame: ((CVPixelBuffer, CGImagePropertyOrientation) -> Void)?
-    var onPose: ((simd_float4x4) -> Void)?
+    var onCamera: ((ARFrame) -> Void)?
     var onAnchorUpdate: ((ARAnchor) -> Void)?
     var onFailure: ((String) -> Void)?
+
+    var latestFrameCopy: ARFrame? {
+        frameLock.lock()
+        defer { frameLock.unlock() }
+        return latestFrame
+    }
 
     func setInterfaceOrientation(_ orientation: UIInterfaceOrientation) {
         interfaceOrientation = orientation
@@ -526,59 +714,57 @@ final class ARTrackingManager: NSObject, ARSessionDelegate {
         frameLock.unlock()
     }
 
-    func add(anchor: ARAnchor) { session.add(anchor: anchor) }
-    func remove(anchor: ARAnchor) { session.remove(anchor: anchor) }
+    func add(anchor: ARAnchor) {
+        session.add(anchor: anchor)
+    }
 
-    func projectWorldPoint(
-        _ worldPoint: SIMD3<Float>,
-        viewportSize: CGSize,
-        eyeOffset: Float
-    ) -> CGPoint? {
-        frameLock.lock()
-        let frame = latestFrame
-        let orientation = interfaceOrientation
-        frameLock.unlock()
-
-        guard let frame else { return nil }
-
-        let cameraTransform = frame.camera.transform
-        let cameraRight = simd_normalize(SIMD3<Float>(
-            cameraTransform.columns.0.x,
-            cameraTransform.columns.0.y,
-            cameraTransform.columns.0.z
-        ))
-        let adjusted = worldPoint + cameraRight * eyeOffset
-
-        let projected = frame.camera.projectPoint(
-            adjusted,
-            orientation: orientation,
-            viewportSize: viewportSize
-        )
-
-        guard projected.x.isFinite, projected.y.isFinite else { return nil }
-        return projected
+    func remove(anchor: ARAnchor) {
+        session.remove(anchor: anchor)
     }
 
     func screenPoint(
         forVisionPoint point: CGPoint,
         viewportSize: CGSize
     ) -> CGPoint? {
-        frameLock.lock()
-        let frame = latestFrame
-        let orientation = interfaceOrientation
-        frameLock.unlock()
-        guard let frame else { return nil }
-
+        guard let frame = latestFrameCopy else { return nil }
         let mapped = point.applying(
             frame.displayTransform(
-                for: orientation,
+                for: interfaceOrientation,
                 viewportSize: viewportSize
             )
         )
-
-        return CGPoint(
+        let result = CGPoint(
             x: mapped.x * viewportSize.width,
             y: mapped.y * viewportSize.height
+        )
+        guard result.x.isFinite, result.y.isFinite else { return nil }
+        return result
+    }
+
+    func worldPointOnBrowser(
+        screenPoint: CGPoint,
+        viewportSize: CGSize,
+        planeTransform: simd_float4x4?
+    ) -> SIMD3<Float>? {
+        guard let frame = latestFrameCopy, let planeTransform else { return nil }
+        let halfWidth = viewportSize.width * 0.5
+        guard halfWidth > 1 else { return nil }
+
+        let localPoint: CGPoint
+        let eyeViewport: CGSize
+        if screenPoint.x < halfWidth {
+            localPoint = CGPoint(x: screenPoint.x, y: screenPoint.y)
+            eyeViewport = CGSize(width: halfWidth, height: viewportSize.height)
+        } else {
+            localPoint = CGPoint(x: screenPoint.x - halfWidth, y: screenPoint.y)
+            eyeViewport = CGSize(width: halfWidth, height: viewportSize.height)
+        }
+
+        return frame.camera.unprojectPoint(
+            localPoint,
+            ontoPlane: planeTransform,
+            orientation: interfaceOrientation,
+            viewportSize: eyeViewport
         )
     }
 
@@ -589,13 +775,11 @@ final class ARTrackingManager: NSObject, ARSessionDelegate {
 
         let orientation = imageOrientation(for: interfaceOrientation)
         onFrame?(frame.capturedImage, orientation)
-        onPose?(frame.camera.transform)
+        onCamera?(frame)
     }
 
     func session(_ session: ARSession, didUpdate anchors: [ARAnchor]) {
-        for anchor in anchors {
-            onAnchorUpdate?(anchor)
-        }
+        anchors.forEach { onAnchorUpdate?($0) }
     }
 
     func session(_ session: ARSession, didFailWithError error: Error) {
@@ -604,33 +788,31 @@ final class ARTrackingManager: NSObject, ARSessionDelegate {
 
     private func imageOrientation(for orientation: UIInterfaceOrientation) -> CGImagePropertyOrientation {
         switch orientation {
-        case .portrait: return .right
-        case .portraitUpsideDown: return .left
-        case .landscapeLeft: return .down
-        case .landscapeRight: return .up
-        default: return .right
+        case .portrait:
+            return .right
+        case .portraitUpsideDown:
+            return .left
+        case .landscapeLeft:
+            return .down
+        case .landscapeRight:
+            return .up
+        default:
+            return .up
         }
     }
 }
-
 
 final class HandTracker {
     private let request: VNDetectHumanHandPoseRequest = {
         let request = VNDetectHumanHandPoseRequest()
         request.maximumHandCount = 2
-
         if let latest = VNDetectHumanHandPoseRequest.supportedRevisions.max() {
             request.revision = latest
         }
-
         return request
     }()
 
-    private let queue = DispatchQueue(
-        label: "handar.vision",
-        qos: .userInitiated
-    )
-
+    private let queue = DispatchQueue(label: "handar.vision", qos: .userInitiated)
     private let gate = DispatchSemaphore(value: 1)
 
     private var lastIndexLeft: CGPoint?
@@ -671,92 +853,42 @@ final class HandTracker {
                         let index = try? observation.recognizedPoint(.indexTip),
                         let thumb = try? observation.recognizedPoint(.thumbTip),
                         let wrist = try? observation.recognizedPoint(.wrist),
-                        let middleMCP = try? observation.recognizedPoint(.middleMCP),
-                        index.confidence > 0.62,
-                        thumb.confidence > 0.58,
-                        wrist.confidence > 0.45,
-                        middleMCP.confidence > 0.45
+                        let middle = try? observation.recognizedPoint(.middleMCP),
+                        index.confidence > 0.68,
+                        thumb.confidence > 0.62,
+                        wrist.confidence > 0.48,
+                        middle.confidence > 0.48
                     else {
                         continue
                     }
 
                     let isLeft = observation.chirality == .left
+                    let oldIndex = isLeft ? self.lastIndexLeft : self.lastIndexRight
+                    let oldThumb = isLeft ? self.lastThumbLeft : self.lastThumbRight
 
-                    let previousIndex = isLeft
-                        ? self.lastIndexLeft
-                        : self.lastIndexRight
+                    let indexAlpha = adaptiveAlpha(previous: oldIndex, current: index.location)
+                    let thumbAlpha = adaptiveAlpha(previous: oldThumb, current: thumb.location)
 
-                    let previousThumb = isLeft
-                        ? self.lastThumbLeft
-                        : self.lastThumbRight
+                    let filteredIndex = smooth(oldIndex, index.location, alpha: indexAlpha)
+                    let filteredThumb = smooth(oldThumb, thumb.location, alpha: thumbAlpha)
 
-                    let indexAlpha = adaptiveAlpha(
-                        previous: previousIndex,
-                        current: index.location
-                    )
-
-                    let thumbAlpha = adaptiveAlpha(
-                        previous: previousThumb,
-                        current: thumb.location
-                    )
-
-                    let filteredIndex = smooth(
-                        previousIndex,
-                        index.location,
-                        alpha: indexAlpha
-                    )
-
-                    let filteredThumb = smooth(
-                        previousThumb,
-                        thumb.location,
-                        alpha: thumbAlpha
-                    )
+                    let palmSize = max(distance(wrist.location, middle.location), 0.03)
+                    let ratio = distance(filteredIndex, filteredThumb) / palmSize
+                    let wasPinching = isLeft ? self.pinchLeft : self.pinchRight
+                    let pinching = pinchHysteresis(previous: wasPinching, ratio: ratio)
 
                     if isLeft {
                         self.lastIndexLeft = filteredIndex
                         self.lastThumbLeft = filteredThumb
+                        self.pinchLeft = pinching
                         foundLeft = true
+                        left = HandSample(indexTip: filteredIndex, thumbTip: filteredThumb, isPinching: pinching)
                     } else {
                         self.lastIndexRight = filteredIndex
                         self.lastThumbRight = filteredThumb
-                        foundRight = true
-                    }
-
-                    let palmSize = max(
-                        distance(wrist.location, middleMCP.location),
-                        0.03
-                    )
-
-                    let pinchRatio = distance(
-                        filteredIndex,
-                        filteredThumb
-                    ) / palmSize
-
-                    let wasPinching = isLeft
-                        ? self.pinchLeft
-                        : self.pinchRight
-
-                    let pinching = pinchHysteresis(
-                        previous: wasPinching,
-                        ratio: pinchRatio
-                    )
-
-                    if isLeft {
-                        self.pinchLeft = pinching
-                    } else {
                         self.pinchRight = pinching
-                    }
-
-                    let sample = HandSample(
-                        indexTip: filteredIndex,
-                        thumbTip: filteredThumb,
-                        isPinching: pinching
-                    )
-
-                    if isLeft {
-                        left = sample
-                    } else {
-                        right = sample
+                        foundRight = true
+                        right = HandSample(indexTip: filteredIndex, thumbTip: filteredThumb, isPinching: pinching)
                     }
                 }
 
@@ -765,7 +897,6 @@ final class HandTracker {
                     self.lastThumbLeft = nil
                     self.pinchLeft = false
                 }
-
                 if !foundRight {
                     self.lastIndexRight = nil
                     self.lastThumbRight = nil
@@ -781,13 +912,8 @@ final class HandTracker {
 }
 
 @inline(__always)
-private func smooth(
-    _ old: CGPoint?,
-    _ new: CGPoint,
-    alpha: CGFloat
-) -> CGPoint {
+private func smooth(_ old: CGPoint?, _ new: CGPoint, alpha: CGFloat) -> CGPoint {
     guard let old else { return new }
-
     return CGPoint(
         x: old.x + (new.x - old.x) * alpha,
         y: old.y + (new.y - old.y) * alpha
@@ -795,301 +921,71 @@ private func smooth(
 }
 
 @inline(__always)
-private func adaptiveAlpha(
-    previous: CGPoint?,
-    current: CGPoint
-) -> CGFloat {
+private func adaptiveAlpha(previous: CGPoint?, current: CGPoint) -> CGFloat {
     guard let previous else { return 1.0 }
-
     let jump = min(distance(previous, current), 0.30)
-
-    // Low movement -> stable cursor. Fast movement -> lower latency.
-    return min(
-        0.82,
-        max(
-            0.20,
-            0.20 + jump * 2.0
-        )
-    )
+    return min(0.84, max(0.22, 0.22 + jump * 2.1))
 }
 
 @inline(__always)
-private func pinchHysteresis(
-    previous: Bool,
-    ratio: CGFloat
-) -> Bool {
-    if previous {
-        return ratio < 0.60
-    }
-
-    return ratio < 0.44
+private func pinchHysteresis(previous: Bool, ratio: CGFloat) -> Bool {
+    if previous { return ratio < 0.60 }
+    return ratio < 0.43
 }
 
 @inline(__always)
-private func distance(
-    _ a: CGPoint,
-    _ b: CGPoint
-) -> CGFloat {
+private func distance(_ a: CGPoint, _ b: CGPoint) -> CGFloat {
     hypot(a.x - b.x, a.y - b.y)
 }
 
-
 final class WebInputBridge {
-    private struct State {
-        var last: CGPoint?
-        var down = false
-    }
+    private var lastPoint: CGPoint?
+    private var pointerDown = false
 
-    private var states: [Int: State] = [:]
-    var mirror: [WKWebView] = []
+    func update(normalizedPoint: CGPoint, pinch: Bool, webView: WKWebView) {
+        let x = normalizedPoint.x * webView.bounds.width
+        let y = normalizedPoint.y * webView.bounds.height
+        let current = CGPoint(x: x, y: y)
+        let previous = lastPoint ?? current
+        let deltaY = current.y - previous.y
 
-    func updateBoth(
-        normalizedPoint: CGPoint,
-        pinch: Bool,
-        left: WKWebView,
-        right: WKWebView
-    ) {
-        update(pointerID: 1, point: normalizedPoint, pinch: pinch, webView: left)
-        update(pointerID: 2, point: normalizedPoint, pinch: pinch, webView: right)
-    }
-
-    private func update(
-        pointerID: Int,
-        point: CGPoint,
-        pinch: Bool,
-        webView: WKWebView
-    ) {
-        var state = states[pointerID] ?? State()
-        let current = CGPoint(
-            x: point.x * webView.bounds.width,
-            y: point.y * webView.bounds.height
-        )
-        let deltaY = current.y - (state.last?.y ?? current.y)
-
-        if pinch && !state.down {
-            state.down = true
-            dispatch("window.__handarPointerDown(\(current.x),\(current.y),\(pointerID));", to: webView)
-        } else if pinch && state.down {
+        if pinch && !pointerDown {
+            pointerDown = true
+            dispatch("window.__handarPointerDown(\(x),\(y),1);", to: webView)
+        } else if pinch && pointerDown {
             if abs(deltaY) > 0.75 {
                 let amount = String(
                     format: "%.2f",
                     locale: Locale(identifier: "en_US_POSIX"),
-                    deltaY * 2.4
+                    deltaY * 2.6
                 )
                 dispatch("window.scrollBy(0,\(amount));", to: webView)
             }
-            dispatch("window.__handarPointerMove(\(current.x),\(current.y),\(pointerID));", to: webView)
-        } else if !pinch && state.down {
-            state.down = false
-            dispatch("window.__handarPointerUp(\(current.x),\(current.y),\(pointerID));", to: webView)
+            dispatch("window.__handarPointerMove(\(x),\(y),1);", to: webView)
+        } else if !pinch && pointerDown {
+            pointerDown = false
+            dispatch("window.__handarPointerUp(\(x),\(y),1);", to: webView)
         } else {
-            dispatch("window.__handarHover(\(current.x),\(current.y));", to: webView)
+            dispatch("window.__handarHover(\(x),\(y));", to: webView)
         }
 
-        state.last = current
-        states[pointerID] = state
+        lastPoint = current
     }
 
-    func release(pointerID: Int, webView: WKWebView) {
-        guard var state = states[pointerID] else { return }
-        if state.down {
-            state.down = false
-            dispatch(
-                "window.__handarPointerUp(window.innerWidth/2,window.innerHeight/2,\(pointerID));",
-                to: webView
-            )
+    func release(webView: WKWebView) {
+        guard pointerDown else {
+            lastPoint = nil
+            return
         }
-        state.last = nil
-        states[pointerID] = state
+        pointerDown = false
+        dispatch("window.__handarPointerUp(window.innerWidth/2,window.innerHeight/2,1);", to: webView)
+        lastPoint = nil
     }
 
     private func dispatch(_ script: String, to webView: WKWebView) {
         webView.evaluateJavaScript(script, completionHandler: nil)
     }
 }
-
-final class EyeDisplayView: UIView {
-    let webView: WKWebView
-
-    private let screen = UIView()
-    private let glass = UIVisualEffectView(
-        effect: UIBlurEffect(style: .systemUltraThinMaterialDark)
-    )
-
-    override init(frame: CGRect = .zero) {
-        let config = WKWebViewConfiguration()
-        config.defaultWebpagePreferences.allowsContentJavaScript = true
-        config.allowsInlineMediaPlayback = true
-        config.mediaTypesRequiringUserActionForPlayback = []
-
-        let controller = WKUserContentController()
-        if let path = Bundle.main.path(forResource: "WebInput", ofType: "js"),
-           let js = try? String(contentsOfFile: path, encoding: .utf8) {
-            controller.addUserScript(
-                WKUserScript(
-                    source: js,
-                    injectionTime: .atDocumentStart,
-                    forMainFrameOnly: false
-                )
-            )
-        }
-        config.userContentController = controller
-
-        webView = WKWebView(frame: .zero, configuration: config)
-        super.init(frame: frame)
-
-        backgroundColor = .clear
-        clipsToBounds = false
-        isUserInteractionEnabled = false
-
-        // Each eye receives its own rectangular spatial display.
-        screen.backgroundColor = UIColor(white: 0.02, alpha: 0.10)
-        screen.layer.cornerRadius = 18
-        screen.layer.cornerCurve = .continuous
-        screen.layer.borderWidth = 0.8
-        screen.layer.borderColor = UIColor.white.withAlphaComponent(0.10).cgColor
-        screen.layer.shadowColor = UIColor.black.cgColor
-        screen.layer.shadowOpacity = 0.48
-        screen.layer.shadowRadius = 22
-        screen.layer.shadowOffset = CGSize(width: 0, height: 10)
-        addSubview(screen)
-
-        glass.isUserInteractionEnabled = false
-        glass.alpha = 0.10
-        glass.clipsToBounds = true
-        glass.layer.cornerRadius = 18
-        glass.layer.cornerCurve = .continuous
-        screen.addSubview(glass)
-
-        webView.isOpaque = false
-        webView.backgroundColor = .clear
-        webView.scrollView.backgroundColor = .clear
-        webView.scrollView.alwaysBounceVertical = true
-        webView.layer.cornerRadius = 17
-        webView.layer.cornerCurve = .continuous
-        webView.clipsToBounds = true
-        screen.addSubview(webView)
-    }
-
-    required init?(coder: NSCoder) {
-        fatalError("init(coder:) has not been implemented")
-    }
-
-    override func layoutSubviews() {
-        super.layoutSubviews()
-
-        let width = bounds.width * 0.92
-        let height = bounds.height * 0.70
-        let frame = CGRect(
-            x: (bounds.width - width) * 0.5,
-            y: (bounds.height - height) * 0.5,
-            width: width,
-            height: height
-        )
-
-        screen.bounds = CGRect(origin: .zero, size: frame.size)
-        screen.center = frame.midPoint
-        screen.transform = .identity
-        glass.frame = screen.bounds
-        webView.frame = screen.bounds.insetBy(dx: 1, dy: 1)
-    }
-
-    func load(url: URL) {
-        webView.load(URLRequest(url: url))
-    }
-
-    func setProjectedQuad(
-        topLeft: CGPoint,
-        topRight: CGPoint,
-        bottomLeft: CGPoint,
-        bottomRight: CGPoint
-    ) {
-        let baseWidth = max(screen.bounds.width, 1)
-        let baseHeight = max(screen.bounds.height, 1)
-
-        let h = CGPoint(
-            x: topRight.x - topLeft.x,
-            y: topRight.y - topLeft.y
-        )
-        let v = CGPoint(
-            x: bottomLeft.x - topLeft.x,
-            y: bottomLeft.y - topLeft.y
-        )
-
-        let a = h.x / baseWidth
-        let b = h.y / baseWidth
-        let c = v.x / baseHeight
-        let d = v.y / baseHeight
-
-        let center = CGPoint(
-            x: (topLeft.x + topRight.x + bottomLeft.x + bottomRight.x) * 0.25,
-            y: (topLeft.y + topRight.y + bottomLeft.y + bottomRight.y) * 0.25
-        )
-
-        guard center.x.isFinite, center.y.isFinite,
-              a.isFinite, b.isFinite, c.isFinite, d.isFinite else { return }
-
-        screen.center = center
-        screen.transform = CGAffineTransform(a: a, b: b, c: c, d: d, tx: 0, ty: 0)
-    }
-
-    func normalizedPoint(fromEyePoint point: CGPoint) -> CGPoint? {
-        let local = screen.convert(point, from: self)
-        guard screen.bounds.contains(local) else { return nil }
-        return CGPoint(
-            x: min(max(local.x / max(screen.bounds.width, 1), 0), 1),
-            y: min(max(local.y / max(screen.bounds.height, 1), 0), 1)
-        )
-    }
-
-    func eyePoint(fromNormalized point: CGPoint) -> CGPoint {
-        let local = CGPoint(
-            x: min(max(point.x, 0), 1) * screen.bounds.width,
-            y: min(max(point.y, 0), 1) * screen.bounds.height
-        )
-        return screen.convert(local, to: self)
-    }
-}
-
-final class CursorView: UIView {
-    private let dot = UIView()
-
-    override init(frame: CGRect) {
-        super.init(frame: frame)
-        backgroundColor = .clear
-        isUserInteractionEnabled = false
-
-        layer.borderWidth = 1.5
-        layer.borderColor = UIColor.white.withAlphaComponent(0.92).cgColor
-        layer.cornerRadius = 10
-
-        dot.backgroundColor = .white
-        dot.layer.cornerRadius = 2.5
-        addSubview(dot)
-    }
-
-    required init?(coder: NSCoder) {
-        fatalError("init(coder:) has not been implemented")
-    }
-
-    override func layoutSubviews() {
-        super.layoutSubviews()
-        dot.frame = CGRect(
-            x: bounds.midX - 2.5,
-            y: bounds.midY - 2.5,
-            width: 5,
-            height: 5
-        )
-    }
-
-    func setPressed(_ pressed: Bool) {
-        alpha = pressed ? 1 : 0.82
-        transform = pressed
-            ? CGAffineTransform(scaleX: 1.15, y: 1.15)
-            : .identity
-    }
-}
-
 
 final class MainMenuView: UIView {
     var onEnter: (() -> Void)?
@@ -1100,58 +996,29 @@ final class MainMenuView: UIView {
 
     override init(frame: CGRect) {
         super.init(frame: frame)
-
         backgroundColor = .black
 
         titleLabel.text = "HandAR Vision"
         titleLabel.textColor = .white
-        titleLabel.font = .systemFont(
-            ofSize: 34,
-            weight: .medium
-        )
+        titleLabel.font = .systemFont(ofSize: 34, weight: .medium)
         titleLabel.textAlignment = .center
         addSubview(titleLabel)
 
-        subtitleLabel.text = "Spatial browser"
+        subtitleLabel.text = "AR browser"
         subtitleLabel.textColor = UIColor.white.withAlphaComponent(0.58)
-        subtitleLabel.font = .systemFont(
-            ofSize: 15,
-            weight: .regular
-        )
+        subtitleLabel.font = .systemFont(ofSize: 15, weight: .regular)
         subtitleLabel.textAlignment = .center
         addSubview(subtitleLabel)
 
         var config = UIButton.Configuration.filled()
         config.title = "ВОЙТИ В AR"
         config.baseForegroundColor = .white
-        config.baseBackgroundColor = UIColor(
-            white: 0.16,
-            alpha: 1
-        )
+        config.baseBackgroundColor = UIColor(white: 0.16, alpha: 1)
         config.cornerStyle = .capsule
-        config.contentInsets = NSDirectionalEdgeInsets(
-            top: 0,
-            leading: 34,
-            bottom: 0,
-            trailing: 34
-        )
-
+        config.contentInsets = NSDirectionalEdgeInsets(top: 0, leading: 34, bottom: 0, trailing: 34)
         enterButton.configuration = config
-        enterButton.titleLabel?.font = .systemFont(
-            ofSize: 18,
-            weight: .semibold
-        )
-
-        enterButton.layer.borderWidth = 1
-        enterButton.layer.borderColor = UIColor.white.withAlphaComponent(0.15).cgColor
-
-        enterButton.addAction(
-            UIAction { [weak self] _ in
-                self?.onEnter?()
-            },
-            for: .touchUpInside
-        )
-
+        enterButton.titleLabel?.font = .systemFont(ofSize: 18, weight: .semibold)
+        enterButton.addAction(UIAction { [weak self] _ in self?.onEnter?() }, for: .touchUpInside)
         addSubview(enterButton)
     }
 
@@ -1161,35 +1028,8 @@ final class MainMenuView: UIView {
 
     override func layoutSubviews() {
         super.layoutSubviews()
-
-        titleLabel.frame = CGRect(
-            x: 24,
-            y: bounds.midY - 110,
-            width: bounds.width - 48,
-            height: 48
-        )
-
-        subtitleLabel.frame = CGRect(
-            x: 24,
-            y: bounds.midY - 60,
-            width: bounds.width - 48,
-            height: 24
-        )
-
-        enterButton.frame = CGRect(
-            x: bounds.midX - 145,
-            y: bounds.midY - 15,
-            width: 290,
-            height: 58
-        )
-    }
-}
-
-private extension CGRect {
-    var midPoint: CGPoint {
-        CGPoint(
-            x: midX,
-            y: midY
-        )
+        titleLabel.frame = CGRect(x: 24, y: bounds.midY - 100, width: bounds.width - 48, height: 48)
+        subtitleLabel.frame = CGRect(x: 24, y: bounds.midY - 55, width: bounds.width - 48, height: 22)
+        enterButton.frame = CGRect(x: bounds.midX - 120, y: bounds.midY + 8, width: 240, height: 54)
     }
 }

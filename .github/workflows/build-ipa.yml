@@ -1,0 +1,43 @@
+name: Build HandARBrowser IPA
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show Xcode
+        run: xcodebuild -version
+
+      - name: Validate project files
+        run: |
+          chmod +x Scripts/CHECK_PROJECT.command Scripts/BUILD_UNSIGNED_IPA.command
+          ./Scripts/CHECK_PROJECT.command
+
+      - name: Build iPhoneOS app (unsigned)
+        run: ./Scripts/BUILD_UNSIGNED_IPA.command
+
+      - name: Verify IPA structure
+        run: |
+          test -f build/HandARBrowser-unsigned.ipa
+          /usr/bin/unzip -l build/HandARBrowser-unsigned.ipa | grep -E 'Payload/HandARBrowser.app/' >/dev/null
+          echo "IPA OK"
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: HandARBrowser-IPA
+          path: build/HandARBrowser-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 14

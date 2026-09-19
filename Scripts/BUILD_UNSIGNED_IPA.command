@@ -8,7 +8,6 @@ xcodebuild -project HandARBrowser.xcodeproj \
   -target HandARBrowser \
   -configuration Release \
   -sdk iphoneos \
-  -derivedDataPath build/DerivedData \
   CONFIGURATION_BUILD_DIR="$ROOT/build/App" \
   CODE_SIGNING_ALLOWED=NO \
   CODE_SIGNING_REQUIRED=NO \

@@ -1,4 +1,4 @@
-name: Build HandAR Vision IPA
+name: Build HandAR Vision IPA — V19
 
 on:
   push:
@@ -35,6 +35,13 @@ jobs:
           grep -Fq "ВОЙТИ В AR" HandARBrowser/MainViewController.swift
           grep -Fq "final class LensMaskView" HandARBrowser/MainViewController.swift
           grep -Fq "displayTransform(for: orientation" HandARBrowser/MainViewController.swift
+          grep -Fq "projectWorldPoint" HandARBrowser/MainViewController.swift
+          grep -Fq ".camera.projectPoint" HandARBrowser/MainViewController.swift
+          grep -Fq "browserWorldWidth: Float = 0.76" HandARBrowser/MainViewController.swift
+          grep -Fq "adaptiveAlpha" HandARBrowser/MainViewController.swift
+          grep -Fq "pinchHysteresis" HandARBrowser/MainViewController.swift
+          ! grep -Fq "handleEdgeControl" HandARBrowser/MainViewController.swift
+          ! grep -Fq "browserNudge" HandARBrowser/MainViewController.swift
 
       - name: Build iPhoneOS app (unsigned)
         run: ./Scripts/BUILD_UNSIGNED_IPA.command

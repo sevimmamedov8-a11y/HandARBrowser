@@ -1,20 +1,20 @@
-# V18 architecture
+# V19 architecture
 
-V18 uses RealityKit ARView with a manually run ARWorldTrackingConfiguration. ARSession frames feed Vision hand tracking, while the browser is rendered as synchronized left/right WKWebViews over the live camera background.
+V19 uses RealityKit ARView with a manually run ARWorldTrackingConfiguration. The browser is represented by synchronized left/right WKWebViews, but its virtual plane is anchored in AR world coordinates and projected into the camera every frame with ARCamera.projectPoint.
 
 # Sources
 
-Apple Vision — VNHumanHandPoseObservation / chirality:
+Apple ARKit — ARWorldTrackingConfiguration:
+https://developer.apple.com/documentation/arkit/arworldtrackingconfiguration
+
+Apple ARKit — ARCamera projection:
+https://developer.apple.com/documentation/arkit/arcamera
+
+Apple Vision — VNHumanHandPoseObservation:
 https://developer.apple.com/documentation/vision/vnhumanhandposeobservation
 
 Apple Vision — Detecting Hand Poses with Vision:
 https://developer.apple.com/documentation/vision/detecting-hand-poses-with-vision
-
-Apple ARKit / RealityKit — CMMotionManager:
-https://developer.apple.com/documentation/coremotion/cmmotionmanager
-
-Apple ARKit / RealityKit — processed device-motion data:
-https://developer.apple.com/documentation/coremotion/getting-processed-device-motion-data
 
 Apple WebKit — WKWebView:
 https://developer.apple.com/documentation/webkit/wkwebview

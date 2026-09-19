@@ -1,4 +1,4 @@
-name: Build HandAR Vision IPA — V19
+name: Build HandAR Vision IPA — V20
 
 on:
   push:
@@ -37,6 +37,7 @@ jobs:
           grep -Fq "displayTransform(for: orientation" HandARBrowser/MainViewController.swift
           grep -Fq "projectWorldPoint" HandARBrowser/MainViewController.swift
           grep -Fq ".camera.projectPoint" HandARBrowser/MainViewController.swift
+          grep -Fq "simd_normalize(SIMD3<Float>" HandARBrowser/MainViewController.swift
           grep -Fq "browserWorldWidth: Float = 0.76" HandARBrowser/MainViewController.swift
           grep -Fq "adaptiveAlpha" HandARBrowser/MainViewController.swift
           grep -Fq "pinchHysteresis" HandARBrowser/MainViewController.swift

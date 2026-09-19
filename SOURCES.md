@@ -1,6 +1,6 @@
-# V19 architecture
+# V20 architecture
 
-V19 uses RealityKit ARView with a manually run ARWorldTrackingConfiguration. The browser is represented by synchronized left/right WKWebViews, but its virtual plane is anchored in AR world coordinates and projected into the camera every frame with ARCamera.projectPoint.
+V20 uses RealityKit ARView with a manually run ARWorldTrackingConfiguration. The browser is represented by synchronized left/right WKWebViews, but its virtual plane is anchored in AR world coordinates and projected into the camera every frame with ARCamera.projectPoint.
 
 # Sources
 

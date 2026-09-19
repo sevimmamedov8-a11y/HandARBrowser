@@ -232,9 +232,9 @@ final class MainViewController: UIViewController {
         if worldBrowserAnchor == nil {
             let transform = pose.transform
             let cameraPosition = SIMD3<Float>(transform.columns.3.x, transform.columns.3.y, transform.columns.3.z)
-            let cameraRight = normalized(SIMD3<Float>(transform.columns.0.x, transform.columns.0.y, transform.columns.0.z))
-            let cameraUp = normalized(SIMD3<Float>(transform.columns.1.x, transform.columns.1.y, transform.columns.1.z))
-            let cameraForward = normalized(-SIMD3<Float>(transform.columns.2.x, transform.columns.2.y, transform.columns.2.z))
+            let cameraRight = simd_normalize(SIMD3<Float>(transform.columns.0.x, transform.columns.0.y, transform.columns.0.z))
+            let cameraUp = simd_normalize(SIMD3<Float>(transform.columns.1.x, transform.columns.1.y, transform.columns.1.z))
+            let cameraForward = simd_normalize(-SIMD3<Float>(transform.columns.2.x, transform.columns.2.y, transform.columns.2.z))
             worldBrowserAnchor = WorldBrowserAnchor(
                 center: cameraPosition + cameraForward * browserWorldDistance,
                 right: cameraRight,

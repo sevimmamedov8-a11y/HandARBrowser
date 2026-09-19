@@ -44,8 +44,8 @@ final class MainViewController: UIViewController {
         rightPreview = AVCaptureVideoPreviewLayer(session: camera.session)
         leftPreview.videoGravity = .resizeAspectFill
         rightPreview.videoGravity = .resizeAspectFill
-        leftPreview.connection?.videoOrientation = .landscapeRight
-        rightPreview.connection?.videoOrientation = .landscapeRight
+        configureLandscapeConnection(leftPreview.connection)
+        configureLandscapeConnection(rightPreview.connection)
         view.layer.addSublayer(leftPreview)
         view.layer.addSublayer(rightPreview)
 
@@ -94,8 +94,8 @@ final class MainViewController: UIViewController {
         let half = w / 2
         leftPreview.frame = CGRect(x: 0, y: 0, width: half, height: h)
         rightPreview.frame = CGRect(x: half, y: 0, width: half, height: h)
-        if let c = leftPreview.connection, c.isVideoOrientationSupported { c.videoOrientation = .landscapeRight }
-        if let c = rightPreview.connection, c.isVideoOrientationSupported { c.videoOrientation = .landscapeRight }
+        configureLandscapeConnection(leftPreview.connection)
+        configureLandscapeConnection(rightPreview.connection)
         leftEye.frame = CGRect(x: 0, y: 0, width: half, height: h)
         rightEye.frame = CGRect(x: half, y: 0, width: half, height: h)
         for cursor in [cursorLeftA, cursorLeftB, cursorRightA, cursorRightB] { cursor.frame.size = CGSize(width: 36, height: 36) }
@@ -207,6 +207,15 @@ final class MainViewController: UIViewController {
         return CGPoint(x: clamp(x, 0, screen.width), y: clamp(y, 0, screen.height))
     }
 
+    private func configureLandscapeConnection(_ connection: AVCaptureConnection?) {
+        guard let connection else { return }
+        // iOS 17+ uses videoRotationAngle; 90 degrees corresponds to the
+        // landscape orientation used by this headset layout.
+        if connection.isVideoRotationAngleSupported(90) {
+            connection.videoRotationAngle = 90
+        }
+    }
+
     private func toggleBrowser() {
         leftEye.isHidden.toggle()
         rightEye.isHidden = leftEye.isHidden
@@ -314,8 +323,8 @@ final class CameraManager: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
             self.output = output
 
             if let connection = output.connection(with: .video) {
-                if connection.isVideoOrientationSupported { connection.videoOrientation = .landscapeRight }
-                connection.videoMirrored = false
+                configureLandscapeConnection(connection)
+                if connection.isVideoMirroringSupported { connection.isVideoMirrored = false }
             }
             session.commitConfiguration()
         } catch {

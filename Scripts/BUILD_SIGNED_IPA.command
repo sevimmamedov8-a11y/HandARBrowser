@@ -7,7 +7,7 @@ if [[ -z "${TEAM}" ]]; then echo "Team ID is required"; exit 1; fi
 rm -rf build
 mkdir -p build
 xcodebuild -project HandARBrowser.xcodeproj \
-  -scheme HandARBrowser \
+  -target HandARBrowser \
   -configuration Release \
   -sdk iphoneos \
   -archivePath build/HandARBrowser.xcarchive \

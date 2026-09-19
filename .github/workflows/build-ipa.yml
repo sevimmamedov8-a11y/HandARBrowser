@@ -1,4 +1,4 @@
-name: Build HandAR Vision IPA — V23
+name: Build HandAR Vision IPA — V25
 
 on:
   push:
@@ -27,29 +27,28 @@ jobs:
           chmod +x Scripts/CHECK_PROJECT.command Scripts/BUILD_UNSIGNED_IPA.command
           ./Scripts/CHECK_PROJECT.command
           grep -Fq "HandAR Vision" HandARBrowser/Info.plist
+          grep -Fq "<string>25</string>" HandARBrowser/Info.plist
           grep -Fq "import ARKit" HandARBrowser/MainViewController.swift
           grep -Fq "import RealityKit" HandARBrowser/MainViewController.swift
           grep -Fq "ARWorldTrackingConfiguration" HandARBrowser/MainViewController.swift
-          grep -Fq "final class MainMenuView" HandARBrowser/MainViewController.swift
-          grep -Fq "ВОЙТИ В AR" HandARBrowser/MainViewController.swift
-          grep -Fq "final class LensMaskView" HandARBrowser/MainViewController.swift
-          grep -Fq "displayTransform(for: orientation" HandARBrowser/MainViewController.swift
-          grep -Fq "projectWorldPoint" HandARBrowser/MainViewController.swift
-          grep -Fq ".camera.projectPoint" HandARBrowser/MainViewController.swift
-          grep -Fq "simd_normalize(SIMD3<Float>" HandARBrowser/MainViewController.swift
-          ! grep -Fq "normalized(SIMD3<Float>" HandARBrowser/MainViewController.swift
-          grep -Fq "browserWorldWidth: Float = 0.62" HandARBrowser/MainViewController.swift
-          grep -Fq "AnchorEntity(world: anchorTransform)" HandARBrowser/MainViewController.swift
-          grep -Fq "tracking.addAnchor(transform: anchorTransform)" HandARBrowser/MainViewController.swift
-          grep -Fq "setWorldQuadrilateral" HandARBrowser/MainViewController.swift
-          ! grep -Fq "panel.position =" HandARBrowser/MainViewController.swift
-          grep -Fq "panel.layer.position =" HandARBrowser/MainViewController.swift
-          grep -Fq "eyeSeparation: Float = 0.062" HandARBrowser/MainViewController.swift
-          ! grep -Fq "let half = view.bounds.height / 2" HandARBrowser/MainViewController.swift
-          grep -Fq "adaptiveAlpha" HandARBrowser/MainViewController.swift
-          grep -Fq "pinchHysteresis" HandARBrowser/MainViewController.swift
-          ! grep -Fq "handleEdgeControl" HandARBrowser/MainViewController.swift
-          ! grep -Fq "browserNudge" HandARBrowser/MainViewController.swift
+          grep -Fq "ARSessionDelegate" HandARBrowser/MainViewController.swift
+          grep -Fq "ARAnchor" HandARBrowser/MainViewController.swift
+          grep -Fq "AnchorEntity(anchor: anchor)" HandARBrowser/MainViewController.swift
+          grep -Fq "final class EyeDisplayView" HandARBrowser/MainViewController.swift
+          grep -Fq "private let eyeLeft = EyeDisplayView()" HandARBrowser/MainViewController.swift
+          grep -Fq "private let eyeRight = EyeDisplayView()" HandARBrowser/MainViewController.swift
+          grep -Fq "input.updateBoth(" HandARBrowser/MainViewController.swift
+          grep -Fq 'cameraMode: .ar' HandARBrowser/MainViewController.swift
+          grep -Fq 'frame.camera.projectPoint' HandARBrowser/MainViewController.swift
+          grep -Fq 'frame.displayTransform(' HandARBrowser/MainViewController.swift
+          grep -Fq 'browserWorldDistance: Float = 1.45' HandARBrowser/MainViewController.swift
+          grep -Fq 'eyeSeparation: Float = 0.064' HandARBrowser/MainViewController.swift
+          grep -Fq 'didUpdate anchors: [ARAnchor]' HandARBrowser/MainViewController.swift
+          ! grep -Fq 'LensMaskView' HandARBrowser/MainViewController.swift
+          ! grep -Fq 'fillEllipse' HandARBrowser/MainViewController.swift
+          ! grep -Fq 'normalized(SIMD3<Float>' HandARBrowser/MainViewController.swift
+          ! grep -Fq 'panel.position =' HandARBrowser/MainViewController.swift
+          ! grep -Fq 'panel.layer.position =' HandARBrowser/MainViewController.swift
 
       - name: Build iPhoneOS app (unsigned)
         run: ./Scripts/BUILD_UNSIGNED_IPA.command

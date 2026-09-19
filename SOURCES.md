@@ -1,22 +1,10 @@
-# V20 architecture
+# V25 technology notes
 
-V20 uses RealityKit ARView with a manually run ARWorldTrackingConfiguration. The browser is represented by synchronized left/right WKWebViews, but its virtual plane is anchored in AR world coordinates and projected into the camera every frame with ARCamera.projectPoint.
+Основные системные компоненты:
 
-# Sources
+- ARKit — world tracking, ARSession, ARAnchor и camera frames.
+- RealityKit — `ARView` для AR passthrough и `AnchorEntity` для связи виртуального объекта с ARAnchor.
+- Vision — human hand pose tracking.
+- WebKit — два независимых WKWebView, по одному на каждый eye view.
 
-Apple ARKit — ARWorldTrackingConfiguration:
-https://developer.apple.com/documentation/arkit/arworldtrackingconfiguration
-
-Apple ARKit — ARCamera projection:
-https://developer.apple.com/documentation/arkit/arcamera
-
-Apple Vision — VNHumanHandPoseObservation:
-https://developer.apple.com/documentation/vision/vnhumanhandposeobservation
-
-Apple Vision — Detecting Hand Poses with Vision:
-https://developer.apple.com/documentation/vision/detecting-hand-poses-with-vision
-
-Apple WebKit — WKWebView:
-https://developer.apple.com/documentation/webkit/wkwebview
-
-The app uses these built-in frameworks rather than third-party SDKs.
+Архитектура V25 ориентирована на идею пространственных окон: виртуальный браузер имеет мировую позицию и не должен следовать за поворотом телефона как обычный HUD.

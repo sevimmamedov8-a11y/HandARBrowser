@@ -1,49 +1,25 @@
-# Сборка IPA через GitHub без Mac
+# Сборка IPA через GitHub
 
-Этот проект специально подготовлен под сборку на `macos-latest` в GitHub Actions.
-На Windows ничего компилировать не нужно.
+Проект собирается в GitHub Actions на macOS runner. На Windows сборка проекта локально не требуется.
 
-## Что загрузить в репозиторий
-
-Загрузи **весь контент этой папки** в корень репозитория `HandARBrowser`.
-То есть структура должна начинаться так:
+Структура репозитория:
 
 ```text
 HandARBrowser.xcodeproj/
 HandARBrowser/
 Scripts/
 .github/
-README_RU.md
-...
 ```
 
-Не делай:
+После `commit + push` workflow автоматически запускает `xcodebuild` и собирает unsigned IPA.
 
-```text
-HandARBrowser/HandARBrowser.xcodeproj/
-```
-
-## Как получить IPA
-
-После commit/push workflow `Build HandARBrowser IPA` запускается автоматически.
-Его также можно запустить вручную из `Actions`.
-
-Успешный запуск создаёт artifact:
+Artifact:
 
 ```text
 HandARBrowser-IPA
 └── HandARBrowser-unsigned.ipa
 ```
 
-Скачай artifact и подпиши полученный IPA в ESign.
+После этого IPA можно подписать через ESign.
 
-## Если Actions красный
-
-Открой упавший workflow → job `build` → последний красный шаг.
-В проекте нет приватных ключей, provisioning profile или сертификатов, поэтому для этой unsigned-сборки их добавлять в GitHub Secrets не надо.
-
-## Ограничения
-
-Для установки на iPhone IPA после unsigned-сборки нужно подписать ESign или другим совместимым способом.
-
-Само приложение использует системные iOS API: RealityKit/ARKit для AR-сессии, Vision для руки и WebKit для браузера. AVFoundation используется только для проверки/запроса разрешения камеры.
+Перед сборкой workflow проверяет, что проект содержит ARKit World Tracking, RealityKit, `ARAnchor`, `AnchorEntity(anchor:)`, две независимые `EyeDisplayView`, а также отсутствие старых круглых масок.

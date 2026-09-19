@@ -1,4 +1,4 @@
-name: Build HandAR Vision IPA — V20
+name: Build HandAR Vision IPA — V21
 
 on:
   push:
@@ -27,7 +27,6 @@ jobs:
           chmod +x Scripts/CHECK_PROJECT.command Scripts/BUILD_UNSIGNED_IPA.command
           ./Scripts/CHECK_PROJECT.command
           grep -Fq "HandAR Vision" HandARBrowser/Info.plist
-          grep -Fq "UIInterfaceOrientationPortrait" HandARBrowser/Info.plist
           grep -Fq "import ARKit" HandARBrowser/MainViewController.swift
           grep -Fq "import RealityKit" HandARBrowser/MainViewController.swift
           grep -Fq "ARWorldTrackingConfiguration" HandARBrowser/MainViewController.swift
@@ -38,7 +37,12 @@ jobs:
           grep -Fq "projectWorldPoint" HandARBrowser/MainViewController.swift
           grep -Fq ".camera.projectPoint" HandARBrowser/MainViewController.swift
           grep -Fq "simd_normalize(SIMD3<Float>" HandARBrowser/MainViewController.swift
-          grep -Fq "browserWorldWidth: Float = 0.76" HandARBrowser/MainViewController.swift
+          grep -Fq "browserWorldWidth: Float = 0.62" HandARBrowser/MainViewController.swift
+          grep -Fq "AnchorEntity(world: anchorTransform)" HandARBrowser/MainViewController.swift
+          grep -Fq "tracking.addAnchor(transform: anchorTransform)" HandARBrowser/MainViewController.swift
+          grep -Fq "setWorldQuadrilateral" HandARBrowser/MainViewController.swift
+          grep -Fq "eyeSeparation: Float = 0.062" HandARBrowser/MainViewController.swift
+          ! grep -Fq "let half = view.bounds.height / 2" HandARBrowser/MainViewController.swift
           grep -Fq "adaptiveAlpha" HandARBrowser/MainViewController.swift
           grep -Fq "pinchHysteresis" HandARBrowser/MainViewController.swift
           ! grep -Fq "handleEdgeControl" HandARBrowser/MainViewController.swift

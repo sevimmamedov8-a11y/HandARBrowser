@@ -30,17 +30,25 @@ final class MainViewController: UIViewController {
     private var lastSize: CGSize = .zero
     private var inAR = false
     private var worldBrowserAnchor: WorldBrowserAnchor?
+    private var worldARAnchor: ARAnchor?
+    private var realityWorldAnchor: AnchorEntity?
     private var lastCenterGestureTime = CACurrentMediaTime()
 
-    // Virtual browser plane in meters. Kept slightly smaller and anchored in AR world space.
-    private let browserWorldWidth: Float = 0.76
-    private let browserWorldHeight: Float = 0.48
-    private let browserWorldDistance: Float = 1.35
-    private let stereoGap: Float = 0.028
+    // Small floating AR browser, deliberately farther away and smaller for a glasses-like field of view.
+    private let browserWorldWidth: Float = 0.62
+    private let browserWorldHeight: Float = 0.36
+    private let browserWorldDistance: Float = 1.55
+    private let stereoGap: Float = 0.014
+    private let eyeSeparation: Float = 0.062
 
     override var prefersStatusBarHidden: Bool { true }
     override var shouldAutorotate: Bool { true }
-    override var supportedInterfaceOrientations: UIInterfaceOrientationMask { .all }
+    override var supportedInterfaceOrientations: UIInterfaceOrientationMask {
+        inAR ? .landscapeRight : .all
+    }
+    override var preferredInterfaceOrientationForPresentation: UIInterfaceOrientation {
+        .landscapeRight
+    }
     override var prefersHomeIndicatorAutoHidden: Bool { inAR }
 
     private static let homeURL = URL(string: "https://www.google.com/")!
@@ -63,16 +71,10 @@ final class MainViewController: UIViewController {
         menu.frame = view.bounds
         lensMask.frame = view.bounds
 
-        let isLandscape = view.bounds.width >= view.bounds.height
-        if isLandscape {
-            let half = view.bounds.width / 2
-            eyeLeft.frame = CGRect(x: 0, y: 0, width: half, height: view.bounds.height)
-            eyeRight.frame = CGRect(x: half, y: 0, width: half, height: view.bounds.height)
-        } else {
-            let half = view.bounds.height / 2
-            eyeLeft.frame = CGRect(x: 0, y: 0, width: view.bounds.width, height: half)
-            eyeRight.frame = CGRect(x: 0, y: half, width: view.bounds.width, height: half)
-        }
+        // The physical goggles have two side-by-side lenses. Never stack the eye views vertically.
+        let half = view.bounds.width * 0.5
+        eyeLeft.frame = CGRect(x: 0, y: 0, width: half, height: view.bounds.height)
+        eyeRight.frame = CGRect(x: half, y: 0, width: half, height: view.bounds.height)
 
         cursor.bounds.size = CGSize(width: 20, height: 20)
         updateInterfaceOrientation()
@@ -178,7 +180,12 @@ final class MainViewController: UIViewController {
         guard !inAR else { return }
         inAR = true
         worldBrowserAnchor = nil
-        tracking.setInterfaceOrientation(currentInterfaceOrientation)
+        worldARAnchor = nil
+        realityWorldAnchor?.removeFromParent()
+        realityWorldAnchor = nil
+        setNeedsUpdateOfSupportedInterfaceOrientations()
+        requestLandscapeMode()
+        tracking.setInterfaceOrientation(.landscapeRight)
         arView.isHidden = false
         eyeLeft.isHidden = false
         eyeRight.isHidden = false
@@ -207,6 +214,11 @@ final class MainViewController: UIViewController {
         cursor.isHidden = true
         inAR = false
         worldBrowserAnchor = nil
+        worldARAnchor = nil
+        realityWorldAnchor?.removeFromParent()
+        realityWorldAnchor = nil
+        setNeedsUpdateOfSupportedInterfaceOrientations()
+        requestAnyOrientation()
         menu.isHidden = false
         menu.alpha = 0
         menu.transform = CGAffineTransform(scaleX: 1.05, y: 1.05)
@@ -219,7 +231,17 @@ final class MainViewController: UIViewController {
     }
 
     private var currentInterfaceOrientation: UIInterfaceOrientation {
-        view.window?.windowScene?.interfaceOrientation ?? .landscapeRight
+        view.window?.windowScene?.effectiveGeometry.interfaceOrientation ?? .landscapeRight
+    }
+
+    private func requestLandscapeMode() {
+        guard let windowScene = view.window?.windowScene else { return }
+        windowScene.requestGeometryUpdate(.iOS(interfaceOrientations: .landscapeRight), errorHandler: nil)
+    }
+
+    private func requestAnyOrientation() {
+        guard let windowScene = view.window?.windowScene else { return }
+        windowScene.requestGeometryUpdate(.iOS(interfaceOrientations: .all), errorHandler: nil)
     }
 
     private func updateInterfaceOrientation() {
@@ -227,7 +249,7 @@ final class MainViewController: UIViewController {
     }
 
     private func applyARPose(_ pose: ARPose) {
-        guard inAR else { return }
+        guard inAR, view.bounds.width > view.bounds.height else { return }
 
         if worldBrowserAnchor == nil {
             let transform = pose.transform
@@ -235,18 +257,26 @@ final class MainViewController: UIViewController {
             let cameraRight = simd_normalize(SIMD3<Float>(transform.columns.0.x, transform.columns.0.y, transform.columns.0.z))
             let cameraUp = simd_normalize(SIMD3<Float>(transform.columns.1.x, transform.columns.1.y, transform.columns.1.z))
             let cameraForward = simd_normalize(-SIMD3<Float>(transform.columns.2.x, transform.columns.2.y, transform.columns.2.z))
-            worldBrowserAnchor = WorldBrowserAnchor(
-                center: cameraPosition + cameraForward * browserWorldDistance,
-                right: cameraRight,
-                up: cameraUp
-            )
+            let center = cameraPosition + cameraForward * browserWorldDistance
+            worldBrowserAnchor = WorldBrowserAnchor(center: center, right: cameraRight, up: cameraUp)
+
+            // Register a real ARKit world anchor at the exact placement point.
+            var anchorTransform = transform
+            anchorTransform.columns.3 = SIMD4<Float>(center.x, center.y, center.z, 1)
+            worldARAnchor = tracking.addAnchor(transform: anchorTransform)
+
+            // RealityKit also receives the same world transform. The glass frame is a real
+            // 3D entity in the AR scene, so it remains at the original room-space location
+            // instead of being a simple 2D screen overlay.
+            let rkAnchor = AnchorEntity(world: anchorTransform)
+            rkAnchor.addChild(Self.makeBrowserFrameEntity(width: browserWorldWidth, height: browserWorldHeight))
+            arView.scene.addAnchor(rkAnchor)
+            realityWorldAnchor = rkAnchor
         }
 
-        guard worldBrowserAnchor != nil else { return }
-
-        // The plane is fixed in AR/world space. ARKit projects the same 3D
-        // rectangle into every new camera pose, so turning the phone does not
-        // move the browser with the head. It stays at the original world spot.
+        // Reproject the fixed world-space plane from the current tracked camera pose.
+        // The browser therefore moves against the camera with real AR parallax instead of
+        // simply scaling around the middle of the screen.
         reprojectWorldBrowser()
     }
 
@@ -256,24 +286,21 @@ final class MainViewController: UIViewController {
         worldRight: SIMD3<Float>,
         worldUp: SIMD3<Float>,
         halfWidth: Float,
-        halfHeight: Float
+        halfHeight: Float,
+        eyeOffset: Float
     ) {
-        guard eye.browserFrame != .zero else { return }
+        guard eye.bounds.width > 1, eye.bounds.height > 1 else { return }
+        let viewport = eye.bounds.size
         guard
-            let center = tracking.projectWorldPoint(worldCenter, viewportSize: view.bounds.size),
-            let left = tracking.projectWorldPoint(worldCenter - worldRight * halfWidth, viewportSize: view.bounds.size),
-            let right = tracking.projectWorldPoint(worldCenter + worldRight * halfWidth, viewportSize: view.bounds.size),
-            let top = tracking.projectWorldPoint(worldCenter + worldUp * halfHeight, viewportSize: view.bounds.size),
-            let bottom = tracking.projectWorldPoint(worldCenter - worldUp * halfHeight, viewportSize: view.bounds.size)
+            let topLeft = tracking.projectWorldPoint(worldCenter - worldRight * halfWidth + worldUp * halfHeight, viewportSize: viewport, eyeOffset: eyeOffset),
+            let topRight = tracking.projectWorldPoint(worldCenter + worldRight * halfWidth + worldUp * halfHeight, viewportSize: viewport, eyeOffset: eyeOffset),
+            let bottomLeft = tracking.projectWorldPoint(worldCenter - worldRight * halfWidth - worldUp * halfHeight, viewportSize: viewport, eyeOffset: eyeOffset),
+            let bottomRight = tracking.projectWorldPoint(worldCenter + worldRight * halfWidth - worldUp * halfHeight, viewportSize: viewport, eyeOffset: eyeOffset)
         else { return }
 
-        let projectedWidth = max(distance(left, right), 1)
-        let projectedHeight = max(distance(top, bottom), 1)
-        let scaleX = projectedWidth / max(eye.browserFrame.width, 1)
-        let scaleY = projectedHeight / max(eye.browserFrame.height, 1)
-        let scale = CGFloat(clamp(Double(min(scaleX, scaleY)), min: 0.55, max: 2.25))
-        let rotation = atan2(right.y - left.y, right.x - left.x)
-        eye.setWorldProjection(globalCenter: center, in: view, scale: scale, rotation: rotation)
+        // The projected rectangle is converted into an affine screen-space plane.
+        // This retains parallax + tilt instead of applying only uniform scale.
+        eye.setWorldQuadrilateral(topLeft: topLeft, topRight: topRight, bottomLeft: bottomLeft, bottomRight: bottomRight)
     }
 
     private func applyReferencePoseIfPossible() {
@@ -282,15 +309,54 @@ final class MainViewController: UIViewController {
 
     private func reprojectWorldBrowser() {
         guard inAR, let anchor = worldBrowserAnchor else { return }
-        let eyeWidth = (browserWorldWidth - stereoGap) * 0.5
+
+        let eyePanelWidth = max((browserWorldWidth - stereoGap) * 0.5, 0.05)
         let halfHeight = browserWorldHeight * 0.5
-        let halfEyeWidth = eyeWidth * 0.5
+        let halfEyeWidth = eyePanelWidth * 0.5
+        let eyeShift = eyeSeparation * 0.5
 
         let leftCenter = anchor.center - anchor.right * (stereoGap * 0.5 + halfEyeWidth)
         let rightCenter = anchor.center + anchor.right * (stereoGap * 0.5 + halfEyeWidth)
 
-        projectEye(eye: eyeLeft, worldCenter: leftCenter, worldRight: anchor.right, worldUp: anchor.up, halfWidth: halfEyeWidth, halfHeight: halfHeight)
-        projectEye(eye: eyeRight, worldCenter: rightCenter, worldRight: anchor.right, worldUp: anchor.up, halfWidth: halfEyeWidth, halfHeight: halfHeight)
+        projectEye(eye: eyeLeft, worldCenter: leftCenter, worldRight: anchor.right, worldUp: anchor.up, halfWidth: halfEyeWidth, halfHeight: halfHeight, eyeOffset: +eyeShift)
+        projectEye(eye: eyeRight, worldCenter: rightCenter, worldRight: anchor.right, worldUp: anchor.up, halfWidth: halfEyeWidth, halfHeight: halfHeight, eyeOffset: -eyeShift)
+    }
+
+    private static func makeBrowserFrameEntity(width: Float, height: Float) -> Entity {
+        let root = Entity()
+        let thickness: Float = 0.006
+        let depth: Float = 0.008
+        let material = UnlitMaterial(color: UIColor.white.withAlphaComponent(0.16))
+
+        let top = ModelEntity(
+            mesh: MeshResource.generateBox(size: [width, thickness, depth], cornerRadius: thickness * 0.35),
+            materials: [material]
+        )
+        top.position = [0, height * 0.5, 0]
+
+        let bottom = ModelEntity(
+            mesh: MeshResource.generateBox(size: [width, thickness, depth], cornerRadius: thickness * 0.35),
+            materials: [material]
+        )
+        bottom.position = [0, -height * 0.5, 0]
+
+        let left = ModelEntity(
+            mesh: MeshResource.generateBox(size: [thickness, height, depth], cornerRadius: thickness * 0.35),
+            materials: [material]
+        )
+        left.position = [-width * 0.5, 0, 0]
+
+        let right = ModelEntity(
+            mesh: MeshResource.generateBox(size: [thickness, height, depth], cornerRadius: thickness * 0.35),
+            materials: [material]
+        )
+        right.position = [width * 0.5, 0, 0]
+
+        root.addChild(top)
+        root.addChild(bottom)
+        root.addChild(left)
+        root.addChild(right)
+        return root
     }
 
     private func handleHands(left: HandSample?, right: HandSample?) {
@@ -301,6 +367,9 @@ final class MainViewController: UIViewController {
             if now - lastCenterGestureTime > 1.0 {
                 lastCenterGestureTime = now
                 worldBrowserAnchor = nil
+                worldARAnchor = nil
+                realityWorldAnchor?.removeFromParent()
+                realityWorldAnchor = nil
                 UIImpactFeedbackGenerator(style: .light).impactOccurred()
             }
             releasePointers()
@@ -335,11 +404,7 @@ final class MainViewController: UIViewController {
     }
 
     private func eyeForScreenPoint(_ point: CGPoint) -> EyeContainer? {
-        if view.bounds.width >= view.bounds.height {
-            return point.x < view.bounds.midX ? eyeLeft : eyeRight
-        } else {
-            return point.y < view.bounds.midY ? eyeLeft : eyeRight
-        }
+        point.x < view.bounds.midX ? eyeLeft : eyeRight
     }
 
     private func sendPointer(localPoint: CGPoint, eye: EyeContainer, pointerID: Int, pinch: Bool) {
@@ -439,13 +504,25 @@ final class ARTrackingManager: NSObject, ARSessionDelegate {
         frameLock.unlock()
     }
 
-    func projectWorldPoint(_ worldPoint: SIMD3<Float>, viewportSize: CGSize) -> CGPoint? {
+    @discardableResult
+    func addAnchor(transform: simd_float4x4) -> ARAnchor {
+        let anchor = ARAnchor(transform: transform)
+        session.add(anchor: anchor)
+        return anchor
+    }
+
+    func projectWorldPoint(_ worldPoint: SIMD3<Float>, viewportSize: CGSize, eyeOffset: Float = 0) -> CGPoint? {
         frameLock.lock()
         let frame = latestFrame
         let orientation = interfaceOrientation
         frameLock.unlock()
         guard let frame else { return nil }
-        let point = frame.camera.projectPoint(worldPoint, orientation: orientation, viewportSize: viewportSize)
+
+        // Render each eye from a tiny virtual camera offset along the tracked camera-right axis.
+        let cameraTransform = frame.camera.transform
+        let cameraRight = simd_normalize(SIMD3<Float>(cameraTransform.columns.0.x, cameraTransform.columns.0.y, cameraTransform.columns.0.z))
+        let eyeAdjustedPoint = worldPoint + cameraRight * eyeOffset
+        let point = frame.camera.projectPoint(eyeAdjustedPoint, orientation: orientation, viewportSize: viewportSize)
         guard point.x.isFinite, point.y.isFinite else { return nil }
         return point
     }
@@ -492,6 +569,9 @@ final class HandTracker {
     private let request: VNDetectHumanHandPoseRequest = {
         let r = VNDetectHumanHandPoseRequest()
         r.maximumHandCount = 2
+        if let latest = VNDetectHumanHandPoseRequest.supportedRevisions.max(), latest >= r.revision {
+            r.revision = latest
+        }
         return r
     }()
     private let queue = DispatchQueue(label: "handar.vision", qos: .userInitiated)
@@ -523,10 +603,10 @@ final class HandTracker {
                         let thumb = try? observation.recognizedPoint(.thumbTip),
                         let wrist = try? observation.recognizedPoint(.wrist),
                         let middleMCP = try? observation.recognizedPoint(.middleMCP),
-                        index.confidence > 0.55,
-                        thumb.confidence > 0.50,
-                        wrist.confidence > 0.35,
-                        middleMCP.confidence > 0.35
+                        index.confidence > 0.60,
+                        thumb.confidence > 0.55,
+                        wrist.confidence > 0.40,
+                        middleMCP.confidence > 0.40
                     else { continue }
 
                     let isLeft = observation.chirality == .left
@@ -585,8 +665,8 @@ private func distance(_ a: CGPoint, _ b: CGPoint) -> CGFloat {
 private func adaptiveAlpha(previous: CGPoint?, current: CGPoint) -> CGFloat {
     guard let previous else { return 1.0 }
     let jump = min(distance(previous, current), 0.35)
-    // Stable hand = stronger smoothing, fast hand movement = less lag.
-    return min(0.72, max(0.26, 0.26 + jump * 1.55))
+    // Strong smoothing while stationary, with a faster response for deliberate movement.
+    return min(0.78, max(0.22, 0.22 + jump * 1.70))
 }
 
 @inline(__always)
@@ -693,10 +773,8 @@ final class EyeContainer: UIView {
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        // Base rectangle used only as the local canvas. ARKit projects this same
-        // virtual rectangle into the camera view and then offsets the panel.
-        let panelW = bounds.width * 0.72
-        let panelH = bounds.height * 0.50
+        let panelW = bounds.width * 0.68
+        let panelH = bounds.height * 0.46
         let panelFrame = CGRect(
             x: (bounds.width - panelW) / 2,
             y: (bounds.height - panelH) / 2,
@@ -704,9 +782,15 @@ final class EyeContainer: UIView {
             height: panelH
         )
         browserFrame = panelFrame
-        panel.frame = panelFrame
+
+        // Use a top-left anchor point so the world-projected affine transform maps
+        // directly from the web canvas to the tracked quadrilateral.
+        panel.layer.anchorPoint = .zero
+        panel.bounds = CGRect(origin: .zero, size: panelFrame.size)
+        panel.position = panelFrame.origin
+        panelTransform = .identity
+        panel.layer.setAffineTransform(.identity)
         webView.frame = panel.bounds.insetBy(dx: 2, dy: 2)
-        panel.transform = panelTransform
     }
 
     func load(url: URL) {
@@ -721,18 +805,22 @@ final class EyeContainer: UIView {
         return CGPoint(x: x, y: y)
     }
 
-    func setWorldProjection(globalCenter: CGPoint, in rootView: UIView, scale: CGFloat, rotation: CGFloat) {
-        let localCenter = convert(globalCenter, from: rootView)
-        let baseCenter = browserFrame.midPoint
-        panelTransform = CGAffineTransform(translationX: localCenter.x - baseCenter.x, y: localCenter.y - baseCenter.y)
-            .rotated(by: rotation)
-            .scaledBy(x: scale, y: scale)
-        panel.transform = panelTransform
+    func setWorldQuadrilateral(topLeft: CGPoint, topRight: CGPoint, bottomLeft: CGPoint, bottomRight: CGPoint) {
+        let w = max(browserFrame.width, 1)
+        let h = max(browserFrame.height, 1)
+
+        let a = (topRight.x - topLeft.x) / w
+        let b = (topRight.y - topLeft.y) / w
+        let c = (bottomLeft.x - topLeft.x) / h
+        let d = (bottomLeft.y - topLeft.y) / h
+        panel.position = topLeft
+        panelTransform = CGAffineTransform(a: a, b: b, c: c, d: d, tx: 0, ty: 0)
+        panel.layer.setAffineTransform(panelTransform)
     }
 
     func resetHeadOffset() {
         panelTransform = .identity
-        panel.transform = .identity
+        panel.layer.setAffineTransform(.identity)
     }
 }
 
@@ -777,34 +865,24 @@ final class LensMaskView: UIView {
 
     override func draw(_ rect: CGRect) {
         guard let ctx = UIGraphicsGetCurrentContext() else { return }
-        ctx.setFillColor(UIColor.black.withAlphaComponent(0.58).cgColor)
+        ctx.setFillColor(UIColor.black.withAlphaComponent(0.62).cgColor)
         ctx.fill(rect)
 
-        let landscape = rect.width >= rect.height
-        let holeRects: [CGRect]
-        if landscape {
-            let holeW = rect.width * 0.40
-            let holeH = rect.height * 0.70
-            let gap = rect.width * 0.045
-            holeRects = [
-                CGRect(x: rect.midX - gap / 2 - holeW, y: rect.midY - holeH / 2, width: holeW, height: holeH),
-                CGRect(x: rect.midX + gap / 2, y: rect.midY - holeH / 2, width: holeW, height: holeH)
-            ]
-        } else {
-            let holeW = rect.width * 0.70
-            let holeH = rect.height * 0.40
-            let gap = rect.height * 0.045
-            holeRects = [
-                CGRect(x: rect.midX - holeW / 2, y: rect.midY - gap / 2 - holeH, width: holeW, height: holeH),
-                CGRect(x: rect.midX - holeW / 2, y: rect.midY + gap / 2, width: holeW, height: holeH)
-            ]
-        }
+        // Physical goggles always expose two side-by-side oval apertures.
+        let holeW = rect.width * 0.425
+        let holeH = rect.height * 0.74
+        let gap = rect.width * 0.030
+        let holeRects = [
+            CGRect(x: rect.midX - gap * 0.5 - holeW, y: rect.midY - holeH * 0.5, width: holeW, height: holeH),
+            CGRect(x: rect.midX + gap * 0.5, y: rect.midY - holeH * 0.5, width: holeW, height: holeH)
+        ]
 
         ctx.setBlendMode(.clear)
         for r in holeRects {
             ctx.fillEllipse(in: r)
         }
     }
+
 }
 
 final class MainMenuView: UIView {

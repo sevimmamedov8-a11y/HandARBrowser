@@ -1,4 +1,4 @@
-name: Build HandAR Vision IPA — V22
+name: Build HandAR Vision IPA — V23
 
 on:
   push:
@@ -42,6 +42,8 @@ jobs:
           grep -Fq "AnchorEntity(world: anchorTransform)" HandARBrowser/MainViewController.swift
           grep -Fq "tracking.addAnchor(transform: anchorTransform)" HandARBrowser/MainViewController.swift
           grep -Fq "setWorldQuadrilateral" HandARBrowser/MainViewController.swift
+          ! grep -Fq "panel.position =" HandARBrowser/MainViewController.swift
+          grep -Fq "panel.layer.position =" HandARBrowser/MainViewController.swift
           grep -Fq "eyeSeparation: Float = 0.062" HandARBrowser/MainViewController.swift
           ! grep -Fq "let half = view.bounds.height / 2" HandARBrowser/MainViewController.swift
           grep -Fq "adaptiveAlpha" HandARBrowser/MainViewController.swift

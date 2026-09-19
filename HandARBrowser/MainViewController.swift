@@ -788,7 +788,7 @@ final class EyeContainer: UIView {
         // directly from the web canvas to the tracked quadrilateral.
         panel.layer.anchorPoint = .zero
         panel.bounds = CGRect(origin: .zero, size: panelFrame.size)
-        panel.position = panelFrame.origin
+        panel.layer.position = panelFrame.origin
         panelTransform = .identity
         panel.layer.setAffineTransform(.identity)
         webView.frame = panel.bounds.insetBy(dx: 2, dy: 2)
@@ -814,7 +814,7 @@ final class EyeContainer: UIView {
         let b = (topRight.y - topLeft.y) / w
         let c = (bottomLeft.x - topLeft.x) / h
         let d = (bottomLeft.y - topLeft.y) / h
-        panel.position = topLeft
+        panel.layer.position = topLeft
         panelTransform = CGAffineTransform(a: a, b: b, c: c, d: d, tx: 0, ty: 0)
         panel.layer.setAffineTransform(panelTransform)
     }

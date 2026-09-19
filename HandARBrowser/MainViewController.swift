@@ -4,247 +4,348 @@ import Vision
 import WebKit
 import CoreMotion
 
-@inline(__always)
-private func configureLandscapeConnection(_ connection: AVCaptureConnection?) {
+private func configurePreviewRotation(_ connection: AVCaptureConnection?, orientation: UIInterfaceOrientation) {
     guard let connection else { return }
-    // iOS 17+ API used by the current deployment target.
-    // 90° is the landscape rotation used by the split-screen headset layout.
-    if connection.isVideoRotationAngleSupported(90) {
-        connection.videoRotationAngle = 90
+    let angle: CGFloat
+    switch orientation {
+    case .landscapeLeft:
+        angle = 270
+    case .landscapeRight:
+        angle = 90
+    default:
+        angle = 90
+    }
+    if connection.isVideoRotationAngleSupported(angle) {
+        connection.videoRotationAngle = angle
     }
 }
 
+final class CameraPreviewView: UIView {
+    override class var layerClass: AnyClass { AVCaptureVideoPreviewLayer.self }
+
+    var previewLayer: AVCaptureVideoPreviewLayer {
+        layer as! AVCaptureVideoPreviewLayer
+    }
+
+    init(session: AVCaptureSession) {
+        super.init(frame: .zero)
+        backgroundColor = .black
+        previewLayer.session = session
+        previewLayer.videoGravity = .resizeAspectFill
+        previewLayer.needsDisplayOnBoundsChange = true
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+}
 
 final class MainViewController: UIViewController {
-    private lazy var camera = CameraManager()
-    private lazy var motion = MotionTracker()
-    private lazy var hands = HandTracker()
+    private let camera = CameraManager()
+    private let motion = MotionTracker()
+    private let hands = HandTracker()
     private let input = WebInputBridge()
 
-    private var leftPreview: AVCaptureVideoPreviewLayer?
-    private var rightPreview: AVCaptureVideoPreviewLayer?
-
-    private let leftEye = EyeContainer(hand: .left)
-    private let rightEye = EyeContainer(hand: .right)
-    private let cursorLeftA = CursorView(title: "L")
-    private let cursorLeftB = CursorView(title: "L")
-    private let cursorRightA = CursorView(title: "R")
-    private let cursorRightB = CursorView(title: "R")
+    private var cameraView: CameraPreviewView!
+    private let eyeLeft = EyeContainer(title: "LEFT")
+    private let eyeRight = EyeContainer(title: "RIGHT")
+    private let cursorLeft = CursorView()
+    private let cursorRight = CursorView()
     private let hud = HUDView()
-    private let startPanel = StartPanel()
+    private let addressField = UITextField()
+    private let goButton = UIButton(type: .system)
+
     private var lastSize: CGSize = .zero
+    private var lastCameraFrame = CACurrentMediaTime()
+    private var browserVisible = true
     private var started = false
 
     override var prefersStatusBarHidden: Bool { true }
-    override var shouldAutorotate: Bool { true }
+    override var shouldAutorotate: Bool { false }
     override var supportedInterfaceOrientations: UIInterfaceOrientationMask { .landscape }
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        view.backgroundColor = .black
+        buildInterface()
+        wireServices()
+        registerCameraNotifications()
+    }
 
-        leftEye.webView.navigationDelegate = self
-        rightEye.webView.navigationDelegate = self
-        input.mirror = [leftEye.webView, rightEye.webView]
-        leftEye.webView.uiDelegate = self
-        rightEye.webView.uiDelegate = self
-
-        view.addSubview(leftEye)
-        view.addSubview(rightEye)
-        view.addSubview(cursorLeftA)
-        view.addSubview(cursorLeftB)
-        view.addSubview(cursorRightA)
-        view.addSubview(cursorRightB)
-        view.addSubview(hud)
-        view.addSubview(startPanel)
-
-        startPanel.onStart = { [weak self] url in self?.start(url: url) }
-        hud.onRecenter = { [weak self] in self?.motion.calibrate() }
-        hud.onToggleBrowser = { [weak self] in self?.toggleBrowser() }
-
-        hands.onUpdate = { [weak self] left, right in self?.handleHands(left: left, right: right) }
-        motion.onUpdate = { [weak self] pose in self?.handleHead(pose) }
-
-        camera.onPermissionDenied = { [weak self] in
-            DispatchQueue.main.async {
-                self?.showMessage("Камера запрещена. Открой Настройки → Hand AR Browser → Камера и включи доступ.")
-            }
-        }
-        camera.onConfigurationFailed = { [weak self] message in
-            DispatchQueue.main.async {
-                self?.started = false
-                self?.startPanel.isHidden = false
-                self?.hud.isHidden = true
-                self?.showMessage("Не удалось запустить камеру.\n\n\(message)")
-            }
-        }
-        camera.onReady = { [weak self] in
-            DispatchQueue.main.async {
-                guard let self else { return }
-                self.installPreviewLayersIfNeeded()
-                self.camera.start()
-                self.motion.start()
-                self.motion.calibrate()
-                self.hud.isHidden = false
-            }
-        }
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        guard !started else { return }
+        started = true
+        camera.prepareAndStart()
+        motion.start()
+        motion.calibrate()
+        eyeLeft.load(url: Self.homeURL)
+        eyeRight.load(url: Self.homeURL)
     }
 
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
-        guard view.bounds.size != lastSize else { return }
+        guard view.bounds.size != lastSize else {
+            updatePreviewRotation()
+            return
+        }
         lastSize = view.bounds.size
+
+        cameraView.frame = view.bounds
+
         let w = view.bounds.width
         let h = view.bounds.height
         let half = w / 2
-        leftPreview?.frame = CGRect(x: 0, y: 0, width: half, height: h)
-        rightPreview?.frame = CGRect(x: half, y: 0, width: half, height: h)
-        leftEye.frame = CGRect(x: 0, y: 0, width: half, height: h)
-        rightEye.frame = CGRect(x: half, y: 0, width: half, height: h)
-        for cursor in [cursorLeftA, cursorLeftB, cursorRightA, cursorRightB] {
-            cursor.frame.size = CGSize(width: 36, height: 36)
+        eyeLeft.frame = CGRect(x: 0, y: 0, width: half, height: h)
+        eyeRight.frame = CGRect(x: half, y: 0, width: half, height: h)
+
+        hud.frame = CGRect(x: 18, y: 16, width: min(430, w - 36), height: 42)
+        addressField.frame = CGRect(x: max(20, w - 360), y: 16, width: 286, height: 42)
+        goButton.frame = CGRect(x: w - 64, y: 16, width: 44, height: 42)
+        cursorLeft.frame.size = CGSize(width: 34, height: 34)
+        cursorRight.frame.size = CGSize(width: 34, height: 34)
+
+        updatePreviewRotation()
+    }
+
+    private static let homeURL = URL(string: "https://www.google.com/")!
+
+    private func buildInterface() {
+        view.backgroundColor = .black
+
+        cameraView = CameraPreviewView(session: camera.session)
+        view.addSubview(cameraView)
+
+        eyeLeft.alpha = 0.94
+        eyeRight.alpha = 0.94
+        view.addSubview(eyeLeft)
+        view.addSubview(eyeRight)
+
+        cursorLeft.isHidden = true
+        cursorRight.isHidden = true
+        view.addSubview(cursorLeft)
+        view.addSubview(cursorRight)
+
+        setupHud()
+        setupAddressBar()
+        hud.bringSubviewToFront(in: view)
+        addressField.bringSubviewToFront(in: view)
+        goButton.bringSubviewToFront(in: view)
+        cursorLeft.bringSubviewToFront(in: view)
+        cursorRight.bringSubviewToFront(in: view)
+    }
+
+    private func setupHud() {
+        hud.statusText.text = "КАМЕРА • ЗАПУСК..."
+        hud.onCenter = { [weak self] in
+            self?.motion.calibrate()
+            self?.hud.setStatus("CENTER • OK")
         }
-        hud.frame = CGRect(x: 18, y: 18, width: min(360, w - 36), height: 42)
-        startPanel.frame = CGRect(x: 0, y: 0, width: w, height: h)
-    }
-
-    private func installPreviewLayersIfNeeded() {
-        guard leftPreview == nil, rightPreview == nil else { return }
-        let left = AVCaptureVideoPreviewLayer(session: camera.session)
-        let right = AVCaptureVideoPreviewLayer(session: camera.session)
-        left.videoGravity = .resizeAspectFill
-        right.videoGravity = .resizeAspectFill
-        configureLandscapeConnection(left.connection)
-        configureLandscapeConnection(right.connection)
-        view.layer.insertSublayer(left, at: 0)
-        view.layer.insertSublayer(right, at: 0)
-        leftPreview = left
-        rightPreview = right
-        view.setNeedsLayout()
-    }
-
-    private func start(url: URL) {
-        guard !started else { return }
-        started = true
-        startPanel.isHidden = true
-        hud.isHidden = true
-        leftEye.load(url: url)
-        rightEye.load(url: url)
-        camera.prepare()
-    }
-
-    private func handleHead(_ pose: HeadPose) {
-        let yaw = clamp(pose.yaw * 4.8, -0.42, 0.42)
-        let pitch = clamp(pose.pitch * 4.0, -0.30, 0.30)
-        let roll = clamp(-pose.roll, -0.18, 0.18)
-        let dx = -CGFloat(yaw) * 170
-        let dy = CGFloat(pitch) * 120
-        leftEye.setHeadOffset(dx: dx - 3, dy: dy, roll: roll)
-        rightEye.setHeadOffset(dx: dx + 3, dy: dy, roll: roll)
-    }
-
-    private func handleHands(left: HandSample?, right: HandSample?) {
-        DispatchQueue.main.async { [weak self] in
+        hud.onBrowser = { [weak self] in
             guard let self else { return }
-            self.updateCursor(sample: left, cursors: [self.cursorLeftA, self.cursorLeftB], eye: self.leftEye, pointerID: 1)
-            self.updateCursor(sample: right, cursors: [self.cursorRightA, self.cursorRightB], eye: self.rightEye, pointerID: 2)
+            self.browserVisible.toggle()
+            self.eyeLeft.isHidden = !self.browserVisible
+            self.eyeRight.isHidden = !self.browserVisible
+            self.hud.setBrowserVisible(self.browserVisible)
+        }
+        hud.onCamera = { [weak self] in
+            self?.camera.requestStartAgain()
+        }
+        view.addSubview(hud)
+    }
+
+    private func setupAddressBar() {
+        addressField.text = Self.homeURL.absoluteString
+        addressField.placeholder = "https://..."
+        addressField.textColor = .white
+        addressField.tintColor = .systemYellow
+        addressField.font = .systemFont(ofSize: 13, weight: .medium)
+        addressField.backgroundColor = UIColor.black.withAlphaComponent(0.65)
+        addressField.layer.cornerRadius = 10
+        addressField.layer.borderWidth = 1
+        addressField.layer.borderColor = UIColor.white.withAlphaComponent(0.18).cgColor
+        addressField.autocapitalizationType = .none
+        addressField.autocorrectionType = .no
+        addressField.keyboardType = .URL
+        addressField.returnKeyType = .go
+        addressField.delegate = self
+        view.addSubview(addressField)
+
+        goButton.setTitle("GO", for: .normal)
+        goButton.tintColor = .white
+        goButton.backgroundColor = UIColor.black.withAlphaComponent(0.70)
+        goButton.layer.cornerRadius = 10
+        goButton.layer.borderWidth = 1
+        goButton.layer.borderColor = UIColor.white.withAlphaComponent(0.18).cgColor
+        goButton.addAction(UIAction { [weak self] _ in self?.loadAddress() }, for: .touchUpInside)
+        view.addSubview(goButton)
+    }
+
+    private func wireServices() {
+        eyeLeft.webView.navigationDelegate = self
+        eyeRight.webView.navigationDelegate = self
+        eyeLeft.webView.uiDelegate = self
+        eyeRight.webView.uiDelegate = self
+        input.mirror = [eyeLeft.webView, eyeRight.webView]
+
+        camera.onStatus = { [weak self] text in
+            DispatchQueue.main.async { self?.hud.setStatus(text) }
+        }
+        camera.onFrame = { [weak self] sampleBuffer, orientation in
+            guard let self else { return }
+            self.lastCameraFrame = CACurrentMediaTime()
+            self.hands.process(sampleBuffer: sampleBuffer, orientation: orientation)
+        }
+        camera.onConfigurationFailed = { [weak self] reason in
+            DispatchQueue.main.async { self?.hud.setStatus("КАМЕРА • ОШИБКА") ; self?.showCameraAlert(reason) }
+        }
+        camera.onPermissionDenied = { [weak self] in
+            DispatchQueue.main.async {
+                self?.hud.setStatus("КАМЕРА • НЕТ ДОСТУПА")
+                self?.showCameraAlert("Разреши камеру в Настройки → HandAR Vision → Камера.")
+            }
+        }
+
+        hands.onUpdate = { [weak self] left, right in
+            guard let self else { return }
+            DispatchQueue.main.async {
+                self.updateCursor(left, view: self.cursorLeft, pointerID: 1)
+                self.updateCursor(right, view: self.cursorRight, pointerID: 2)
+            }
+        }
+
+        motion.onUpdate = { [weak self] pose in
+            DispatchQueue.main.async {
+                self?.applyHeadPose(pose)
+            }
         }
     }
 
-    private func updateCursor(sample: HandSample?, cursors: [CursorView], eye: EyeContainer, pointerID: Int) {
+    private func registerCameraNotifications() {
+        NotificationCenter.default.addObserver(forName: .AVCaptureSessionRuntimeError, object: camera.session, queue: .main) { [weak self] note in
+            let error = (note.userInfo?[AVCaptureSessionErrorKey] as? Error)?.localizedDescription ?? "Неизвестная ошибка"
+            self?.hud.setStatus("КАМЕРА • ERROR")
+            self?.showCameraAlert(error)
+        }
+        NotificationCenter.default.addObserver(forName: .AVCaptureSessionWasInterrupted, object: camera.session, queue: .main) { [weak self] _ in
+            self?.hud.setStatus("КАМЕРА • ПРИОСТАНОВЛЕНА")
+        }
+        NotificationCenter.default.addObserver(forName: .AVCaptureSessionInterruptionEnded, object: camera.session, queue: .main) { [weak self] _ in
+            self?.hud.setStatus("КАМЕРА • ВОССТАНОВЛЕНИЕ")
+            self?.camera.requestStartAgain()
+        }
+    }
+
+    private func updatePreviewRotation() {
+        let orientation = view.window?.windowScene?.interfaceOrientation ?? .landscapeRight
+        configurePreviewRotation(cameraView.previewLayer.connection, orientation: orientation)
+    }
+
+    private func updateCursor(_ sample: HandSample?, view cursorView: CursorView, pointerID: Int) {
         guard let sample else {
-            cursors.forEach { $0.isHidden = true }
-            input.release(pointerID: pointerID, webView: eye.webView)
+            cursorView.isHidden = true
+            let target = pointerID == 1 ? eyeLeft.webView : eyeRight.webView
+            input.release(pointerID: pointerID, webView: target)
             return
         }
-        let leftScreenPoint = cameraPointToScreen(sample.indexTip, eyeIndex: 0)
-        let rightScreenPoint = cameraPointToScreen(sample.indexTip, eyeIndex: 1)
-        cursors[0].isHidden = false
-        cursors[1].isHidden = false
-        cursors[0].center = leftScreenPoint
-        cursors[1].center = rightScreenPoint
-        cursors.forEach { $0.setPressed(sample.isPinching) }
-        let screenPoint = eye === leftEye ? leftScreenPoint : rightScreenPoint
-        let local = eye.convert(screenPoint, from: view)
-        let panelRect = eye.browserFrame
-        guard panelRect.contains(local), panelRect.width > 0, panelRect.height > 0 else {
-            input.release(pointerID: pointerID, webView: eye.webView)
-            return
-        }
-        let webLocal = CGPoint(x: local.x - panelRect.minX, y: local.y - panelRect.minY)
-        let webPoint = CGPoint(
-            x: webLocal.x / panelRect.width * eye.webView.bounds.width,
-            y: webLocal.y / panelRect.height * eye.webView.bounds.height
-        )
-        input.update(pointerID: pointerID, point: webPoint, pinch: sample.isPinching, webView: eye.webView)
-    }
 
-    private func cameraPointToScreen(_ p: CGPoint, eyeIndex: Int) -> CGPoint {
-        let screen = view.bounds.size
-        let halfW = screen.width / 2
-        let viewW = halfW
-        let viewH = screen.height
-        guard viewW > 0, viewH > 0 else { return .zero }
-        let imageAspect: CGFloat = 16.0 / 9.0
-        let viewAspect = viewW / viewH
-        let scale: CGFloat
-        let drawW: CGFloat
-        let drawH: CGFloat
-        let cropX: CGFloat
-        let cropY: CGFloat
-        if imageAspect > viewAspect {
-            scale = viewH / 1080.0
-            drawW = 1920.0 * scale
-            drawH = viewH
-            cropX = (drawW - viewW) / 2
-            cropY = 0
+        let devicePoint = CGPoint(x: sample.indexTip.x, y: 1.0 - sample.indexTip.y)
+        let point = cameraView.previewLayer.layerPointConverted(fromCaptureDevicePoint: devicePoint)
+        cursorView.isHidden = false
+        cursorView.center = point
+        cursorView.setPressed(sample.isPinching)
+
+        let half = view.bounds.width / 2
+        if point.x < half {
+            sendPointer(point: point, eye: eyeLeft, pointerID: pointerID, pinch: sample.isPinching)
         } else {
-            scale = viewW / 1920.0
-            drawW = viewW
-            drawH = 1080.0 * scale
-            cropX = 0
-            cropY = (drawH - viewH) / 2
+            sendPointer(point: CGPoint(x: point.x - half, y: point.y), eye: eyeRight, pointerID: pointerID, pinch: sample.isPinching)
         }
-        let xInEye = p.x * drawW - cropX
-        let yInEye = (1.0 - p.y) * drawH - cropY
-        let x = CGFloat(eyeIndex) * halfW + xInEye
-        return CGPoint(x: clamp(x, 0, screen.width), y: clamp(yInEye, 0, screen.height))
     }
 
-    private func toggleBrowser() {
-        leftEye.isHidden.toggle()
-        rightEye.isHidden = leftEye.isHidden
-        hud.setBrowserVisible(!leftEye.isHidden)
+    private func sendPointer(point: CGPoint, eye: EyeContainer, pointerID: Int, pinch: Bool) {
+        let panel = eye.browserFrame
+        guard panel.contains(point) else {
+            input.release(pointerID: pointerID, webView: eye.webView)
+            return
+        }
+        let x = ((point.x - panel.minX) / max(panel.width, 1)) * eye.webView.bounds.width
+        let y = ((point.y - panel.minY) / max(panel.height, 1)) * eye.webView.bounds.height
+        input.update(pointerID: pointerID, point: CGPoint(x: x, y: y), pinch: pinch, webView: eye.webView)
     }
 
-    private func showMessage(_ text: String) {
+    private func applyHeadPose(_ pose: HeadPose) {
+        let yaw = clamp(pose.yaw * 4.4, -0.38, 0.38)
+        let pitch = clamp(pose.pitch * 3.7, -0.26, 0.26)
+        let roll = clamp(-pose.roll, -0.16, 0.16)
+        let dx = -CGFloat(yaw) * 155
+        let dy = CGFloat(pitch) * 105
+        eyeLeft.setHeadOffset(dx: dx - 2, dy: dy, roll: roll)
+        eyeRight.setHeadOffset(dx: dx + 2, dy: dy, roll: roll)
+    }
+
+    private func loadAddress() {
+        let raw = addressField.text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !raw.isEmpty else { return }
+        let normalized = (raw.hasPrefix("http://") || raw.hasPrefix("https://")) ? raw : "https://\(raw)"
+        guard let url = URL(string: normalized) else {
+            showCameraAlert("Некорректный адрес.")
+            return
+        }
+        eyeLeft.load(url: url)
+        eyeRight.load(url: url)
+        addressField.resignFirstResponder()
+    }
+
+    private func showCameraAlert(_ message: String) {
         guard presentedViewController == nil else { return }
-        let alert = UIAlertController(title: "Hand AR Browser", message: text, preferredStyle: .alert)
+        let alert = UIAlertController(title: "HandAR Vision", message: message, preferredStyle: .alert)
         alert.addAction(UIAlertAction(title: "OK", style: .default))
         present(alert, animated: true)
     }
 
-    private func clamp(_ value: Double, _ min: Double, _ max: Double) -> Double { Swift.min(Swift.max(value, min), max) }
-    private func clamp(_ value: CGFloat, _ min: CGFloat, _ max: CGFloat) -> CGFloat { Swift.min(Swift.max(value, min), max) }
+    private func clamp(_ value: Double, _ min: Double, _ max: Double) -> Double {
+        Swift.min(Swift.max(value, min), max)
+    }
 }
+
+extension MainViewController: UITextFieldDelegate {
+    func textFieldShouldReturn(_ textField: UITextField) -> Bool {
+        loadAddress()
+        return true
+    }
+}
+
 extension MainViewController: WKNavigationDelegate, WKUIDelegate {
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         guard let url = webView.url else { return }
-        let other = (webView === leftEye.webView) ? rightEye.webView : leftEye.webView
-        guard other.url?.absoluteString != url.absoluteString else { return }
-        other.load(URLRequest(url: url))
+        let other = webView === eyeLeft.webView ? eyeRight.webView : eyeLeft.webView
+        if other.url?.absoluteString != url.absoluteString {
+            other.load(URLRequest(url: url))
+        }
+        addressField.text = url.absoluteString
+        installPageHooksIfNeeded(webView)
+        DispatchQueue.main.async { [weak self] in
+            self?.hud.setStatus("КАМЕРА • OK   •   BROWSER • OK")
+        }
     }
 
-    func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
-                 decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        installPageHooksIfNeeded(webView)
+        hud.setStatus("BROWSER • ОШИБКА СЕТИ")
+    }
+
+    func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
         decisionHandler(.allow)
     }
 
-    func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
-                 for navigationAction: WKNavigationAction,
-                 windowFeatures: WKWindowFeatures) -> WKWebView? {
+    func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration, for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
         webView.load(navigationAction.request)
         return nil
+    }
+
+    private func installPageHooksIfNeeded(_ webView: WKWebView) {
+        // WebInput.js is installed at document start by EyeContainer. This extra call
+        // is intentionally empty; it keeps the navigation lifecycle simple on iOS.
     }
 }
 
@@ -255,14 +356,13 @@ struct HeadPose {
 }
 
 struct HandSample {
-    let chirality: VNChirality
     let indexTip: CGPoint
     let thumbTip: CGPoint
-    let confidence: VNConfidence
     let isPinching: Bool
 }
 
-@inline(__always) private func smooth(_ old: CGPoint?, _ new: CGPoint, alpha: CGFloat) -> CGPoint {
+@inline(__always)
+private func smooth(_ old: CGPoint?, _ new: CGPoint, alpha: CGFloat) -> CGPoint {
     guard let old else { return new }
     return CGPoint(x: old.x + (new.x - old.x) * alpha,
                    y: old.y + (new.y - old.y) * alpha)
@@ -272,88 +372,110 @@ final class CameraManager: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
     let session = AVCaptureSession()
     private let queue = DispatchQueue(label: "handar.camera", qos: .userInitiated)
     private var configured = false
-    private var output: AVCaptureVideoDataOutput?
+    private var startRequested = false
+    private var videoOutput: AVCaptureVideoDataOutput?
+
     var onFrame: ((CMSampleBuffer, CGImagePropertyOrientation) -> Void)?
+    var onStatus: ((String) -> Void)?
     var onPermissionDenied: (() -> Void)?
     var onConfigurationFailed: ((String) -> Void)?
-    var onReady: (() -> Void)?
 
-    func prepare() {
+    func prepareAndStart() {
+        startRequested = true
         switch AVCaptureDevice.authorizationStatus(for: .video) {
         case .authorized:
-            queue.async { [weak self] in self?.configure() }
+            configureThenStart()
         case .notDetermined:
+            DispatchQueue.main.async { [weak self] in self?.onStatus?("КАМЕРА • РАЗРЕШЕНИЕ...") }
             AVCaptureDevice.requestAccess(for: .video) { [weak self] allowed in
                 guard let self else { return }
                 if allowed {
-                    self.queue.async { self.configure() }
+                    self.configureThenStart()
                 } else {
                     DispatchQueue.main.async { self.onPermissionDenied?() }
                 }
             }
         case .denied, .restricted:
-            DispatchQueue.main.async { [weak self] in self?.onPermissionDenied?() }
+            onPermissionDenied?()
         @unknown default:
-            DispatchQueue.main.async { [weak self] in self?.onPermissionDenied?() }
+            onPermissionDenied?()
+        }
+    }
+
+    func requestStartAgain() {
+        startRequested = true
+        guard AVCaptureDevice.authorizationStatus(for: .video) == .authorized else {
+            prepareAndStart()
+            return
+        }
+        configureThenStart()
+    }
+
+    private func configureThenStart() {
+        queue.async { [weak self] in
+            guard let self else { return }
+            if !self.configured {
+                self.configure()
+            }
+            guard self.configured, self.startRequested, !self.session.isRunning else { return }
+            DispatchQueue.main.async { self.onStatus?("КАМЕРА • СТАРТ...") }
+            self.session.startRunning()
+            DispatchQueue.main.async { self.onStatus?("КАМЕРА • OK") }
         }
     }
 
     private func configure() {
-        guard !configured else {
-            DispatchQueue.main.async { [weak self] in self?.onReady?() }
-            return
-        }
+        guard !configured else { return }
         guard let device = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back) else {
-            DispatchQueue.main.async { [weak self] in self?.onConfigurationFailed?("Задняя камера не найдена.") }
+            DispatchQueue.main.async { [weak self] in
+                self?.onConfigurationFailed?("Задняя камера iPhone не найдена.")
+            }
             return
         }
 
         session.beginConfiguration()
-        var ok = false
         defer { session.commitConfiguration() }
 
-        if session.canSetSessionPreset(.hd1280x720) { session.sessionPreset = .hd1280x720 }
+        if session.canSetSessionPreset(.hd1280x720) {
+            session.sessionPreset = .hd1280x720
+        }
 
         do {
             let input = try AVCaptureDeviceInput(device: device)
             guard session.canAddInput(input) else {
-                DispatchQueue.main.async { [weak self] in self?.onConfigurationFailed?("iOS не разрешил добавить камеру в AVCaptureSession.") }
+                DispatchQueue.main.async { [weak self] in
+                    self?.onConfigurationFailed?("Не удалось подключить камеру к AVCaptureSession.")
+                }
                 return
             }
             session.addInput(input)
 
-            let videoOutput = AVCaptureVideoDataOutput()
-            videoOutput.alwaysDiscardsLateVideoFrames = true
-            videoOutput.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarFullRange]
-            videoOutput.setSampleBufferDelegate(self, queue: queue)
-            guard session.canAddOutput(videoOutput) else {
-                DispatchQueue.main.async { [weak self] in self?.onConfigurationFailed?("iOS не разрешил добавить видеовыход.") }
+            let output = AVCaptureVideoDataOutput()
+            output.alwaysDiscardsLateVideoFrames = true
+            output.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarFullRange]
+            output.setSampleBufferDelegate(self, queue: queue)
+            guard session.canAddOutput(output) else {
+                DispatchQueue.main.async { [weak self] in
+                    self?.onConfigurationFailed?("Не удалось подключить видеовыход камеры.")
+                }
                 return
             }
-            session.addOutput(videoOutput)
-            output = videoOutput
-            if let connection = videoOutput.connection(with: .video) {
-                configureLandscapeConnection(connection)
-                if connection.isVideoMirroringSupported { connection.isVideoMirrored = false }
+            session.addOutput(output)
+            videoOutput = output
+
+            if let connection = output.connection(with: .video), connection.isVideoMirroringSupported {
+                connection.isVideoMirrored = false
             }
-            ok = true
+            configured = true
         } catch {
-            DispatchQueue.main.async { [weak self] in self?.onConfigurationFailed?("Ошибка настройки камеры: \(error.localizedDescription)") }
-        }
-
-        guard ok else { return }
-        configured = true
-        DispatchQueue.main.async { [weak self] in self?.onReady?() }
-    }
-
-    func start() {
-        queue.async { [weak self] in
-            guard let self, self.configured, !self.session.isRunning else { return }
-            self.session.startRunning()
+            DispatchQueue.main.async { [weak self] in
+                self?.onConfigurationFailed?("Ошибка настройки камеры: \(error.localizedDescription)")
+            }
         }
     }
 
     func stop() {
+        startRequested = false
         queue.async { [weak self] in
             guard let self, self.session.isRunning else { return }
             self.session.stopRunning()
@@ -361,34 +483,42 @@ final class CameraManager: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
     }
 
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
-        onFrame?(sampleBuffer, .right)
+        onFrame?(sampleBuffer, captureOrientation())
+    }
+
+    private func captureOrientation() -> CGImagePropertyOrientation {
+        DispatchQueue.main.sync {
+            let orientation = UIApplication.shared.connectedScenes
+                .compactMap { $0 as? UIWindowScene }
+                .first?.interfaceOrientation ?? .landscapeRight
+            return orientation == .landscapeLeft ? .left : .right
+        }
     }
 }
 
 final class MotionTracker {
     private let manager = CMMotionManager()
-    private let queue: OperationQueue = { let q = OperationQueue(); q.qualityOfService = .userInteractive; return q }()
+    private let queue: OperationQueue = {
+        let q = OperationQueue()
+        q.qualityOfService = .userInteractive
+        return q
+    }()
     private var reference: CMAttitude?
     private let lock = NSLock()
     var onUpdate: ((HeadPose) -> Void)?
 
     func start() {
         guard manager.isDeviceMotionAvailable, !manager.isDeviceMotionActive else { return }
-        manager.deviceMotionUpdateInterval = 1.0 / 120.0
+        manager.deviceMotionUpdateInterval = 1.0 / 90.0
         manager.startDeviceMotionUpdates(using: .xArbitraryZVertical, to: queue) { [weak self] motion, _ in
             guard let self, let motion else { return }
             self.lock.lock()
             let ref = self.reference
             self.lock.unlock()
-
-            if let ref {
-                let relative = (motion.attitude.copy() as? CMAttitude) ?? motion.attitude
-                relative.multiply(byInverseOf: ref)
-                let yaw = relative.yaw
-                let pitch = relative.pitch
-                let roll = relative.roll
-                self.onUpdate?(HeadPose(yaw: yaw, pitch: pitch, roll: roll))
-            }
+            guard let ref else { return }
+            let relative = (motion.attitude.copy() as? CMAttitude) ?? motion.attitude
+            relative.multiply(byInverseOf: ref)
+            self.onUpdate?(HeadPose(yaw: relative.yaw, pitch: relative.pitch, roll: relative.roll))
         }
     }
 
@@ -406,7 +536,7 @@ final class HandTracker {
         r.maximumHandCount = 2
         return r
     }()
-    private let queue = DispatchQueue(label: "handar.vision", qos: .userInteractive)
+    private let queue = DispatchQueue(label: "handar.vision", qos: .userInitiated)
     private let gate = DispatchSemaphore(value: 1)
     private var lastLeft: CGPoint?
     private var lastRight: CGPoint?
@@ -417,35 +547,35 @@ final class HandTracker {
         guard gate.wait(timeout: .now()) == .success else { return }
         queue.async { [weak self] in
             guard let self else { return }
+            defer { self.gate.signal() }
             let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: orientation, options: [:])
             do {
                 try handler.perform([self.request])
-                let observations = self.request.results ?? []
                 var left: HandSample?
                 var right: HandSample?
-                for obs in observations {
-                    guard let index = try? obs.recognizedPoint(.indexTip),
-                          let thumb = try? obs.recognizedPoint(.thumbTip),
+                for observation in self.request.results ?? [] {
+                    guard let index = try? observation.recognizedPoint(.indexTip),
+                          let thumb = try? observation.recognizedPoint(.thumbTip),
                           index.confidence > 0.35,
                           thumb.confidence > 0.35 else { continue }
 
-                    let prev = obs.chirality == .left ? self.lastLeft : self.lastRight
-                    let filtered = smooth(prev, index.location, alpha: 0.42)
-                    if obs.chirality == .left { self.lastLeft = filtered }
-                    else if obs.chirality == .right { self.lastRight = filtered }
-
-                    let pinchDistance = hypot(index.location.x - thumb.location.x, index.location.y - thumb.location.y)
-                    let sample = HandSample(chirality: obs.chirality,
-                                            indexTip: filtered,
-                                            thumbTip: thumb.location,
-                                            confidence: min(index.confidence, thumb.confidence),
-                                            isPinching: pinchDistance < 0.055)
-                    if obs.chirality == .left { left = sample }
-                    if obs.chirality == .right { right = sample }
+                    let filtered: CGPoint
+                    if observation.chirality == .left {
+                        filtered = smooth(self.lastLeft, index.location, alpha: 0.45)
+                        self.lastLeft = filtered
+                    } else {
+                        filtered = smooth(self.lastRight, index.location, alpha: 0.45)
+                        self.lastRight = filtered
+                    }
+                    let pinch = hypot(filtered.x - thumb.location.x, filtered.y - thumb.location.y) < 0.055
+                    let sample = HandSample(indexTip: filtered, thumbTip: thumb.location, isPinching: pinch)
+                    if observation.chirality == .left { left = sample }
+                    else { right = sample }
                 }
                 self.onUpdate?(left, right)
-            } catch { }
-            self.gate.signal()
+            } catch {
+                self.onUpdate?(nil, nil)
+            }
         }
     }
 }
@@ -467,14 +597,15 @@ final class WebInputBridge {
             dispatch("window.__handarPointerDown(\(point.x),\(point.y),\(pointerID));", to: webView)
         } else if pinch && state.down {
             if abs(deltaY) > 0.5 {
-                let script = "window.scrollBy(0, \(String(format: "%.2f", locale: Locale(identifier: "en_US_POSIX"), deltaY * 2.8)));"
-                mirror.filter { $0 !== webView }.forEach { dispatch(script, to: $0) }
+                let amount = String(format: "%.2f", locale: Locale(identifier: "en_US_POSIX"), deltaY * 2.6)
+                let script = "window.scrollBy(0, \(amount));"
                 dispatch(script, to: webView)
             }
             dispatch("window.__handarPointerMove(\(point.x),\(point.y),\(pointerID));", to: webView)
         } else if !pinch && state.down {
             state.down = false
             dispatch("window.__handarPointerUp(\(point.x),\(point.y),\(pointerID));", to: webView)
+            mirror.filter { $0 !== webView }.forEach { dispatch("window.scrollTo(0, window.scrollY);", to: $0) }
         } else {
             dispatch("window.__handarHover(\(point.x),\(point.y));", to: webView)
         }
@@ -497,14 +628,14 @@ final class WebInputBridge {
 }
 
 final class EyeContainer: UIView {
-    enum HandSide { case left, right }
     let webView: WKWebView
+    private let panelBackground = UIView()
     private let chrome = UIView()
     private let titleLabel = UILabel()
     private var baseTransform: CGAffineTransform = .identity
     private(set) var browserFrame: CGRect = .zero
 
-    init(hand: HandSide) {
+    init(title: String) {
         let config = WKWebViewConfiguration()
         let controller = WKUserContentController()
         if let path = Bundle.main.path(forResource: "WebInput", ofType: "js"),
@@ -515,39 +646,48 @@ final class EyeContainer: UIView {
         config.allowsInlineMediaPlayback = true
         webView = WKWebView(frame: .zero, configuration: config)
         super.init(frame: .zero)
-        clipsToBounds = true
         backgroundColor = .clear
+        clipsToBounds = false
 
-        chrome.backgroundColor = UIColor.black.withAlphaComponent(0.78)
+        panelBackground.backgroundColor = UIColor.black.withAlphaComponent(0.28)
+        panelBackground.layer.cornerRadius = 18
+        panelBackground.layer.borderWidth = 1
+        panelBackground.layer.borderColor = UIColor.white.withAlphaComponent(0.18).cgColor
+        addSubview(panelBackground)
+        addSubview(webView)
+        chrome.backgroundColor = UIColor.black.withAlphaComponent(0.70)
         chrome.layer.cornerRadius = 10
         addSubview(chrome)
-        addSubview(webView)
 
+        titleLabel.text = "  \(title) • BROWSER"
         titleLabel.textColor = .white
         titleLabel.font = .systemFont(ofSize: 11, weight: .semibold)
-        titleLabel.text = hand == .left ? "LEFT EYE" : "RIGHT EYE"
         chrome.addSubview(titleLabel)
 
-        let border = CAShapeLayer()
-        border.strokeColor = UIColor.white.withAlphaComponent(0.22).cgColor
-        border.fillColor = UIColor.clear.cgColor
-        border.lineWidth = 1
-        layer.addSublayer(border)
-
-        webView.isOpaque = true
-        webView.backgroundColor = .black
+        webView.isOpaque = false
+        webView.backgroundColor = UIColor.clear
+        webView.scrollView.backgroundColor = UIColor.clear
+        webView.alpha = 0.93
+        let s = webView.configuration.preferences
+        s.javaScriptEnabled = true
+        let ws = webView.scrollView
+        ws.alwaysBounceVertical = true
+        webView.allowsBackForwardNavigationGestures = true
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        let marginX = bounds.width * 0.08
-        let marginY = bounds.height * 0.08
-        browserFrame = CGRect(x: marginX, y: marginY, width: bounds.width - 2 * marginX, height: bounds.height - 2 * marginY)
-        webView.frame = browserFrame
-        chrome.frame = CGRect(x: browserFrame.minX, y: browserFrame.minY - 30, width: browserFrame.width, height: 26)
-        titleLabel.frame = chrome.bounds.insetBy(dx: 8, dy: 2)
+        let marginX = bounds.width * 0.09
+        let marginTop = bounds.height * 0.15
+        let panelH = bounds.height * 0.68
+        let panel = CGRect(x: marginX, y: marginTop, width: bounds.width - 2 * marginX, height: panelH)
+        browserFrame = panel
+        panelBackground.frame = panel
+        webView.frame = panel.insetBy(dx: 2, dy: 2)
+        chrome.frame = CGRect(x: panel.minX, y: panel.minY - 30, width: panel.width, height: 26)
+        titleLabel.frame = chrome.bounds.insetBy(dx: 5, dy: 2)
     }
 
     func load(url: URL) {
@@ -555,126 +695,79 @@ final class EyeContainer: UIView {
     }
 
     func setHeadOffset(dx: CGFloat, dy: CGFloat, roll: CGFloat) {
-        let t = CGAffineTransform(translationX: dx, y: dy).rotated(by: roll)
-        transform = baseTransform.concatenating(t)
+        let transform = CGAffineTransform(translationX: dx, y: dy).rotated(by: roll)
+        self.transform = baseTransform.concatenating(transform)
     }
 }
 
 final class CursorView: UIView {
-    private let label = UILabel()
-    init(title: String) {
-        super.init(frame: .zero)
-        backgroundColor = UIColor.white.withAlphaComponent(0.12)
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        backgroundColor = UIColor.systemYellow.withAlphaComponent(0.16)
         layer.borderWidth = 2
-        layer.borderColor = UIColor.white.cgColor
-        layer.cornerRadius = 18
+        layer.borderColor = UIColor.systemYellow.cgColor
+        layer.cornerRadius = 17
         isUserInteractionEnabled = false
-        isHidden = true
-        label.text = title
-        label.textColor = .white
-        label.font = .systemFont(ofSize: 11, weight: .bold)
-        label.textAlignment = .center
-        addSubview(label)
     }
+
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-    override func layoutSubviews() { label.frame = bounds }
+
     func setPressed(_ pressed: Bool) {
-        alpha = pressed ? 0.95 : 0.65
-        layer.borderColor = (pressed ? UIColor.systemGreen : UIColor.white).cgColor
+        alpha = pressed ? 1.0 : 0.75
+        transform = pressed ? CGAffineTransform(scaleX: 1.15, y: 1.15) : .identity
     }
 }
 
 final class HUDView: UIView {
-    var onRecenter: (() -> Void)?
-    var onToggleBrowser: (() -> Void)?
-    private let recenter = UIButton(type: .system)
-    private let toggle = UIButton(type: .system)
+    let statusText = UILabel()
+    var onCenter: (() -> Void)?
+    var onBrowser: (() -> Void)?
+    var onCamera: (() -> Void)?
+    private let center = UIButton(type: .system)
+    private let browser = UIButton(type: .system)
+    private let camera = UIButton(type: .system)
 
     override init(frame: CGRect) {
         super.init(frame: frame)
-        backgroundColor = UIColor.black.withAlphaComponent(0.65)
+        backgroundColor = UIColor.black.withAlphaComponent(0.62)
         layer.cornerRadius = 10
-        recenter.setTitle("CENTER", for: .normal)
-        toggle.setTitle("BROWSER", for: .normal)
-        recenter.tintColor = .white
-        toggle.tintColor = .white
-        addSubview(recenter); addSubview(toggle)
-        recenter.addAction(UIAction { [weak self] _ in self?.onRecenter?() }, for: .touchUpInside)
-        toggle.addAction(UIAction { [weak self] _ in self?.onToggleBrowser?() }, for: .touchUpInside)
-        isHidden = true
+        layer.borderWidth = 1
+        layer.borderColor = UIColor.white.withAlphaComponent(0.18).cgColor
+
+        statusText.textColor = .white
+        statusText.font = .monospacedSystemFont(ofSize: 10, weight: .medium)
+        statusText.text = "КАМЕРА • ЗАПУСК..."
+        addSubview(statusText)
+
+        center.setTitle("CENTER", for: .normal)
+        browser.setTitle("BROWSER", for: .normal)
+        camera.setTitle("CAM", for: .normal)
+        [center, browser, camera].forEach {
+            $0.tintColor = .white
+            $0.titleLabel?.font = .systemFont(ofSize: 10, weight: .semibold)
+            addSubview($0)
+        }
+        center.addAction(UIAction { [weak self] _ in self?.onCenter?() }, for: .touchUpInside)
+        browser.addAction(UIAction { [weak self] _ in self?.onBrowser?() }, for: .touchUpInside)
+        camera.addAction(UIAction { [weak self] _ in self?.onCamera?() }, for: .touchUpInside)
     }
+
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
     override func layoutSubviews() {
-        let half = bounds.width / 2
-        recenter.frame = CGRect(x: 0, y: 0, width: half, height: bounds.height)
-        toggle.frame = CGRect(x: half, y: 0, width: half, height: bounds.height)
+        let buttonW: CGFloat = 70
+        statusText.frame = CGRect(x: 10, y: 0, width: max(80, bounds.width - buttonW * 3 - 12), height: bounds.height)
+        center.frame = CGRect(x: bounds.width - buttonW * 3, y: 0, width: buttonW, height: bounds.height)
+        browser.frame = CGRect(x: bounds.width - buttonW * 2, y: 0, width: buttonW, height: bounds.height)
+        camera.frame = CGRect(x: bounds.width - buttonW, y: 0, width: buttonW, height: bounds.height)
     }
-    func setBrowserVisible(_ visible: Bool) {
-        toggle.setTitle(visible ? "BROWSER" : "BROWSER OFF", for: .normal)
-    }
+
+    func setStatus(_ text: String) { statusText.text = text }
+    func setBrowserVisible(_ visible: Bool) { browser.setTitle(visible ? "BROWSER" : "OFF", for: .normal) }
 }
 
-final class StartPanel: UIView {
-    var onStart: ((URL) -> Void)?
-    private let title = UILabel()
-    private let field = UITextField()
-    private let button = UIButton(type: .system)
-    private let note = UILabel()
-
-    override init(frame: CGRect) {
-        super.init(frame: frame)
-        backgroundColor = UIColor.black.withAlphaComponent(0.82)
-
-        title.text = "HAND AR BROWSER"
-        title.textColor = .white
-        title.font = .systemFont(ofSize: 32, weight: .bold)
-        title.textAlignment = .center
-
-        field.text = "https://www.google.com"
-        field.textColor = .white
-        field.backgroundColor = UIColor.white.withAlphaComponent(0.1)
-        field.layer.cornerRadius = 12
-        field.layer.borderWidth = 1
-        field.layer.borderColor = UIColor.white.withAlphaComponent(0.25).cgColor
-        field.autocapitalizationType = .none
-        field.autocorrectionType = .no
-        field.keyboardType = .URL
-        field.returnKeyType = .go
-        field.placeholder = "URL"
-
-        button.setTitle("START", for: .normal)
-        button.tintColor = .white
-        button.titleLabel?.font = .systemFont(ofSize: 17, weight: .bold)
-        button.backgroundColor = UIColor.systemBlue.withAlphaComponent(0.85)
-        button.layer.cornerRadius = 12
-
-        note.text = "Вставь телефон в очки. Камера должна смотреть наружу.\nУказательный = курсор • щипок = клик/перетаскивание • CENTER = калибровка"
-        note.numberOfLines = 0
-        note.textAlignment = .center
-        note.textColor = UIColor.white.withAlphaComponent(0.75)
-        note.font = .systemFont(ofSize: 14)
-
-        addSubview(title); addSubview(field); addSubview(button); addSubview(note)
-        button.addAction(UIAction { [weak self] _ in self?.start() }, for: .touchUpInside)
-        field.delegate = self
+private extension UIView {
+    func bringSubviewToFront(in root: UIView) {
+        root.bringSubviewToFront(self)
     }
-    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-    override func layoutSubviews() {
-        let w = bounds.width
-        title.frame = CGRect(x: w*0.18, y: bounds.height*0.20, width: w*0.64, height: 45)
-        field.frame = CGRect(x: w*0.25, y: bounds.height*0.38, width: w*0.50, height: 52)
-        button.frame = CGRect(x: w*0.35, y: bounds.height*0.54, width: w*0.30, height: 52)
-        note.frame = CGRect(x: w*0.18, y: bounds.height*0.67, width: w*0.64, height: 70)
-    }
-    private func start() {
-        let raw = field.text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let value = raw.hasPrefix("http://") || raw.hasPrefix("https://") ? raw : "https://\(raw)"
-        guard let url = URL(string: value) else { return }
-        endEditing(true)
-        onStart?(url)
-    }
-}
-
-extension StartPanel: UITextFieldDelegate {
-    func textFieldShouldReturn(_ textField: UITextField) -> Bool { start(); return true }
 }

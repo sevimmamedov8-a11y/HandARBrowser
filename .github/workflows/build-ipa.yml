@@ -1,4 +1,4 @@
-name: Build HandARBrowser IPA
+name: Build HandAR Vision IPA
 
 on:
   push:
@@ -27,7 +27,10 @@ jobs:
           chmod +x Scripts/CHECK_PROJECT.command Scripts/BUILD_UNSIGNED_IPA.command
           ./Scripts/CHECK_PROJECT.command
           grep -Fq "AVCaptureDevice.authorizationStatus" HandARBrowser/MainViewController.swift
-          grep -Fq "private var leftPreview: AVCaptureVideoPreviewLayer?" HandARBrowser/MainViewController.swift
+          grep -Fq "private var startRequested = false" HandARBrowser/MainViewController.swift
+          grep -Fq "camera.prepareAndStart()" HandARBrowser/MainViewController.swift
+          grep -Fq "HandAR Vision" HandARBrowser/Info.plist
+          grep -Fq "final class CameraPreviewView" HandARBrowser/MainViewController.swift
           ! grep -Fq "as! CMAttitude" HandARBrowser/MainViewController.swift
 
       - name: Build iPhoneOS app (unsigned)
@@ -39,6 +42,7 @@ jobs:
           /usr/bin/unzip -l build/HandARBrowser-unsigned.ipa | grep -E 'Payload/HandARBrowser.app/' >/dev/null
           /usr/bin/unzip -p build/HandARBrowser-unsigned.ipa Payload/HandARBrowser.app/Info.plist >/dev/null
           echo "IPA OK"
+          /usr/bin/unzip -p build/HandARBrowser-unsigned.ipa Payload/HandARBrowser.app/Info.plist | grep -Fq "HandAR Vision"
 
       - name: Upload IPA artifact
         uses: actions/upload-artifact@v4

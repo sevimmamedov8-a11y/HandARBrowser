@@ -473,8 +473,8 @@ final class MainViewController: UIViewController {
             zFar: 100
         )
 
-        leftCameraNode.camera?.projectionTransform = SCNMatrix4FromMat4(leftProjection)
-        rightCameraNode.camera?.projectionTransform = SCNMatrix4FromMat4(rightProjection)
+        leftCameraNode.camera?.projectionTransform = SCNMatrix4(leftProjection)
+        rightCameraNode.camera?.projectionTransform = SCNMatrix4(rightProjection)
     }
 
     private func updateBrowserSnapshot() {
@@ -576,7 +576,7 @@ final class MainViewController: UIViewController {
         rightCursorNode.isHidden = false
 
         input.update(
-            normalizedPoint: CGPoint(x: normalizedX, y: normalizedY),
+            normalizedPoint: CGPoint(x: CGFloat(normalizedX), y: CGFloat(normalizedY)),
             pinch: sample.isPinching,
             webView: browser
         )

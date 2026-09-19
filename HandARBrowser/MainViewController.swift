@@ -753,12 +753,14 @@ final class ARStereoTrackingManager: NSObject, ARSessionDelegate {
         planeTransform: simd_float4x4?
     ) -> SIMD3<Float>? {
         guard let frame = latestFrameCopy, let planeTransform, viewportSize.width > 1, viewportSize.height > 1 else { return nil }
-        let point = frame.camera.unprojectPoint(
+        guard let point = frame.camera.unprojectPoint(
             localPoint,
             ontoPlane: planeTransform,
             orientation: interfaceOrientation,
             viewportSize: viewportSize
-        )
+        ) else {
+            return nil
+        }
         guard point.x.isFinite, point.y.isFinite, point.z.isFinite else { return nil }
         return point
     }

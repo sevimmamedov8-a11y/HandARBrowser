@@ -40,3 +40,12 @@ V26 сделан именно как стерео-режим для телефо
 
 ## V26 — VR-style stereo compositor
 V26 uses one logical WKWebView as the browser surface. The page is captured into one texture and rendered twice by two independent transparent SceneKit eye views with separate stereo cameras. A full-screen ARSCNView provides the AR camera passthrough. ARKit world tracking anchors the browser plane in world space, and hand input is mapped onto that plane with ARCamera.unprojectPoint.
+
+## Управление рукой в V29
+
+- Указательный + большой: клик.
+- Держать щипок и двигать пальцем: прокрутка и перетаскивание.
+- Большой + средний: назад.
+- Большой + безымянный: вперёд.
+- Щипок двумя руками: заново поставить браузер перед собой.
+- На изображении камеры показывается полный скелет руки с костями.

@@ -723,7 +723,7 @@ final class HUDView: UIView {
     var onCenter: (() -> Void)?
     var onBrowser: (() -> Void)?
     var onCamera: (() -> Void)?
-    private let center = UIButton(type: .system)
+    private let centerButton = UIButton(type: .system)
     private let browser = UIButton(type: .system)
     private let camera = UIButton(type: .system)
 
@@ -739,15 +739,15 @@ final class HUDView: UIView {
         statusText.text = "КАМЕРА • ЗАПУСК..."
         addSubview(statusText)
 
-        center.setTitle("CENTER", for: .normal)
+        centerButton.setTitle("CENTER", for: .normal)
         browser.setTitle("BROWSER", for: .normal)
         camera.setTitle("CAM", for: .normal)
-        [center, browser, camera].forEach {
+        [centerButton, browser, camera].forEach {
             $0.tintColor = .white
             $0.titleLabel?.font = .systemFont(ofSize: 10, weight: .semibold)
             addSubview($0)
         }
-        center.addAction(UIAction { [weak self] _ in self?.onCenter?() }, for: .touchUpInside)
+        centerButton.addAction(UIAction { [weak self] _ in self?.onCenter?() }, for: .touchUpInside)
         browser.addAction(UIAction { [weak self] _ in self?.onBrowser?() }, for: .touchUpInside)
         camera.addAction(UIAction { [weak self] _ in self?.onCamera?() }, for: .touchUpInside)
     }
@@ -757,7 +757,7 @@ final class HUDView: UIView {
     override func layoutSubviews() {
         let buttonW: CGFloat = 70
         statusText.frame = CGRect(x: 10, y: 0, width: max(80, bounds.width - buttonW * 3 - 12), height: bounds.height)
-        center.frame = CGRect(x: bounds.width - buttonW * 3, y: 0, width: buttonW, height: bounds.height)
+        centerButton.frame = CGRect(x: bounds.width - buttonW * 3, y: 0, width: buttonW, height: bounds.height)
         browser.frame = CGRect(x: bounds.width - buttonW * 2, y: 0, width: buttonW, height: bounds.height)
         camera.frame = CGRect(x: bounds.width - buttonW, y: 0, width: buttonW, height: bounds.height)
     }

@@ -31,6 +31,8 @@ jobs:
           grep -Fq "camera.prepareAndStart()" HandARBrowser/MainViewController.swift
           grep -Fq "HandAR Vision" HandARBrowser/Info.plist
           grep -Fq "final class CameraPreviewView" HandARBrowser/MainViewController.swift
+          grep -Fq "private let centerButton = UIButton(type: .system)" HandARBrowser/MainViewController.swift
+          ! grep -Fq "private let center = UIButton(type: .system)" HandARBrowser/MainViewController.swift
           ! grep -Fq "as! CMAttitude" HandARBrowser/MainViewController.swift
 
       - name: Build iPhoneOS app (unsigned)

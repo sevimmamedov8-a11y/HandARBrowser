@@ -1,0 +1,51 @@
+// !$*UTF8*$!
+{
+ archiveVersion = 1;
+ classes = {};
+ objectVersion = 56;
+ objects = {
+/* Begin PBXBuildFile section */
+	A685F0E452754F8990454846 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = FC21E499E8434390AA90DC20; };
+	B33BE08ED40C4C4296E92701 /* MainViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = B3E88CFBE7EB4D088588E46F; };
+	372B16B660AA4300AA68F330 /* WebInput.js in Resources */ = {isa = PBXBuildFile; fileRef = 6ED7A3A83BB74772A8A4360C; };
+/* End PBXBuildFile section */
+/* Begin PBXFileReference section */
+	74945642D2A0467CA902B9FD /* HandARBrowser.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = HandARBrowser.app; sourceTree = BUILT_PRODUCTS_DIR; };
+	FC21E499E8434390AA90DC20 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
+	B3E88CFBE7EB4D088588E46F /* MainViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainViewController.swift; sourceTree = "<group>"; };
+	A88E8CA765064CA1983BB687 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+	6ED7A3A83BB74772A8A4360C /* WebInput.js */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; path = WebInput.js; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+/* Begin PBXFrameworksBuildPhase section */
+	EB60DC3CC97D4278AEE5878A /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = ( ); runOnlyForDeploymentPostprocessing = 0; };
+/* End PBXFrameworksBuildPhase section */
+/* Begin PBXGroup section */
+	52B287C77A0647968634E0FA /* HandARBrowser */ = {isa = PBXGroup; children = ( FC21E499E8434390AA90DC20, B3E88CFBE7EB4D088588E46F, A88E8CA765064CA1983BB687, 6ED7A3A83BB74772A8A4360C, ); path = HandARBrowser; sourceTree = "<group>"; };
+	595A973A71A44AAF80A91AE1 /* Products */ = {isa = PBXGroup; children = ( 74945642D2A0467CA902B9FD, ); name = Products; sourceTree = "<group>"; };
+	23E494FE5F0A41A8827BA1B3 /* Main Group */ = {isa = PBXGroup; children = ( 52B287C77A0647968634E0FA, 595A973A71A44AAF80A91AE1, ); sourceTree = "<group>"; };
+/* End PBXGroup section */
+/* Begin PBXNativeTarget section */
+	FCA81223F59F420BB6079619 /* HandARBrowser */ = {isa = PBXNativeTarget; buildConfigurationList = 44042F4E25384E03BF1C8A7E; buildPhases = ( 1A9CA6CF8F4D48A8B4E9B8FD, EB60DC3CC97D4278AEE5878A, 2C8885DF8C53453382057D21, ); buildRules = ( ); dependencies = ( ); name = HandARBrowser; productName = HandARBrowser; productReference = 74945642D2A0467CA902B9FD; productType = "com.apple.product-type.application"; };
+/* End PBXNativeTarget section */
+/* Begin PBXProject section */
+	23E494FE5F0A41A8827BA1B3 /* Project object */ = {isa = PBXProject; attributes = { LastUpgradeCheck = 1600; TargetAttributes = { FCA81223F59F420BB6079619 = { CreatedOnToolsVersion = 16.0; }; }; }; buildConfigurationList = 347290D4653547DEAB814C78; compatibilityVersion = "Xcode 15.0"; developmentRegion = en; hasScannedForEncodings = 0; knownRegions = ( en, Base ); mainGroup = 23E494FE5F0A41A8827BA1B3; productRefGroup = 595A973A71A44AAF80A91AE1; projectDirPath = ""; projectRoot = ""; targets = ( FCA81223F59F420BB6079619, ); };
+/* End PBXProject section */
+/* Begin PBXResourcesBuildPhase section */
+	2C8885DF8C53453382057D21 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = ( 372B16B660AA4300AA68F330 /* WebInput.js in Resources */, ); runOnlyForDeploymentPostprocessing = 0; };
+/* End PBXResourcesBuildPhase section */
+/* Begin PBXSourcesBuildPhase section */
+	1A9CA6CF8F4D48A8B4E9B8FD /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = ( A685F0E452754F8990454846 /* AppDelegate.swift in Sources */, B33BE08ED40C4C4296E92701 /* MainViewController.swift in Sources */, ); runOnlyForDeploymentPostprocessing = 0; };
+/* End PBXSourcesBuildPhase section */
+/* Begin XCBuildConfiguration section */
+	94E3AC8C69594CAAB57B91FD /* Debug */ = {isa = XCBuildConfiguration; buildSettings = { ALWAYS_SEARCH_USER_PATHS = NO; CLANG_ENABLE_MODULES = YES; CLANG_ENABLE_OBJC_ARC = YES; CLANG_CXX_LANGUAGE_STANDARD = "gnu++20"; CLANG_CXX_LIBRARY = "libc++"; CLANG_ENABLE_OBJC_WEAK = YES; CURRENT_PROJECT_VERSION = 1; DEBUG_INFORMATION_FORMAT = dwarf; GCC_C_LANGUAGE_STANDARD = gnu17; GCC_NO_COMMON_BLOCKS = YES; IPHONEOS_DEPLOYMENT_TARGET = 17.0; MTL_FAST_MATH = YES; SDKROOT = iphoneos; SWIFT_OPTIMIZATION_LEVEL = "-Onone"; SWIFT_VERSION = 5.0; }; name = Debug; };
+	7CBE889136564D93982D0F7F /* Release */ = {isa = XCBuildConfiguration; buildSettings = { ALWAYS_SEARCH_USER_PATHS = NO; CLANG_ENABLE_MODULES = YES; CLANG_ENABLE_OBJC_ARC = YES; CLANG_CXX_LANGUAGE_STANDARD = "gnu++20"; CLANG_CXX_LIBRARY = "libc++"; CLANG_ENABLE_OBJC_WEAK = YES; CURRENT_PROJECT_VERSION = 1; DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym"; GCC_C_LANGUAGE_STANDARD = gnu17; GCC_NO_COMMON_BLOCKS = YES; IPHONEOS_DEPLOYMENT_TARGET = 17.0; MTL_FAST_MATH = YES; SDKROOT = iphoneos; SWIFT_COMPILATION_MODE = wholemodule; SWIFT_OPTIMIZATION_LEVEL = "-O"; SWIFT_VERSION = 5.0; }; name = Release; };
+	EC306B2949A641328FDEDDE9 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = { CURRENT_PROJECT_VERSION = 1; DEVELOPMENT_TEAM = ""; GENERATE_INFOPLIST_FILE = NO; INFOPLIST_FILE = HandARBrowser/Info.plist; INFOPLIST_KEY_CFBundleDisplayName = "Hand AR Browser"; IPHONEOS_DEPLOYMENT_TARGET = 17.0; LD_RUNPATH_SEARCH_PATHS = ( "$(inherited)", "@executable_path/Frameworks" ); PRODUCT_BUNDLE_IDENTIFIER = com.steamkek.HandARBrowser; PRODUCT_NAME = "$(TARGET_NAME)"; SWIFT_EMIT_LOC_STRINGS = YES; SWIFT_VERSION = 5.0; TARGETED_DEVICE_FAMILY = "1"; UIRequiresFullScreen = YES; }; name = Debug; };
+	9AE321CF2E8340B78145E9DD /* Release */ = {isa = XCBuildConfiguration; buildSettings = { CURRENT_PROJECT_VERSION = 1; DEVELOPMENT_TEAM = ""; GENERATE_INFOPLIST_FILE = NO; INFOPLIST_FILE = HandARBrowser/Info.plist; INFOPLIST_KEY_CFBundleDisplayName = "Hand AR Browser"; IPHONEOS_DEPLOYMENT_TARGET = 17.0; LD_RUNPATH_SEARCH_PATHS = ( "$(inherited)", "@executable_path/Frameworks" ); PRODUCT_BUNDLE_IDENTIFIER = com.steamkek.HandARBrowser; PRODUCT_NAME = "$(TARGET_NAME)"; SWIFT_EMIT_LOC_STRINGS = YES; SWIFT_VERSION = 5.0; TARGETED_DEVICE_FAMILY = "1"; UIRequiresFullScreen = YES; }; name = Release; };
+/* End XCBuildConfiguration section */
+/* Begin XCConfigurationList section */
+	347290D4653547DEAB814C78 /* Build configuration list for PBXProject */ = {isa = XCConfigurationList; buildConfigurations = ( 94E3AC8C69594CAAB57B91FD, 7CBE889136564D93982D0F7F, ); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+	44042F4E25384E03BF1C8A7E /* Build configuration list for PBXNativeTarget "HandARBrowser" */ = {isa = XCConfigurationList; buildConfigurations = ( EC306B2949A641328FDEDDE9, 9AE321CF2E8340B78145E9DD, ); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+/* End XCConfigurationList section */
+	};
+ rootObject = 23E494FE5F0A41A8827BA1B3 /* Project object */;
+}

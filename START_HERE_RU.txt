@@ -1,27 +1,29 @@
-HANDAR VISION V18
+HANDAR VISION V29 — настоящий VR-режим
 
-Главное меню теперь минимальное: название и одна кнопка «ВОЙТИ В AR».
+Что изменилось: split-screen заменён на полный стереоконвейер.
+Асимметричные фрустумы под линзы, barrel-предыскажение в Metal,
+сквозное видео отдельно для каждого глаза, панель браузера одна
+и закреплена в мире. Подробности — в README_RU.md.
 
-1) Содержимое этой папки помести в корень репозитория HandARBrowser.
-2) Не добавляй папку .git из архива поверх своего репозитория.
-3) В GitHub Desktop: Commit Summary = V18: AR glasses mode redesign
-4) Нажми Commit to main -> Push origin.
-5) GitHub -> Actions -> Build HandAR Vision IPA.
-6) После зелёной сборки скачай artifact HandARBrowser-IPA.
-7) Внутри будет HandARBrowser-unsigned.ipa. Его можно подписать через ESign.
+Как собрать:
+1) Содержимое этой папки помести в корень репозитория HandARBrowser
+   (файлы перезаписать, папку .git из архива не копировать).
+2) GitHub Desktop: Commit Summary = V29: real VR stereo pipeline
+3) Commit to main -> Push origin.
+4) GitHub -> Actions -> Build HandAR Vision IPA.
+5) Скачай artifact HandARBrowser-IPA, внутри HandARBrowser-unsigned.ipa.
+6) Подпиши через ESign или аналог.
 
-V18:
-- минимальное главное меню;
-- вход в AR одной кнопкой;
-- RealityKit ARView + ARWorldTrackingConfiguration;
-- задняя камера как live passthrough;
-- два синхронизированных глаза как одна виртуальная браузерная сцена;
-- маска под линзы и стерео-разнос панели;
-- ARKit tracking поворота и перемещения телефона;
-- правильная обработка portrait/landscape;
-- один курсор от указательного пальца;
-- pinch = click, pinch + движение = scroll/drag;
-- обе руки pinch = CENTER;
-- pinch у левого/правого края landscape = LEFT/RIGHT.
+Файлы, которые изменились:
+- HandARBrowser/MainViewController.swift   (переписан целиком)
+- HandARBrowser/Info.plist                 (версия 1.1 / build 29)
+- HandARBrowser.xcodeproj/project.pbxproj  (+ Metal, MetalKit в OTHER_LDFLAGS)
+- Scripts/CHECK_PROJECT.command            (проверки под новую архитектуру)
+- .github/workflows/build-ipa.yml          (название сборки)
+- README_RU.md, PROJECT_NOTES_RU.md        (документация)
 
-TOM4OS не используется.
+Не изменились: AppDelegate.swift, WebInput.js, index.html, остальные скрипты.
+
+ПЕРВЫЙ ЗАПУСК: обязательно пройди калибровку в меню.
+Значения по умолчанию рассчитаны на Cardboard v2; под свой шлем нужно
+подогнать расстояние между линзами и k1/k2, иначе картинки не сольются.

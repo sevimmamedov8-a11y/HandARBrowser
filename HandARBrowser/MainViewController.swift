@@ -1,26 +1,375 @@
+//
+//  MainViewController.swift
+//  HandAR Vision — V29, настоящий VR-режим
+//
+//  Что изменилось относительно V28
+//  --------------------------------
+//  Было: полноэкранный ARSCNView с видео камеры + два прозрачных SCNView сверху.
+//  Обе камеры глаз брали ОДНУ И ТУ ЖЕ матрицу проекции реальной камеры
+//  (frame.camera.projectionMatrix), предыскажения под линзы не было вообще.
+//  Результат — split-screen, а не VR: сквозное видео не разделено по глазам,
+//  прямые линии выгибаются в линзах, картинки не сливаются.
+//
+//  Стало: полный стереоконвейер.
+//    ARKit (поза головы)
+//        └─► одна SCNScene, две камеры на реальном IPD
+//              └─► SCNRenderer × 2 → офскрин-текстура (левая/правая половина)
+//                    └─► Metal-проход: YCbCr-passthrough пер-глаз,
+//                        barrel-предыскажение, хроматика, маска линзы
+//                          └─► экран
+//
+//  Проекция каждого глаза — асимметричный фрустум, построенный из физической
+//  геометрии шлема (размер экрана, расстояние между линзами, глаз→экран).
+//  Шейдер компилируется в рантайме, .metal-файл в проект добавлять не нужно.
+//
+
 import UIKit
 import AVFoundation
 import ARKit
 import SceneKit
 import Vision
 import WebKit
+import Metal
+import MetalKit
 import simd
 
 struct HandSample {
     let indexTip: CGPoint
     let thumbTip: CGPoint
     let isPinching: Bool
-    let isBackPinching: Bool
-    let isForwardPinching: Bool
-    let joints: [VNHumanHandPoseObservation.JointName: CGPoint]
 }
 
-final class MainViewController: UIViewController {
+// MARK: - Профиль шлема --------------------------------------------------------
+
+/// Физика шлема и линз. Все линейные размеры — в миллиметрах.
+struct VRProfile: Codable, Equatable {
+    /// Ширина активной области экрана в ландшафте (длинная сторона).
+    var screenWidthMM: Float
+    /// Высота активной области экрана в ландшафте (короткая сторона).
+    var screenHeightMM: Float
+
+    /// Межзрачковое расстояние пользователя.
+    var ipdMM: Float = 63
+    /// Расстояние между центрами линз шлема.
+    var lensSeparationMM: Float = 63
+    /// Смещение центров линз по вертикали относительно центра экрана.
+    var lensVerticalOffsetMM: Float = 0
+    /// Расстояние от глаза до экрана сквозь линзу.
+    var eyeToScreenMM: Float = 42
+
+    /// Коэффициенты радиального предыскажения.
+    var k1: Float = 0.34
+    var k2: Float = 0.18
+    /// Компенсация хроматической аберрации линзы.
+    var chroma: Float = 0.006
+    /// Радиус видимой части линзы. Всё за ним — чёрное.
+    var lensClipRadius: Float = 1.0
+
+    /// Запас поля зрения под предыскажение.
+    var fovScale: Float = 1.18
+    /// Суперсэмплинг офскрин-буфера.
+    var supersample: Float = 1.2
+
+    /// Сквозное видео с камеры.
+    var passthrough: Bool = true
+
+    static let storageKey = "handar.vr.profile.v1"
+
+    static func makeDefault() -> VRProfile {
+        let native = UIScreen.main.nativeBounds
+        let longPx = Float(max(native.width, native.height))
+        let shortPx = Float(min(native.width, native.height))
+        let mmPerPixel = 25.4 / estimatedPPI()
+        return VRProfile(screenWidthMM: longPx * mmPerPixel,
+                         screenHeightMM: shortPx * mmPerPixel)
+    }
+
+    private static func estimatedPPI() -> Float {
+        var info = utsname()
+        uname(&info)
+        let model = withUnsafePointer(to: &info.machine) { pointer -> String in
+            pointer.withMemoryRebound(to: CChar.self, capacity: 1) { String(cString: $0) }
+        }
+        // SE-корпуса — 326 ppi, остальные современные iPhone — около 460.
+        if model.hasPrefix("iPhone8,4")
+            || model.hasPrefix("iPhone12,8")
+            || model.hasPrefix("iPhone14,6") {
+            return 326
+        }
+        return UIScreen.main.scale >= 3 ? 460 : 326
+    }
+
+    static func load() -> VRProfile {
+        guard
+            let data = UserDefaults.standard.data(forKey: storageKey),
+            let decoded = try? JSONDecoder().decode(VRProfile.self, from: data)
+        else {
+            return makeDefault()
+        }
+        return decoded
+    }
+
+    func save() {
+        guard let data = try? JSONEncoder().encode(self) else { return }
+        UserDefaults.standard.set(data, forKey: VRProfile.storageKey)
+    }
+}
+
+/// Границы пирамиды видимости на единичном расстоянии (тангенсы углов).
+struct EyeFrustum {
+    var left: Float
+    var right: Float
+    var bottom: Float
+    var top: Float
+}
+
+enum VRLensMath {
+    /// Асимметричный фрустум для глаза. Центр линзы почти никогда не совпадает
+    /// с центром половины экрана, поэтому пирамида несимметрична — именно этого
+    /// не хватало прошлой версии.
+    static func frustum(eye: Int, profile: VRProfile) -> EyeFrustum {
+        let halfWidth = profile.screenWidthMM * 0.5
+        let halfHeight = profile.screenHeightMM * 0.5
+        let depth = max(profile.eyeToScreenMM, 1)
+
+        let sign: Float = (eye == 0) ? -1 : 1
+        let lensX = sign * profile.lensSeparationMM * 0.5
+        let lensY = profile.lensVerticalOffsetMM
+
+        let viewportMinX: Float = (eye == 0) ? -halfWidth : 0
+        let viewportMaxX: Float = (eye == 0) ? 0 : halfWidth
+
+        var frustum = EyeFrustum(left: (viewportMinX - lensX) / depth,
+                                 right: (viewportMaxX - lensX) / depth,
+                                 bottom: (-halfHeight - lensY) / depth,
+                                 top: (halfHeight - lensY) / depth)
+
+        // Рендерим шире видимого: предыскажение утягивает края к центру.
+        let scale = max(profile.fovScale, 1)
+        let centerX = (frustum.left + frustum.right) * 0.5
+        let centerY = (frustum.bottom + frustum.top) * 0.5
+        frustum.left = centerX + (frustum.left - centerX) * scale
+        frustum.right = centerX + (frustum.right - centerX) * scale
+        frustum.bottom = centerY + (frustum.bottom - centerY) * scale
+        frustum.top = centerY + (frustum.top - centerY) * scale
+        return frustum
+    }
+
+    /// Центр линзы в координатах половины экрана: 0…1, начало — левый верхний угол.
+    static func lensCenterUV(eye: Int, profile: VRProfile) -> SIMD2<Float> {
+        let halfWidth = profile.screenWidthMM * 0.5
+        let sign: Float = (eye == 0) ? -1 : 1
+        let lensX = sign * profile.lensSeparationMM * 0.5
+        let viewportMinX: Float = (eye == 0) ? -halfWidth : 0
+
+        let u = (lensX - viewportMinX) / max(halfWidth, 1)
+        let v = 0.5 - profile.lensVerticalOffsetMM / max(profile.screenHeightMM, 1)
+        return SIMD2<Float>(min(max(u, 0), 1), min(max(v, 0), 1))
+    }
+
+    static func projection(_ frustum: EyeFrustum, near: Float, far: Float) -> SCNMatrix4 {
+        let left = frustum.left * near
+        let right = frustum.right * near
+        let bottom = frustum.bottom * near
+        let top = frustum.top * near
+
+        var matrix = SCNMatrix4Identity
+        matrix.m11 = 2 * near / (right - left)
+        matrix.m12 = 0; matrix.m13 = 0; matrix.m14 = 0
+        matrix.m21 = 0
+        matrix.m22 = 2 * near / (top - bottom)
+        matrix.m23 = 0; matrix.m24 = 0
+        matrix.m31 = (right + left) / (right - left)
+        matrix.m32 = (top + bottom) / (top - bottom)
+        matrix.m33 = -(far + near) / (far - near)
+        matrix.m34 = -1
+        matrix.m41 = 0; matrix.m42 = 0
+        matrix.m43 = -2 * far * near / (far - near)
+        matrix.m44 = 0
+        return matrix
+    }
+}
+
+// MARK: - Metal-композитор -----------------------------------------------------
+
+private struct VRUniforms {
+    var lensCenterL = SIMD2<Float>(0.5, 0.5)
+    var lensCenterR = SIMD2<Float>(0.5, 0.5)
+    var camScaleL = SIMD2<Float>(1, 1)
+    var camOffsetL = SIMD2<Float>(0, 0)
+    var camScaleR = SIMD2<Float>(1, 1)
+    var camOffsetR = SIMD2<Float>(0, 0)
+    var aspect: Float = 1
+    var k1: Float = 0
+    var k2: Float = 0
+    var chroma: Float = 0
+    var rClip: Float = 1
+    var passthrough: Float = 1
+}
+
+/// Финальный проход. Берёт офскрин-текстуру глаз (левый глаз слева, правый справа),
+/// подкладывает под неё сквозное видео с камеры и продавливает всё через оптику линз.
+final class VRCompositor {
+    private let device: MTLDevice
+    private var pipeline: MTLRenderPipelineState?
+
+    init?(device: MTLDevice) {
+        self.device = device
+        guard makePipeline() else { return nil }
+    }
+
+    private static let source = """
+    #include <metal_stdlib>
+    using namespace metal;
+
+    struct VOut {
+        float4 pos [[position]];
+        float2 uv;
+    };
+
+    struct VRUniforms {
+        float2 lensCenterL;
+        float2 lensCenterR;
+        float2 camScaleL;
+        float2 camOffsetL;
+        float2 camScaleR;
+        float2 camOffsetR;
+        float aspect;
+        float k1;
+        float k2;
+        float chroma;
+        float rClip;
+        float passthrough;
+    };
+
+    vertex VOut vr_vertex(uint vid [[vertex_id]]) {
+        float2 corners[3] = { float2(-1.0, -3.0), float2(-1.0, 1.0), float2(3.0, 1.0) };
+        VOut out;
+        out.pos = float4(corners[vid], 0.0, 1.0);
+        out.uv = float2((corners[vid].x + 1.0) * 0.5, (1.0 - corners[vid].y) * 0.5);
+        return out;
+    }
+
+    static inline float3 ycbcr_to_rgb(float y, float2 cbcr) {
+        float cb = cbcr.x - 0.5;
+        float cr = cbcr.y - 0.5;
+        return float3(y + 1.402 * cr,
+                      y - 0.344136 * cb - 0.714136 * cr,
+                      y + 1.772 * cb);
+    }
+
+    fragment float4 vr_fragment(VOut in [[stage_in]],
+                                texture2d<float> eyes [[texture(0)]],
+                                texture2d<float> camY [[texture(1)]],
+                                texture2d<float> camCbCr [[texture(2)]],
+                                constant VRUniforms &u [[buffer(0)]]) {
+        constexpr sampler smp(filter::linear, address::clamp_to_edge);
+
+        float eye = in.uv.x < 0.5 ? 0.0 : 1.0;
+        float2 eyeUV = float2((in.uv.x - eye * 0.5) * 2.0, in.uv.y);
+        float2 center = (eye < 0.5) ? u.lensCenterL : u.lensCenterR;
+
+        // Изотропное пространство линзы.
+        float2 p = (eyeUV - center) * float2(u.aspect, 1.0);
+        float r2 = dot(p, p);
+        float r = sqrt(r2);
+        if (r > u.rClip) {
+            return float4(0.0, 0.0, 0.0, 1.0);
+        }
+
+        // Предыскажение: берём источник дальше от центра, чтобы линза,
+        // растягивающая картинку наружу, вернула прямые линии прямыми.
+        float f = 1.0 + u.k1 * r2 + u.k2 * r2 * r2;
+        float2 inv = float2(1.0 / u.aspect, 1.0);
+        float2 sampleG = center + p * f * inv;
+        float2 sampleR = center + p * (f * (1.0 + u.chroma)) * inv;
+        float2 sampleB = center + p * (f * (1.0 - u.chroma)) * inv;
+
+        if (sampleG.x < 0.0 || sampleG.x > 1.0 || sampleG.y < 0.0 || sampleG.y > 1.0) {
+            return float4(0.0, 0.0, 0.0, 1.0);
+        }
+
+        float2 off = float2(eye * 0.5, 0.0);
+        float4 cg = eyes.sample(smp, float2(sampleG.x * 0.5, sampleG.y) + off);
+        float cr = eyes.sample(smp, float2(sampleR.x * 0.5, sampleR.y) + off).r;
+        float cb = eyes.sample(smp, float2(sampleB.x * 0.5, sampleB.y) + off).b;
+
+        float3 overlay = float3(cr, cg.g, cb);
+        float alpha = cg.a;
+
+        float3 background = float3(0.0);
+        if (u.passthrough > 0.5) {
+            float2 camScale = (eye < 0.5) ? u.camScaleL : u.camScaleR;
+            float2 camOffset = (eye < 0.5) ? u.camOffsetL : u.camOffsetR;
+            float2 camUV = sampleG * camScale + camOffset;
+            if (camUV.x >= 0.0 && camUV.x <= 1.0 && camUV.y >= 0.0 && camUV.y <= 1.0) {
+                float yy = camY.sample(smp, camUV).r;
+                float2 cc = camCbCr.sample(smp, camUV).rg;
+                background = clamp(ycbcr_to_rgb(yy, cc), 0.0, 1.0);
+            }
+        }
+
+        float3 color = mix(background, overlay, clamp(alpha, 0.0, 1.0));
+
+        // Мягкий край линзы вместо рваной окружности.
+        float vignette = smoothstep(u.rClip, u.rClip * 0.88, r);
+        return float4(color * vignette, 1.0);
+    }
+    """
+
+    private func makePipeline() -> Bool {
+        do {
+            // Компиляция в рантайме: не требует .metal-файла в проекте.
+            let library = try device.makeLibrary(source: VRCompositor.source, options: nil)
+            guard
+                let vertexFunction = library.makeFunction(name: "vr_vertex"),
+                let fragmentFunction = library.makeFunction(name: "vr_fragment")
+            else {
+                return false
+            }
+
+            let descriptor = MTLRenderPipelineDescriptor()
+            descriptor.vertexFunction = vertexFunction
+            descriptor.fragmentFunction = fragmentFunction
+            descriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
+            pipeline = try device.makeRenderPipelineState(descriptor: descriptor)
+            return true
+        } catch {
+            NSLog("VRCompositor: шейдер не собрался — \(error)")
+            return false
+        }
+    }
+
+    fileprivate func encode(
+        into encoder: MTLRenderCommandEncoder,
+        eyeTexture: MTLTexture,
+        cameraY: MTLTexture?,
+        cameraCbCr: MTLTexture?,
+        uniforms: VRUniforms
+    ) {
+        guard let pipeline else { return }
+        var local = uniforms
+        if cameraY == nil || cameraCbCr == nil {
+            local.passthrough = 0
+        }
+        encoder.setRenderPipelineState(pipeline)
+        encoder.setFragmentTexture(eyeTexture, index: 0)
+        encoder.setFragmentTexture(cameraY ?? eyeTexture, index: 1)
+        encoder.setFragmentTexture(cameraCbCr ?? eyeTexture, index: 2)
+        encoder.setFragmentBytes(&local, length: MemoryLayout<VRUniforms>.stride, index: 0)
+        encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+    }
+}
+
+// MARK: - Главный контроллер ---------------------------------------------------
+
+final class MainViewController: UIViewController, MTKViewDelegate {
     private let tracking = ARStereoTrackingManager()
     private let hands = HandTracker()
     private let input = WebInputBridge()
 
-    // One logical browser surface, rendered independently by two stereo eye views.
+    // Одна логическая поверхность браузера. Стерео рождается из двух камер,
+    // а не из двух копий страницы.
     private let browser: WKWebView = {
         let config = WKWebViewConfiguration()
         config.defaultWebpagePreferences.allowsContentJavaScript = true
@@ -41,9 +390,9 @@ final class MainViewController: UIViewController {
         config.userContentController = controller
 
         let webView = WKWebView(frame: .zero, configuration: config)
-        webView.isOpaque = false
-        webView.backgroundColor = .black
-        webView.scrollView.backgroundColor = .black
+        webView.isOpaque = true
+        webView.backgroundColor = .white
+        webView.scrollView.backgroundColor = .white
         webView.scrollView.alwaysBounceVertical = true
         webView.customUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15"
         return webView
@@ -51,39 +400,41 @@ final class MainViewController: UIViewController {
     private var browserTimer: Timer?
     private var snapshotInProgress = false
 
-    private let arSceneView = ARSCNView(frame: .zero)
-    private let leftEyeView = SCNView(frame: .zero)
-    private let rightEyeView = SCNView(frame: .zero)
+    // Metal
+    private var device: MTLDevice!
+    private var commandQueue: MTLCommandQueue!
+    private var vrView: MTKView!
+    private var compositor: VRCompositor?
+    private var eyeTexture: MTLTexture?
+    private var eyeDepthTexture: MTLTexture?
+    private var eyeTextureSize: CGSize = .zero
+    private var textureCache: CVMetalTextureCache?
+    private var retainedCameraTextures: [CVMetalTexture] = []
 
-    private let leftScene = SCNScene()
-    private let rightScene = SCNScene()
-    private let leftPlaneNode = SCNNode()
-    private let rightPlaneNode = SCNNode()
-    private let leftCursorNode = SCNNode()
-    private let rightCursorNode = SCNNode()
+    // Сцена: одна на оба глаза
+    private let worldScene = SCNScene()
+    private var leftRenderer: SCNRenderer!
+    private var rightRenderer: SCNRenderer!
+    private let headNode = SCNNode()
     private let leftCameraNode = SCNNode()
     private let rightCameraNode = SCNNode()
+    private let browserPlaneNode = SCNNode()
+    private let cursorNode = SCNNode()
+    private let browserMaterial = SCNMaterial()
 
-    private let leftMaterial = SCNMaterial()
-    private let rightMaterial = SCNMaterial()
+    private var menu: MainMenuView!
 
-    private let menu = MainMenuView()
-    private let skeletonView = HandSkeletonView()
-    private let gestureHint = GestureHintView()
-
-    private var inAR = false
-    private var backGestureLatched = false
-    private var forwardGestureLatched = false
+    private var profile = VRProfile.load()
+    private var inVR = false
     private var browserAnchor: ARAnchor?
     private var browserWorldTransform: simd_float4x4?
     private var lastCenterGestureTime: CFTimeInterval = 0
     private var didCreateInitialAnchor = false
 
-    // Physical-looking spatial browser: smaller than the previous versions.
+    // Панель браузера в мире.
     private let browserWorldWidth: Float = 0.82
     private let browserWorldHeight: Float = 0.47
     private let browserWorldDistance: Float = 1.55
-    private let eyeSeparation: Float = 0.064
 
     override var prefersStatusBarHidden: Bool { true }
     override var shouldAutorotate: Bool { true }
@@ -93,14 +444,18 @@ final class MainViewController: UIViewController {
     override var preferredInterfaceOrientationForPresentation: UIInterfaceOrientation {
         .landscapeRight
     }
-    override var prefersHomeIndicatorAutoHidden: Bool { inAR }
+    override var prefersHomeIndicatorAutoHidden: Bool { inVR }
 
     private static let homeURL = URL(string: "https://www.google.com/")!
 
+    // MARK: Жизненный цикл
+
     override func viewDidLoad() {
         super.viewDidLoad()
+        view.backgroundColor = .black
+        configureMetal()
+        configureScene()
         configureBrowser()
-        configureScenes()
         buildInterface()
         wireServices()
     }
@@ -114,7 +469,6 @@ final class MainViewController: UIViewController {
         super.viewDidLayoutSubviews()
         layoutViews()
         tracking.setInterfaceOrientation(currentInterfaceOrientation())
-        updateEyeCameras()
     }
 
     override func viewWillTransition(
@@ -122,12 +476,10 @@ final class MainViewController: UIViewController {
         with coordinator: UIViewControllerTransitionCoordinator
     ) {
         super.viewWillTransition(to: size, with: coordinator)
-        coordinator.animate(alongsideTransition: { [weak self] _ in
-            self?.tracking.setInterfaceOrientation(self?.currentInterfaceOrientation() ?? .landscapeRight)
-        }) { [weak self] _ in
+        coordinator.animate(alongsideTransition: nil) { [weak self] _ in
             guard let self else { return }
             self.tracking.setInterfaceOrientation(self.currentInterfaceOrientation())
-            self.updateEyeCameras()
+            self.eyeTexture = nil
         }
     }
 
@@ -139,75 +491,172 @@ final class MainViewController: UIViewController {
         view.window?.windowScene?.interfaceOrientation ?? .landscapeRight
     }
 
+    // MARK: Сборка
+
+    private func configureMetal() {
+        guard
+            let metalDevice = MTLCreateSystemDefaultDevice(),
+            let queue = metalDevice.makeCommandQueue()
+        else {
+            showAlert("Metal недоступен на этом устройстве.")
+            return
+        }
+
+        device = metalDevice
+        commandQueue = queue
+        compositor = VRCompositor(device: metalDevice)
+        CVMetalTextureCacheCreate(kCFAllocatorDefault, nil, metalDevice, nil, &textureCache)
+
+        vrView = MTKView(frame: view.bounds, device: metalDevice)
+        vrView.colorPixelFormat = .bgra8Unorm
+        vrView.depthStencilPixelFormat = .invalid
+        vrView.framebufferOnly = true
+        vrView.preferredFramesPerSecond = 60
+        vrView.enableSetNeedsDisplay = false
+        vrView.autoResizeDrawable = true
+        vrView.isPaused = true
+        vrView.isOpaque = true
+        vrView.backgroundColor = .black
+        vrView.delegate = self
+
+        leftRenderer = SCNRenderer(device: metalDevice, options: nil)
+        rightRenderer = SCNRenderer(device: metalDevice, options: nil)
+        for renderer in [leftRenderer, rightRenderer] {
+            renderer?.scene = worldScene
+            renderer?.autoenablesDefaultLighting = false
+            renderer?.isJitteringEnabled = false
+        }
+    }
+
+    private func configureScene() {
+        // Фон сцены прозрачный: сквозное видео подкладывает композитор,
+        // отдельно для каждого глаза и с учётом его фрустума.
+        worldScene.background.contents = UIColor.clear
+
+        let leftCamera = SCNCamera()
+        leftCamera.zNear = 0.02
+        leftCamera.zFar = 100
+        leftCameraNode.camera = leftCamera
+
+        let rightCamera = SCNCamera()
+        rightCamera.zNear = 0.02
+        rightCamera.zFar = 100
+        rightCameraNode.camera = rightCamera
+
+        headNode.addChildNode(leftCameraNode)
+        headNode.addChildNode(rightCameraNode)
+        worldScene.rootNode.addChildNode(headNode)
+        applyEyeGeometry()
+
+        let geometry = SCNPlane(
+            width: CGFloat(browserWorldWidth),
+            height: CGFloat(browserWorldHeight)
+        )
+        geometry.widthSegmentCount = 1
+        geometry.heightSegmentCount = 1
+
+        browserMaterial.lightingModel = .constant
+        browserMaterial.isDoubleSided = true
+        browserMaterial.diffuse.contents = UIColor.black
+        browserMaterial.emission.contents = UIColor.black
+        browserMaterial.specular.contents = UIColor.black
+        browserMaterial.diffuse.wrapS = .clamp
+        browserMaterial.diffuse.wrapT = .clamp
+        browserMaterial.shininess = 0
+        geometry.firstMaterial = browserMaterial
+
+        browserPlaneNode.geometry = geometry
+        browserPlaneNode.isHidden = true
+        worldScene.rootNode.addChildNode(browserPlaneNode)
+
+        // Тонкая рамка: мозгу нужен край, чтобы зацепиться за глубину панели.
+        let frameGeometry = SCNBox(
+            width: CGFloat(browserWorldWidth) + 0.018,
+            height: CGFloat(browserWorldHeight) + 0.018,
+            length: 0.006,
+            chamferRadius: 0.004
+        )
+        let frameMaterial = SCNMaterial()
+        frameMaterial.lightingModel = .constant
+        frameMaterial.diffuse.contents = UIColor(white: 0.10, alpha: 1)
+        frameMaterial.emission.contents = UIColor(white: 0.10, alpha: 1)
+        frameGeometry.firstMaterial = frameMaterial
+        let frameNode = SCNNode(geometry: frameGeometry)
+        frameNode.position = SCNVector3(0, 0, -0.005)
+        browserPlaneNode.addChildNode(frameNode)
+
+        let cursorGeometry = SCNSphere(radius: 0.011)
+        cursorGeometry.segmentCount = 12
+        let cursorMaterial = SCNMaterial()
+        cursorMaterial.lightingModel = .constant
+        cursorMaterial.isDoubleSided = true
+        cursorMaterial.diffuse.contents = UIColor.white
+        cursorMaterial.emission.contents = UIColor.white
+        cursorMaterial.writesToDepthBuffer = false
+        cursorMaterial.readsFromDepthBuffer = false
+        cursorGeometry.firstMaterial = cursorMaterial
+        cursorNode.geometry = cursorGeometry
+        cursorNode.renderingOrder = 100
+        cursorNode.isHidden = true
+        worldScene.rootNode.addChildNode(cursorNode)
+    }
+
+    /// Пересчитывает IPD и матрицы проекции под текущий профиль шлема.
+    private func applyEyeGeometry() {
+        let halfIPD = profile.ipdMM * 0.0005   // мм → м и пополам
+        leftCameraNode.simdPosition = SIMD3<Float>(-halfIPD, 0, 0)
+        rightCameraNode.simdPosition = SIMD3<Float>(halfIPD, 0, 0)
+
+        let near: Float = 0.02
+        let far: Float = 100
+        let left = VRLensMath.frustum(eye: 0, profile: profile)
+        let right = VRLensMath.frustum(eye: 1, profile: profile)
+        leftCameraNode.camera?.projectionTransform = VRLensMath.projection(left, near: near, far: far)
+        rightCameraNode.camera?.projectionTransform = VRLensMath.projection(right, near: near, far: far)
+    }
+
+    private func configureBrowser() {
+        browser.navigationDelegate = self
+        browser.uiDelegate = self
+        browser.load(URLRequest(url: Self.homeURL))
+    }
+
     private func buildInterface() {
-        view.backgroundColor = .black
-
-        // Full-screen AR camera background. The stereo views are transparent overlays.
-        arSceneView.frame = view.bounds
-        arSceneView.session = tracking.session
-        arSceneView.scene = SCNScene()
-        arSceneView.backgroundColor = .black
-        arSceneView.isOpaque = true
-        arSceneView.clipsToBounds = true
-        arSceneView.contentMode = .scaleAspectFill
-        arSceneView.autoenablesDefaultLighting = false
-        arSceneView.rendersCameraGrain = false
-        arSceneView.rendersMotionBlur = false
-        arSceneView.isUserInteractionEnabled = false
+        // Браузер живёт под VR-выводом: ему нужен настоящий размер и окно,
+        // иначе takeSnapshot отдаёт пустоту.
         view.addSubview(browser)
-        view.addSubview(arSceneView)
+        if vrView != nil {
+            view.addSubview(vrView)
+        }
 
-        leftEyeView.isOpaque = false
-        leftEyeView.backgroundColor = .clear
-        leftEyeView.scene = leftScene
-        leftEyeView.pointOfView = leftCameraNode
-        leftEyeView.autoenablesDefaultLighting = false
-        leftEyeView.allowsCameraControl = false
-        leftEyeView.isUserInteractionEnabled = false
-        leftEyeView.rendersContinuously = true
-        leftEyeView.isPlaying = true
-        view.addSubview(leftEyeView)
-
-        rightEyeView.isOpaque = false
-        rightEyeView.backgroundColor = .clear
-        rightEyeView.scene = rightScene
-        rightEyeView.pointOfView = rightCameraNode
-        rightEyeView.autoenablesDefaultLighting = false
-        rightEyeView.allowsCameraControl = false
-        rightEyeView.isUserInteractionEnabled = false
-        rightEyeView.rendersContinuously = true
-        rightEyeView.isPlaying = true
-        view.addSubview(rightEyeView)
-
-        skeletonView.isUserInteractionEnabled = false
-        skeletonView.backgroundColor = .clear
-        view.addSubview(skeletonView)
-
-        gestureHint.isUserInteractionEnabled = false
-        view.addSubview(gestureHint)
-
+        menu = MainMenuView(frame: view.bounds, profile: profile)
         menu.onEnter = { [weak self] in
-            self?.requestCameraAndEnterAR()
+            self?.requestCameraAndEnterVR()
+        }
+        menu.onProfileChange = { [weak self] updated in
+            guard let self else { return }
+            self.profile = updated
+            self.applyEyeGeometry()
         }
         view.addSubview(menu)
 
-        setARVisible(false)
+        // Внутри VR экран не для пальцев, поэтому жестов ровно два.
+        let recenter = UITapGestureRecognizer(target: self, action: #selector(handleRecenterTap))
+        recenter.numberOfTouchesRequired = 1
+        vrView?.addGestureRecognizer(recenter)
+
+        let exit = UITapGestureRecognizer(target: self, action: #selector(handleExitTap))
+        exit.numberOfTouchesRequired = 2
+        vrView?.addGestureRecognizer(exit)
+
+        setVRVisible(false)
     }
 
     private func layoutViews() {
         let bounds = view.bounds
-        arSceneView.frame = bounds
+        vrView?.frame = bounds
+        menu?.frame = bounds
 
-        let halfWidth = max(bounds.width * 0.5, 1)
-        leftEyeView.frame = CGRect(x: 0, y: 0, width: halfWidth, height: bounds.height)
-        rightEyeView.frame = CGRect(
-            x: halfWidth,
-            y: 0,
-            width: max(bounds.width - halfWidth, 1),
-            height: bounds.height
-        )
-
-        // The hidden browser is rendered behind the AR camera so its snapshots remain live.
         let browserSize = CGSize(
             width: max(bounds.width - 80, 480),
             height: max(bounds.height - 80, 320)
@@ -218,99 +667,25 @@ final class MainViewController: UIViewController {
             width: browserSize.width,
             height: browserSize.height
         )
-
-        skeletonView.frame = bounds
-        gestureHint.frame = CGRect(
-            x: 18,
-            y: max(16, bounds.height - 92),
-            width: min(bounds.width - 36, 660),
-            height: 70
-        )
-        menu.frame = bounds
-    }
-
-    private func configureBrowser() {
-        browser.navigationDelegate = self
-        browser.uiDelegate = self
-        browser.load(URLRequest(url: Self.homeURL))
-    }
-
-    private func configureScenes() {
-        configureEyeScene(leftScene, planeNode: leftPlaneNode, cursorNode: leftCursorNode, material: leftMaterial)
-        configureEyeScene(rightScene, planeNode: rightPlaneNode, cursorNode: rightCursorNode, material: rightMaterial)
-
-        let leftCamera = SCNCamera()
-        leftCamera.zNear = 0.01
-        leftCamera.zFar = 100.0
-        leftCameraNode.camera = leftCamera
-
-        let rightCamera = SCNCamera()
-        rightCamera.zNear = 0.01
-        rightCamera.zFar = 100.0
-        rightCameraNode.camera = rightCamera
-
-        leftScene.rootNode.addChildNode(leftCameraNode)
-        rightScene.rootNode.addChildNode(rightCameraNode)
-    }
-
-    private func configureEyeScene(
-        _ scene: SCNScene,
-        planeNode: SCNNode,
-        cursorNode: SCNNode,
-        material: SCNMaterial
-    ) {
-        scene.background.contents = UIColor.clear
-        scene.rootNode.childNodes.forEach { $0.removeFromParentNode() }
-
-        let geometry = SCNPlane(
-            width: CGFloat(browserWorldWidth),
-            height: CGFloat(browserWorldHeight)
-        )
-        geometry.firstMaterial = material
-        geometry.widthSegmentCount = 1
-        geometry.heightSegmentCount = 1
-
-        material.lightingModel = .constant
-        material.isDoubleSided = true
-        material.diffuse.contents = UIColor.black
-        material.emission.contents = UIColor.black
-        material.specular.contents = UIColor.black
-        material.shininess = 0
-
-        planeNode.geometry = geometry
-        scene.rootNode.addChildNode(planeNode)
-
-        let cursorGeometry = SCNSphere(radius: 0.011)
-        cursorGeometry.segmentCount = 12
-        let cursorMaterial = SCNMaterial()
-        cursorMaterial.lightingModel = .constant
-        cursorMaterial.isDoubleSided = true
-        cursorMaterial.diffuse.contents = UIColor.white
-        cursorMaterial.emission.contents = UIColor.white
-        cursorGeometry.firstMaterial = cursorMaterial
-        cursorNode.geometry = cursorGeometry
-        cursorNode.isHidden = true
-        scene.rootNode.addChildNode(cursorNode)
     }
 
     private func wireServices() {
-        browser.navigationDelegate = self
-        browser.uiDelegate = self
-
         tracking.onFrame = { [weak self] pixelBuffer, orientation in
-            self?.hands.process(pixelBuffer: pixelBuffer, orientation: orientation)
+            guard let self, self.inVR else { return }
+            self.hands.process(pixelBuffer: pixelBuffer, orientation: orientation)
         }
 
         tracking.onCamera = { [weak self] frame in
             DispatchQueue.main.async {
-                self?.updateEyeCameras(using: frame)
-                self?.ensureBrowserAnchor(using: frame.camera.transform)
+                guard let self, self.inVR else { return }
+                self.headNode.simdTransform = self.tracking.headTransform(frame)
+                self.ensureBrowserAnchor(using: frame.camera.transform)
             }
         }
 
         tracking.onAnchorUpdate = { [weak self] anchor in
             DispatchQueue.main.async {
-                guard let self, self.inAR else { return }
+                guard let self, self.inVR else { return }
                 guard self.browserAnchor?.identifier == anchor.identifier else { return }
                 self.browserAnchor = anchor
                 self.browserWorldTransform = anchor.transform
@@ -320,7 +695,7 @@ final class MainViewController: UIViewController {
 
         tracking.onFailure = { [weak self] message in
             DispatchQueue.main.async {
-                self?.leaveARToMenu()
+                self?.leaveVRToMenu()
                 self?.showAlert(message)
             }
         }
@@ -330,14 +705,16 @@ final class MainViewController: UIViewController {
                 self?.handleHands(left: left, right: right)
             }
         }
-
-        browserTimer = Timer.scheduledTimer(withTimeInterval: 0.20, repeats: true) { [weak self] _ in
-            self?.updateBrowserSnapshot()
-        }
     }
 
-    private func requestCameraAndEnterAR() {
-        guard !inAR else { return }
+    // MARK: Вход и выход
+
+    private func requestCameraAndEnterVR() {
+        guard !inVR else { return }
+        guard compositor != nil else {
+            showAlert("Не удалось инициализировать VR-рендер.")
+            return
+        }
         guard ARWorldTrackingConfiguration.isSupported else {
             showAlert("Этот iPhone не поддерживает ARKit World Tracking.")
             return
@@ -345,15 +722,15 @@ final class MainViewController: UIViewController {
 
         switch AVCaptureDevice.authorizationStatus(for: .video) {
         case .authorized:
-            enterAR()
+            enterVR()
         case .notDetermined:
             AVCaptureDevice.requestAccess(for: .video) { [weak self] allowed in
                 DispatchQueue.main.async {
                     guard let self else { return }
                     if allowed {
-                        self.enterAR()
+                        self.enterVR()
                     } else {
-                        self.showAlert("Нужен доступ к задней камере для AR.")
+                        self.showAlert("Нужен доступ к задней камере для VR.")
                     }
                 }
             }
@@ -364,49 +741,40 @@ final class MainViewController: UIViewController {
         }
     }
 
-    private func enterAR() {
-        guard !inAR else { return }
-        inAR = true
+    private func enterVR() {
+        guard !inVR else { return }
+        inVR = true
         lastCenterGestureTime = 0
         didCreateInitialAnchor = false
         browserAnchor = nil
         browserWorldTransform = nil
 
+        applyEyeGeometry()
         requestLandscapeMode()
-        setARVisible(true)
+        setVRVisible(true)
 
         tracking.setInterfaceOrientation(currentInterfaceOrientation())
         tracking.start()
 
-        gestureHint.alpha = 1
-        UIView.animate(withDuration: 1.0, delay: 4.5, options: [.beginFromCurrentState]) {
-            self.gestureHint.alpha = 0.28
-        }
-
+        UIApplication.shared.isIdleTimerDisabled = true
+        startBrowserCapture()
         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
     }
 
-    private func setARVisible(_ visible: Bool) {
-        arSceneView.isHidden = !visible
-        leftEyeView.isHidden = !visible
-        rightEyeView.isHidden = !visible
-        browser.isHidden = false
-        menu.isHidden = visible
-        menu.isUserInteractionEnabled = !visible
-        skeletonView.isHidden = !visible
-        gestureHint.isHidden = !visible
-        if !visible {
-            gestureHint.layer.removeAllAnimations()
-            gestureHint.alpha = 1
-        }
-        leftCursorNode.isHidden = true
-        rightCursorNode.isHidden = true
-        backGestureLatched = false
-        forwardGestureLatched = false
+    private func setVRVisible(_ visible: Bool) {
+        vrView?.isHidden = !visible
+        vrView?.isPaused = !visible
+        menu?.isHidden = visible
+        menu?.isUserInteractionEnabled = !visible
+        browserPlaneNode.isHidden = true
+        cursorNode.isHidden = true
+        setNeedsUpdateOfHomeIndicatorAutoHidden()
     }
 
-    private func leaveARToMenu() {
+    private func leaveVRToMenu() {
         tracking.pause()
+        stopBrowserCapture()
+        releasePointer()
 
         if let anchor = browserAnchor {
             tracking.remove(anchor: anchor)
@@ -415,22 +783,36 @@ final class MainViewController: UIViewController {
         browserAnchor = nil
         browserWorldTransform = nil
         didCreateInitialAnchor = false
-        inAR = false
+        inVR = false
 
-        setARVisible(false)
+        UIApplication.shared.isIdleTimerDisabled = false
+        setVRVisible(false)
         requestLandscapeMode()
     }
 
+    @objc private func handleRecenterTap() {
+        guard inVR else { return }
+        resetBrowserAnchor()
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+    }
+
+    @objc private func handleExitTap() {
+        guard inVR else { return }
+        leaveVRToMenu()
+    }
+
     private func requestLandscapeMode() {
-        guard let scene = view.window?.windowScene else { return }
-        scene.requestGeometryUpdate(
+        guard let windowScene = view.window?.windowScene else { return }
+        windowScene.requestGeometryUpdate(
             .iOS(interfaceOrientations: [.landscapeLeft, .landscapeRight]),
             errorHandler: nil
         )
     }
 
+    // MARK: Панель браузера в мире
+
     private func ensureBrowserAnchor(using cameraTransform: simd_float4x4) {
-        guard inAR, !didCreateInitialAnchor else { return }
+        guard inVR, !didCreateInitialAnchor else { return }
         guard view.bounds.width > view.bounds.height, view.bounds.width > 100 else { return }
 
         let position = SIMD3<Float>(
@@ -438,19 +820,28 @@ final class MainViewController: UIViewController {
             cameraTransform.columns.3.y,
             cameraTransform.columns.3.z
         )
-        let forward = simd_normalize(SIMD3<Float>(
-            -cameraTransform.columns.2.x,
-            -cameraTransform.columns.2.y,
-            -cameraTransform.columns.2.z
-        ))
 
-        var transform = cameraTransform
+        // Панель ставим вертикально: наклон головы не должен её заваливать.
+        var forward = SIMD3<Float>(
+            -cameraTransform.columns.2.x,
+            0,
+            -cameraTransform.columns.2.z
+        )
+        if simd_length(forward) < 1e-4 {
+            forward = SIMD3<Float>(0, 0, -1)
+        }
+        forward = simd_normalize(forward)
+
+        let up = SIMD3<Float>(0, 1, 0)
+        let rightAxis = simd_normalize(simd_cross(up, -forward))
+
+        var transform = matrix_identity_float4x4
+        transform.columns.0 = SIMD4<Float>(rightAxis, 0)
+        transform.columns.1 = SIMD4<Float>(up, 0)
+        transform.columns.2 = SIMD4<Float>(-forward, 0)
         transform.columns.3 = SIMD4<Float>(position + forward * browserWorldDistance, 1)
 
-        let anchor = ARAnchor(
-            name: "HandAR_Stereo_Browser",
-            transform: transform
-        )
+        let anchor = ARAnchor(name: "HandAR_Stereo_Browser", transform: transform)
 
         browserAnchor = anchor
         browserWorldTransform = transform
@@ -461,91 +852,56 @@ final class MainViewController: UIViewController {
 
     private func applyBrowserWorldTransform() {
         guard let transform = browserWorldTransform else { return }
-        leftPlaneNode.simdWorldTransform = transform
-        rightPlaneNode.simdWorldTransform = transform
+        browserPlaneNode.simdWorldTransform = transform
+        browserPlaneNode.isHidden = !inVR
     }
 
-    private func updateEyeCameras(using frame: ARFrame? = nil) {
-        guard let frame = frame ?? tracking.latestFrameCopy else { return }
-        guard view.bounds.width > 100, view.bounds.height > 100 else { return }
+    private func resetBrowserAnchor() {
+        if let anchor = browserAnchor {
+            tracking.remove(anchor: anchor)
+        }
+        browserAnchor = nil
+        browserWorldTransform = nil
+        didCreateInitialAnchor = false
+        browserPlaneNode.isHidden = true
+    }
 
-        let orientation = currentInterfaceOrientation()
-        let fullWidth = view.bounds.width
-        let halfWidth = max(fullWidth * 0.5, 1)
-        let eyeSize = CGSize(width: halfWidth, height: view.bounds.height)
+    private func startBrowserCapture() {
+        browserTimer?.invalidate()
+        browserTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 12.0, repeats: true) { [weak self] _ in
+            self?.updateBrowserSnapshot()
+        }
+    }
 
-        var leftTransform = frame.camera.transform
-        var rightTransform = frame.camera.transform
-
-        let rightAxis = simd_normalize(SIMD3<Float>(
-            frame.camera.transform.columns.0.x,
-            frame.camera.transform.columns.0.y,
-            frame.camera.transform.columns.0.z
-        ))
-        let center = SIMD3<Float>(
-            frame.camera.transform.columns.3.x,
-            frame.camera.transform.columns.3.y,
-            frame.camera.transform.columns.3.z
-        )
-
-        leftTransform.columns.3 = SIMD4<Float>(center - rightAxis * (eyeSeparation * 0.5), 1)
-        rightTransform.columns.3 = SIMD4<Float>(center + rightAxis * (eyeSeparation * 0.5), 1)
-
-        leftCameraNode.simdWorldTransform = leftTransform
-        rightCameraNode.simdWorldTransform = rightTransform
-
-        let leftProjection = frame.camera.projectionMatrix(
-            for: orientation,
-            viewportSize: eyeSize,
-            zNear: 0.01,
-            zFar: 100
-        )
-        let rightProjection = frame.camera.projectionMatrix(
-            for: orientation,
-            viewportSize: eyeSize,
-            zNear: 0.01,
-            zFar: 100
-        )
-
-        leftCameraNode.camera?.projectionTransform = SCNMatrix4(leftProjection)
-        rightCameraNode.camera?.projectionTransform = SCNMatrix4(rightProjection)
+    private func stopBrowserCapture() {
+        browserTimer?.invalidate()
+        browserTimer = nil
     }
 
     private func updateBrowserSnapshot() {
-        guard inAR, !snapshotInProgress else { return }
+        guard inVR, !snapshotInProgress else { return }
+        guard browser.bounds.width > 1, browser.bounds.height > 1 else { return }
         snapshotInProgress = true
 
         let configuration = WKSnapshotConfiguration()
+        configuration.snapshotWidth = NSNumber(value: 1024)
         browser.takeSnapshot(with: configuration) { [weak self] image, _ in
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.snapshotInProgress = false
                 guard let image else { return }
-
-                self.leftMaterial.diffuse.contents = image
-                self.leftMaterial.emission.contents = image
-                self.rightMaterial.diffuse.contents = image
-                self.rightMaterial.emission.contents = image
+                self.browserMaterial.diffuse.contents = image
+                self.browserMaterial.emission.contents = image
             }
         }
     }
 
+    // MARK: Руки
+
     private func handleHands(left: HandSample?, right: HandSample?) {
-        guard inAR else { return }
+        guard inVR else { return }
 
-        skeletonView.update(
-            left: left,
-            right: right,
-            pointMapper: { [weak self] point in
-                guard let self else { return nil }
-                let visionPoint = CGPoint(x: point.x, y: 1 - point.y)
-                return self.tracking.screenPoint(
-                    forVisionPoint: visionPoint,
-                    viewportSize: self.view.bounds.size
-                )
-            }
-        )
-
+        // Щипок обеими руками — поставить панель заново перед собой.
         if left?.isPinching == true && right?.isPinching == true {
             let now = CACurrentMediaTime()
             if now - lastCenterGestureTime > 1.0 {
@@ -555,72 +911,17 @@ final class MainViewController: UIViewController {
             }
             releasePointer()
             hideCursor()
-            backGestureLatched = false
-            forwardGestureLatched = false
             return
         }
 
-        let activeSample = right ?? left
-        let backGesture = activeSample?.isBackPinching == true
-        let forwardGesture = activeSample?.isForwardPinching == true
-
-        if backGesture && !backGestureLatched && !forwardGesture {
-            releasePointer()
-            hideCursor()
-            backGestureLatched = true
-            forwardGestureLatched = false
-            if browser.canGoBack {
-                input.goBack(webView: browser)
-                UIImpactFeedbackGenerator(style: .light).impactOccurred()
-            }
-            return
-        }
-
-        if forwardGesture && !forwardGestureLatched && !backGesture {
-            releasePointer()
-            hideCursor()
-            forwardGestureLatched = true
-            backGestureLatched = false
-            if browser.canGoForward {
-                input.goForward(webView: browser)
-                UIImpactFeedbackGenerator(style: .light).impactOccurred()
-            }
-            return
-        }
-
-        if !backGesture {
-            backGestureLatched = false
-        }
-        if !forwardGesture {
-            forwardGestureLatched = false
-        }
-
-        guard let sample = activeSample else {
-            releasePointer()
-            hideCursor()
-            return
-        }
-
-        guard let fullPoint = tracking.screenPoint(
-            forVisionPoint: CGPoint(x: sample.indexTip.x, y: 1 - sample.indexTip.y),
-            viewportSize: view.bounds.size
-        ) else {
-            releasePointer()
-            hideCursor()
-            return
-        }
-
-        guard let worldPoint = tracking.worldPointOnBrowser(
-            screenPoint: fullPoint,
-            viewportSize: view.bounds.size,
-            planeTransform: browserPlaneForUnprojection()
-        ) else {
-            releasePointer()
-            hideCursor()
-            return
-        }
-
-        guard let transform = browserWorldTransform else {
+        guard
+            let sample = right ?? left,
+            let transform = browserWorldTransform,
+            let worldPoint = tracking.worldPointOnBrowser(
+                visionPoint: sample.indexTip,
+                planeTransform: browserPlaneForUnprojection(transform)
+            )
+        else {
             releasePointer()
             hideCursor()
             return
@@ -643,23 +944,22 @@ final class MainViewController: UIViewController {
         ))
 
         let delta = worldPoint - center
-        let localX = simd_dot(delta, rightAxis)
-        let localY = simd_dot(delta, upAxis)
-        let rawNormalizedX = localX / browserWorldWidth + 0.5
-        let rawNormalizedY = 0.5 - localY / browserWorldHeight
-        guard rawNormalizedX >= 0, rawNormalizedX <= 1, rawNormalizedY >= 0, rawNormalizedY <= 1 else {
+        let normalizedX = simd_dot(delta, rightAxis) / browserWorldWidth + 0.5
+        let normalizedY = 0.5 - simd_dot(delta, upAxis) / browserWorldHeight
+
+        guard normalizedX >= 0, normalizedX <= 1, normalizedY >= 0, normalizedY <= 1 else {
             releasePointer()
             hideCursor()
             return
         }
-        // Keep a tiny safety margin so the cursor does not stick to the edge.
-        let normalizedX = max(0.01, min(0.99, rawNormalizedX))
-        let normalizedY = max(0.01, min(0.99, rawNormalizedY))
 
-        leftCursorNode.simdPosition = worldPoint
-        rightCursorNode.simdPosition = worldPoint
-        leftCursorNode.isHidden = false
-        rightCursorNode.isHidden = false
+        cursorNode.simdPosition = worldPoint
+        cursorNode.isHidden = false
+        let cursorColor: UIColor = sample.isPinching
+            ? UIColor(red: 1.0, green: 0.45, blue: 0.35, alpha: 1)
+            : .white
+        cursorNode.geometry?.firstMaterial?.diffuse.contents = cursorColor
+        cursorNode.geometry?.firstMaterial?.emission.contents = cursorColor
 
         input.update(
             normalizedPoint: CGPoint(x: CGFloat(normalizedX), y: CGFloat(normalizedY)),
@@ -668,52 +968,19 @@ final class MainViewController: UIViewController {
         )
     }
 
-    private func browserPlaneForUnprojection() -> simd_float4x4? {
-        guard let transform = browserWorldTransform else { return nil }
-
-        let right = SIMD3<Float>(
-            transform.columns.0.x,
-            transform.columns.0.y,
-            transform.columns.0.z
-        )
-        let up = SIMD3<Float>(
-            transform.columns.1.x,
-            transform.columns.1.y,
-            transform.columns.1.z
-        )
-        let normal = SIMD3<Float>(
-            transform.columns.2.x,
-            transform.columns.2.y,
-            transform.columns.2.z
-        )
-        let center = SIMD3<Float>(
-            transform.columns.3.x,
-            transform.columns.3.y,
-            transform.columns.3.z
-        )
-
-        // ARCamera.unprojectPoint uses the local XZ plane, whose local Y is its normal.
+    /// ARCamera.unprojectPoint кладёт луч на локальную плоскость XZ,
+    /// где нормалью служит локальная Y. Панель же лежит в XY — переставляем оси.
+    private func browserPlaneForUnprojection(_ transform: simd_float4x4) -> simd_float4x4 {
         var result = matrix_identity_float4x4
-        result.columns.0 = SIMD4<Float>(right, 0)
-        result.columns.1 = SIMD4<Float>(normal, 0)
-        result.columns.2 = SIMD4<Float>(up, 0)
-        result.columns.3 = SIMD4<Float>(center, 1)
+        result.columns.0 = transform.columns.0                       // right
+        result.columns.1 = transform.columns.2                       // normal → local Y
+        result.columns.2 = transform.columns.1                       // up
+        result.columns.3 = transform.columns.3
         return result
     }
 
-    private func resetBrowserAnchor() {
-        if let anchor = browserAnchor {
-            tracking.remove(anchor: anchor)
-        }
-
-        browserAnchor = nil
-        browserWorldTransform = nil
-        didCreateInitialAnchor = false
-    }
-
     private func hideCursor() {
-        leftCursorNode.isHidden = true
-        rightCursorNode.isHidden = true
+        cursorNode.isHidden = true
     }
 
     private func releasePointer() {
@@ -729,6 +996,248 @@ final class MainViewController: UIViewController {
         )
         alert.addAction(UIAlertAction(title: "OK", style: .default))
         present(alert, animated: true)
+    }
+
+    // MARK: Рендер
+
+    func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
+        eyeTexture = nil
+    }
+
+    func draw(in view: MTKView) {
+        guard
+            inVR,
+            let compositor,
+            let drawable = view.currentDrawable,
+            let passDescriptor = view.currentRenderPassDescriptor,
+            let commandBuffer = commandQueue.makeCommandBuffer()
+        else {
+            return
+        }
+
+        let drawableSize = view.drawableSize
+        guard drawableSize.width > 1, drawableSize.height > 1 else { return }
+
+        ensureEyeTextures(for: drawableSize)
+        guard let eyeTexture, let eyeDepthTexture else { return }
+
+        let time = CACurrentMediaTime()
+        let eyeWidth = eyeTexture.width / 2
+        let eyeHeight = eyeTexture.height
+
+        // Проход 1 — левый глаз. Фон прозрачный: видео подложит композитор.
+        let leftPass = MTLRenderPassDescriptor()
+        leftPass.colorAttachments[0].texture = eyeTexture
+        leftPass.colorAttachments[0].loadAction = .clear
+        leftPass.colorAttachments[0].storeAction = .store
+        leftPass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0)
+        leftPass.depthAttachment.texture = eyeDepthTexture
+        leftPass.depthAttachment.loadAction = .clear
+        leftPass.depthAttachment.storeAction = .dontCare
+        leftPass.depthAttachment.clearDepth = 1.0
+
+        leftRenderer.pointOfView = leftCameraNode
+        leftRenderer.render(
+            atTime: time,
+            viewport: CGRect(x: 0, y: 0, width: CGFloat(eyeWidth), height: CGFloat(eyeHeight)),
+            commandBuffer: commandBuffer,
+            passDescriptor: leftPass
+        )
+
+        // Проход 2 — правый глаз в ту же текстуру.
+        let rightPass = MTLRenderPassDescriptor()
+        rightPass.colorAttachments[0].texture = eyeTexture
+        rightPass.colorAttachments[0].loadAction = .load
+        rightPass.colorAttachments[0].storeAction = .store
+        rightPass.depthAttachment.texture = eyeDepthTexture
+        rightPass.depthAttachment.loadAction = .clear
+        rightPass.depthAttachment.storeAction = .dontCare
+        rightPass.depthAttachment.clearDepth = 1.0
+
+        rightRenderer.pointOfView = rightCameraNode
+        rightRenderer.render(
+            atTime: time,
+            viewport: CGRect(x: CGFloat(eyeWidth), y: 0, width: CGFloat(eyeWidth), height: CGFloat(eyeHeight)),
+            commandBuffer: commandBuffer,
+            passDescriptor: rightPass
+        )
+
+        // Проход 3 — оптика линз плюс сквозное видео.
+        let frame = tracking.latestFrameCopy
+        let cameraTextures = makeCameraTextures(from: frame)
+        let uniforms = makeUniforms(
+            drawableSize: drawableSize,
+            frame: frame,
+            hasCamera: cameraTextures != nil
+        )
+
+        if let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: passDescriptor) {
+            compositor.encode(
+                into: encoder,
+                eyeTexture: eyeTexture,
+                cameraY: cameraTextures?.0,
+                cameraCbCr: cameraTextures?.1,
+                uniforms: uniforms
+            )
+            encoder.endEncoding()
+        }
+
+        commandBuffer.addCompletedHandler { [weak self] _ in
+            DispatchQueue.main.async {
+                self?.retainedCameraTextures.removeAll()
+            }
+        }
+
+        commandBuffer.present(drawable)
+        commandBuffer.commit()
+    }
+
+    private func makeUniforms(
+        drawableSize: CGSize,
+        frame: ARFrame?,
+        hasCamera: Bool
+    ) -> VRUniforms {
+        var uniforms = VRUniforms()
+        uniforms.lensCenterL = VRLensMath.lensCenterUV(eye: 0, profile: profile)
+        uniforms.lensCenterR = VRLensMath.lensCenterUV(eye: 1, profile: profile)
+        uniforms.aspect = Float((drawableSize.width * 0.5) / max(drawableSize.height, 1))
+        uniforms.k1 = profile.k1
+        uniforms.k2 = profile.k2
+        uniforms.chroma = profile.chroma
+        uniforms.rClip = profile.lensClipRadius
+        uniforms.passthrough = (profile.passthrough && hasCamera) ? 1 : 0
+
+        guard let frame, profile.passthrough, hasCamera else { return uniforms }
+
+        let resolution = frame.camera.imageResolution
+        let intrinsics = frame.camera.intrinsics
+        let fx = intrinsics[0][0]
+        let fy = intrinsics[1][1]
+        guard fx > 0, fy > 0 else {
+            uniforms.passthrough = 0
+            return uniforms
+        }
+
+        // Половина поля зрения реальной камеры в тангенсах.
+        let camTanX = Float(resolution.width) * 0.5 / fx
+        let camTanY = Float(resolution.height) * 0.5 / fy
+        let flip = currentInterfaceOrientation() == .landscapeLeft
+
+        let left = VRLensMath.frustum(eye: 0, profile: profile)
+        let right = VRLensMath.frustum(eye: 1, profile: profile)
+        let mappedLeft = cameraMapping(for: left, camTanX: camTanX, camTanY: camTanY, flipped: flip)
+        let mappedRight = cameraMapping(for: right, camTanX: camTanX, camTanY: camTanY, flipped: flip)
+
+        uniforms.camScaleL = mappedLeft.scale
+        uniforms.camOffsetL = mappedLeft.offset
+        uniforms.camScaleR = mappedRight.scale
+        uniforms.camOffsetR = mappedRight.offset
+        return uniforms
+    }
+
+    /// Линейное отображение координат глаза в координаты кадра камеры так,
+    /// чтобы угловые размеры совпали: пиксель под углом X в глазу берётся
+    /// из пикселя под тем же углом X в камере.
+    private func cameraMapping(
+        for frustum: EyeFrustum,
+        camTanX: Float,
+        camTanY: Float,
+        flipped: Bool
+    ) -> (scale: SIMD2<Float>, offset: SIMD2<Float>) {
+        var scale = SIMD2<Float>(
+            (frustum.right - frustum.left) / (2 * camTanX),
+            (frustum.top - frustum.bottom) / (2 * camTanY)
+        )
+        var offset = SIMD2<Float>(
+            0.5 + frustum.left / (2 * camTanX),
+            0.5 - frustum.top / (2 * camTanY)
+        )
+
+        if flipped {
+            // В landscapeLeft кадр камеры повёрнут на 180°.
+            scale = -scale
+            offset = SIMD2<Float>(1, 1) - offset
+        }
+        return (scale, offset)
+    }
+
+    private func makeCameraTextures(from frame: ARFrame?) -> (MTLTexture, MTLTexture)? {
+        guard
+            profile.passthrough,
+            let frame,
+            let cache = textureCache
+        else {
+            return nil
+        }
+
+        let buffer = frame.capturedImage
+        guard CVPixelBufferGetPlaneCount(buffer) >= 2 else { return nil }
+
+        func makePlane(_ index: Int, _ format: MTLPixelFormat) -> (CVMetalTexture, MTLTexture)? {
+            let width = CVPixelBufferGetWidthOfPlane(buffer, index)
+            let height = CVPixelBufferGetHeightOfPlane(buffer, index)
+            var ref: CVMetalTexture?
+            let status = CVMetalTextureCacheCreateTextureFromImage(
+                kCFAllocatorDefault,
+                cache,
+                buffer,
+                nil,
+                format,
+                width,
+                height,
+                index,
+                &ref
+            )
+            guard status == kCVReturnSuccess,
+                  let ref,
+                  let texture = CVMetalTextureGetTexture(ref) else {
+                return nil
+            }
+            return (ref, texture)
+        }
+
+        guard
+            let luma = makePlane(0, .r8Unorm),
+            let chroma = makePlane(1, .rg8Unorm)
+        else {
+            return nil
+        }
+
+        // CVMetalTexture должен дожить до конца кадра.
+        retainedCameraTextures.append(luma.0)
+        retainedCameraTextures.append(chroma.0)
+        return (luma.1, chroma.1)
+    }
+
+    private func ensureEyeTextures(for drawableSize: CGSize) {
+        let factor = CGFloat(max(profile.supersample, 1))
+        let target = CGSize(
+            width: (drawableSize.width * factor).rounded(),
+            height: (drawableSize.height * factor).rounded()
+        )
+        if eyeTexture != nil, eyeTextureSize == target { return }
+
+        let colorDescriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .bgra8Unorm,
+            width: Int(target.width),
+            height: Int(target.height),
+            mipmapped: false
+        )
+        colorDescriptor.usage = [.renderTarget, .shaderRead]
+        colorDescriptor.storageMode = .private
+
+        let depthDescriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .depth32Float,
+            width: Int(target.width),
+            height: Int(target.height),
+            mipmapped: false
+        )
+        depthDescriptor.usage = [.renderTarget]
+        depthDescriptor.storageMode = .private
+
+        eyeTexture = device.makeTexture(descriptor: colorDescriptor)
+        eyeDepthTexture = device.makeTexture(descriptor: depthDescriptor)
+        eyeTextureSize = target
     }
 }
 
@@ -747,6 +1256,8 @@ extension MainViewController: WKNavigationDelegate, WKUIDelegate {
         return nil
     }
 }
+
+// MARK: - ARKit ----------------------------------------------------------------
 
 final class ARStereoTrackingManager: NSObject, ARSessionDelegate {
     let session = ARSession()
@@ -770,6 +1281,11 @@ final class ARStereoTrackingManager: NSObject, ARSessionDelegate {
         interfaceOrientation = orientation
     }
 
+    /// Матрица головы в мире с поправкой на ориентацию интерфейса.
+    func headTransform(_ frame: ARFrame) -> simd_float4x4 {
+        frame.camera.viewMatrix(for: interfaceOrientation).inverse
+    }
+
     func start() {
         guard ARWorldTrackingConfiguration.isSupported else {
             onFailure?("Этот iPhone не поддерживает ARKit World Tracking.")
@@ -779,18 +1295,13 @@ final class ARStereoTrackingManager: NSObject, ARSessionDelegate {
         let configuration = ARWorldTrackingConfiguration()
         configuration.worldAlignment = .gravity
         configuration.isAutoFocusEnabled = true
-        configuration.planeDetection = [.horizontal, .vertical]
-        configuration.environmentTexturing = .automatic
+        configuration.planeDetection = []
+        configuration.environmentTexturing = ARWorldTrackingConfiguration.EnvironmentTexturing.none
 
-        if ARWorldTrackingConfiguration.supportsSceneReconstruction(.mesh) {
-            configuration.sceneReconstruction = .mesh
-        }
-
+        // Реконструкция сцены и текстурирование окружения стоят кадров,
+        // а в стереорежиме бюджет кадра важнее.
         session.delegate = self
-        session.run(
-            configuration,
-            options: [.resetTracking, .removeExistingAnchors]
-        )
+        session.run(configuration, options: [.resetTracking, .removeExistingAnchors])
     }
 
     func pause() {
@@ -808,49 +1319,27 @@ final class ARStereoTrackingManager: NSObject, ARSessionDelegate {
         session.remove(anchor: anchor)
     }
 
-    func screenPoint(
-        forVisionPoint point: CGPoint,
-        viewportSize: CGSize
-    ) -> CGPoint? {
-        guard let frame = latestFrameCopy else { return nil }
-        let mapped = point.applying(
-            frame.displayTransform(
-                for: interfaceOrientation,
-                viewportSize: viewportSize
-            )
-        )
-        let result = CGPoint(
-            x: mapped.x * viewportSize.width,
-            y: mapped.y * viewportSize.height
-        )
-        guard result.x.isFinite, result.y.isFinite else { return nil }
-        return result
-    }
-
+    /// Луч из кончика пальца в мир, положенный на плоскость панели.
+    /// Считаем прямо в координатах кадра камеры: так не нужно согласовывать
+    /// вьюпорт глаза с вьюпортом, в котором Vision нашёл руку.
     func worldPointOnBrowser(
-        screenPoint: CGPoint,
-        viewportSize: CGSize,
-        planeTransform: simd_float4x4?
+        visionPoint: CGPoint,
+        planeTransform: simd_float4x4
     ) -> SIMD3<Float>? {
-        guard let frame = latestFrameCopy, let planeTransform else { return nil }
-        let halfWidth = viewportSize.width * 0.5
-        guard halfWidth > 1 else { return nil }
+        guard let frame = latestFrameCopy else { return nil }
 
-        let localPoint: CGPoint
-        let eyeViewport: CGSize
-        if screenPoint.x < halfWidth {
-            localPoint = CGPoint(x: screenPoint.x, y: screenPoint.y)
-            eyeViewport = CGSize(width: halfWidth, height: viewportSize.height)
-        } else {
-            localPoint = CGPoint(x: screenPoint.x - halfWidth, y: screenPoint.y)
-            eyeViewport = CGSize(width: halfWidth, height: viewportSize.height)
-        }
+        let resolution = frame.camera.imageResolution
+        let point = CGPoint(
+            x: visionPoint.x * resolution.width,
+            y: (1 - visionPoint.y) * resolution.height
+        )
+        guard point.x.isFinite, point.y.isFinite else { return nil }
 
         return frame.camera.unprojectPoint(
-            localPoint,
+            point,
             ontoPlane: planeTransform,
             orientation: interfaceOrientation,
-            viewportSize: eyeViewport
+            viewportSize: resolution
         )
     }
 
@@ -859,8 +1348,7 @@ final class ARStereoTrackingManager: NSObject, ARSessionDelegate {
         latestFrame = frame
         frameLock.unlock()
 
-        let orientation = imageOrientation(for: interfaceOrientation)
-        onFrame?(frame.capturedImage, orientation)
+        onFrame?(frame.capturedImage, imageOrientation(for: interfaceOrientation))
         onCamera?(frame)
     }
 
@@ -888,6 +1376,8 @@ final class ARStereoTrackingManager: NSObject, ARSessionDelegate {
     }
 }
 
+// MARK: - Отслеживание руки ----------------------------------------------------
+
 final class HandTracker {
     private let request: VNDetectHumanHandPoseRequest = {
         let request = VNDetectHumanHandPoseRequest()
@@ -898,15 +1388,6 @@ final class HandTracker {
         return request
     }()
 
-    static let skeletonJoints: [VNHumanHandPoseObservation.JointName] = [
-        .wrist,
-        .thumbCMC, .thumbMP, .thumbIP, .thumbTip,
-        .indexMCP, .indexPIP, .indexDIP, .indexTip,
-        .middleMCP, .middlePIP, .middleDIP, .middleTip,
-        .ringMCP, .ringPIP, .ringDIP, .ringTip,
-        .littleMCP, .littlePIP, .littleDIP, .littleTip
-    ]
-
     private let queue = DispatchQueue(label: "handar.vision", qos: .userInitiated)
     private let gate = DispatchSemaphore(value: 1)
 
@@ -916,10 +1397,6 @@ final class HandTracker {
     private var lastThumbRight: CGPoint?
     private var pinchLeft = false
     private var pinchRight = false
-    private var backPinchLeft = false
-    private var backPinchRight = false
-    private var forwardPinchLeft = false
-    private var forwardPinchRight = false
 
     var onUpdate: ((HandSample?, HandSample?) -> Void)?
 
@@ -953,10 +1430,10 @@ final class HandTracker {
                         let thumb = try? observation.recognizedPoint(.thumbTip),
                         let wrist = try? observation.recognizedPoint(.wrist),
                         let middle = try? observation.recognizedPoint(.middleMCP),
-                        index.confidence > 0.62,
-                        thumb.confidence > 0.56,
-                        wrist.confidence > 0.42,
-                        middle.confidence > 0.42
+                        index.confidence > 0.68,
+                        thumb.confidence > 0.62,
+                        wrist.confidence > 0.48,
+                        middle.confidence > 0.48
                     else {
                         continue
                     }
@@ -972,74 +1449,22 @@ final class HandTracker {
                     let filteredThumb = smooth(oldThumb, thumb.location, alpha: thumbAlpha)
 
                     let palmSize = max(distance(wrist.location, middle.location), 0.03)
-                    let indexRatio = distance(filteredIndex, filteredThumb) / palmSize
+                    let ratio = distance(filteredIndex, filteredThumb) / palmSize
                     let wasPinching = isLeft ? self.pinchLeft : self.pinchRight
-                    let pinching = pinchHysteresis(
-                        previous: wasPinching,
-                        ratio: indexRatio,
-                        closeThreshold: 0.47,
-                        openThreshold: 0.64
-                    )
-
-                    let middleTip = try? observation.recognizedPoint(.middleTip)
-                    let ringTip = try? observation.recognizedPoint(.ringTip)
-                    let middleRatio = middleTip.map { distance($0.location, filteredThumb) / palmSize } ?? 1.5
-                    let ringRatio = ringTip.map { distance($0.location, filteredThumb) / palmSize } ?? 1.5
-                    let wasBackPinching = isLeft ? self.backPinchLeft : self.backPinchRight
-                    let wasForwardPinching = isLeft ? self.forwardPinchLeft : self.forwardPinchRight
-                    let backPinching = pinchHysteresis(
-                        previous: wasBackPinching,
-                        ratio: middleRatio,
-                        closeThreshold: 0.54,
-                        openThreshold: 0.70
-                    )
-                    let forwardPinching = pinchHysteresis(
-                        previous: wasForwardPinching,
-                        ratio: ringRatio,
-                        closeThreshold: 0.54,
-                        openThreshold: 0.70
-                    )
-
-                    var joints: [VNHumanHandPoseObservation.JointName: CGPoint] = [:]
-                    for jointName in Self.skeletonJoints {
-                        if let point = try? observation.recognizedPoint(jointName), point.confidence > 0.30 {
-                            joints[jointName] = point.location
-                        }
-                    }
-                    joints[.wrist] = wrist.location
-                    joints[.indexTip] = filteredIndex
-                    joints[.thumbTip] = filteredThumb
+                    let pinching = pinchHysteresis(previous: wasPinching, ratio: ratio)
 
                     if isLeft {
                         self.lastIndexLeft = filteredIndex
                         self.lastThumbLeft = filteredThumb
                         self.pinchLeft = pinching
-                        self.backPinchLeft = backPinching
-                        self.forwardPinchLeft = forwardPinching
                         foundLeft = true
-                        left = HandSample(
-                            indexTip: filteredIndex,
-                            thumbTip: filteredThumb,
-                            isPinching: pinching,
-                            isBackPinching: backPinching,
-                            isForwardPinching: forwardPinching,
-                            joints: joints
-                        )
+                        left = HandSample(indexTip: filteredIndex, thumbTip: filteredThumb, isPinching: pinching)
                     } else {
                         self.lastIndexRight = filteredIndex
                         self.lastThumbRight = filteredThumb
                         self.pinchRight = pinching
-                        self.backPinchRight = backPinching
-                        self.forwardPinchRight = forwardPinching
                         foundRight = true
-                        right = HandSample(
-                            indexTip: filteredIndex,
-                            thumbTip: filteredThumb,
-                            isPinching: pinching,
-                            isBackPinching: backPinching,
-                            isForwardPinching: forwardPinching,
-                            joints: joints
-                        )
+                        right = HandSample(indexTip: filteredIndex, thumbTip: filteredThumb, isPinching: pinching)
                     }
                 }
 
@@ -1047,15 +1472,11 @@ final class HandTracker {
                     self.lastIndexLeft = nil
                     self.lastThumbLeft = nil
                     self.pinchLeft = false
-                    self.backPinchLeft = false
-                    self.forwardPinchLeft = false
                 }
                 if !foundRight {
                     self.lastIndexRight = nil
                     self.lastThumbRight = nil
                     self.pinchRight = false
-                    self.backPinchRight = false
-                    self.forwardPinchRight = false
                 }
 
                 self.onUpdate?(left, right)
@@ -1083,20 +1504,17 @@ private func adaptiveAlpha(previous: CGPoint?, current: CGPoint) -> CGFloat {
 }
 
 @inline(__always)
-private func pinchHysteresis(
-    previous: Bool,
-    ratio: CGFloat,
-    closeThreshold: CGFloat,
-    openThreshold: CGFloat
-) -> Bool {
-    if previous { return ratio < openThreshold }
-    return ratio < closeThreshold
+private func pinchHysteresis(previous: Bool, ratio: CGFloat) -> Bool {
+    if previous { return ratio < 0.60 }
+    return ratio < 0.43
 }
 
 @inline(__always)
 private func distance(_ a: CGPoint, _ b: CGPoint) -> CGFloat {
     hypot(a.x - b.x, a.y - b.y)
 }
+
+// MARK: - Ввод в страницу ------------------------------------------------------
 
 final class WebInputBridge {
     private var lastPoint: CGPoint?
@@ -1113,13 +1531,13 @@ final class WebInputBridge {
             pointerDown = true
             dispatch("window.__handarPointerDown(\(x),\(y),1);", to: webView)
         } else if pinch && pointerDown {
-            if abs(deltaY) > 0.55 {
+            if abs(deltaY) > 0.75 {
                 let amount = String(
                     format: "%.2f",
                     locale: Locale(identifier: "en_US_POSIX"),
-                    deltaY * 3.15
+                    deltaY * 2.6
                 )
-                dispatch("window.__handarScroll(\(x),\(y),\(amount));", to: webView)
+                dispatch("window.scrollBy(0,\(amount));", to: webView)
             }
             dispatch("window.__handarPointerMove(\(x),\(y),1);", to: webView)
         } else if !pinch && pointerDown {
@@ -1130,16 +1548,6 @@ final class WebInputBridge {
         }
 
         lastPoint = current
-    }
-
-    func goBack(webView: WKWebView) {
-        guard webView.canGoBack else { return }
-        webView.goBack()
-    }
-
-    func goForward(webView: WKWebView) {
-        guard webView.canGoForward else { return }
-        webView.goForward()
     }
 
     func release(webView: WKWebView) {
@@ -1157,146 +1565,50 @@ final class WebInputBridge {
     }
 }
 
-
-final class HandSkeletonView: UIView {
-    private let leftBones = CAShapeLayer()
-    private let rightBones = CAShapeLayer()
-    private let leftJoints = CAShapeLayer()
-    private let rightJoints = CAShapeLayer()
-
-    private let bonePairs: [(VNHumanHandPoseObservation.JointName, VNHumanHandPoseObservation.JointName)] = [
-        (.wrist, .thumbCMC), (.thumbCMC, .thumbMP), (.thumbMP, .thumbIP), (.thumbIP, .thumbTip),
-        (.wrist, .indexMCP), (.indexMCP, .indexPIP), (.indexPIP, .indexDIP), (.indexDIP, .indexTip),
-        (.wrist, .middleMCP), (.middleMCP, .middlePIP), (.middlePIP, .middleDIP), (.middleDIP, .middleTip),
-        (.wrist, .ringMCP), (.ringMCP, .ringPIP), (.ringPIP, .ringDIP), (.ringDIP, .ringTip),
-        (.wrist, .littleMCP), (.littleMCP, .littlePIP), (.littlePIP, .littleDIP), (.littleDIP, .littleTip),
-        (.indexMCP, .middleMCP), (.middleMCP, .ringMCP), (.ringMCP, .littleMCP)
-    ]
-
-    override init(frame: CGRect) {
-        super.init(frame: frame)
-        isOpaque = false
-        isUserInteractionEnabled = false
-        [leftBones, rightBones].forEach {
-            $0.fillColor = UIColor.clear.cgColor
-            $0.lineWidth = 3.0
-            $0.lineCap = .round
-            $0.lineJoin = .round
-            layer.addSublayer($0)
-        }
-        [leftJoints, rightJoints].forEach {
-            $0.fillColor = UIColor.clear.cgColor
-            $0.lineWidth = 1.5
-            layer.addSublayer($0)
-        }
-    }
-
-    required init?(coder: NSCoder) {
-        fatalError("init(coder:) has not been implemented")
-    }
-
-    func update(
-        left: HandSample?,
-        right: HandSample?,
-        pointMapper: (CGPoint) -> CGPoint?
-    ) {
-        draw(sample: left, bones: leftBones, joints: leftJoints, mapper: pointMapper)
-        draw(sample: right, bones: rightBones, joints: rightJoints, mapper: pointMapper)
-    }
-
-    private func draw(
-        sample: HandSample?,
-        bones: CAShapeLayer,
-        joints: CAShapeLayer,
-        mapper: (CGPoint) -> CGPoint?
-    ) {
-        let bonePath = UIBezierPath()
-        let jointPath = UIBezierPath()
-
-        guard let sample else {
-            bones.path = nil
-            joints.path = nil
-            return
-        }
-
-        for (a, b) in bonePairs {
-            guard
-                let pa = sample.joints[a],
-                let pb = sample.joints[b],
-                let sa = mapper(pa),
-                let sb = mapper(pb)
-            else { continue }
-            bonePath.move(to: sa)
-            bonePath.addLine(to: sb)
-        }
-
-        for jointName in HandTracker.skeletonJoints {
-            guard let point = sample.joints[jointName], let screen = mapper(point) else { continue }
-            jointPath.append(UIBezierPath(ovalIn: CGRect(x: screen.x - 4.5, y: screen.y - 4.5, width: 9, height: 9)))
-        }
-
-        bones.strokeColor = sample.isPinching ? UIColor.white.cgColor : UIColor.systemTeal.cgColor
-        joints.strokeColor = sample.isPinching ? UIColor.white.cgColor : UIColor.systemTeal.cgColor
-        joints.fillColor = UIColor.systemTeal.withAlphaComponent(0.95).cgColor
-        bones.path = bonePath.cgPath
-        joints.path = jointPath.cgPath
-    }
-}
-
-final class GestureHintView: UIView {
-    private let label = UILabel()
-
-    override init(frame: CGRect) {
-        super.init(frame: frame)
-        backgroundColor = UIColor.black.withAlphaComponent(0.62)
-        layer.cornerRadius = 16
-        layer.masksToBounds = true
-
-        label.text = "ЩИПК = клик   •   держать + двигать = прокрутка/перетаскивание\nбольшой + средний = назад   •   большой + безымянный = вперёд   •   2 руки щипок = центр"
-        label.textColor = .white
-        label.font = .systemFont(ofSize: 12, weight: .medium)
-        label.numberOfLines = 2
-        label.textAlignment = .center
-        label.adjustsFontSizeToFitWidth = true
-        label.minimumScaleFactor = 0.72
-        addSubview(label)
-    }
-
-    required init?(coder: NSCoder) {
-        fatalError("init(coder:) has not been implemented")
-    }
-
-    override func layoutSubviews() {
-        super.layoutSubviews()
-        label.frame = bounds.insetBy(dx: 12, dy: 8)
-    }
-}
+// MARK: - Меню и калибровка ----------------------------------------------------
 
 final class MainMenuView: UIView {
     var onEnter: (() -> Void)?
+    var onProfileChange: ((VRProfile) -> Void)?
 
     private let titleLabel = UILabel()
     private let subtitleLabel = UILabel()
     private let enterButton = UIButton(type: .system)
+    private let stack = UIStackView()
+    private let passthroughSwitch = UISwitch()
+    private var profile: VRProfile
 
-    override init(frame: CGRect) {
+    private let ipdRow = SliderRow(title: "Межзрачковое расстояние", unit: "мм", minimum: 52, maximum: 76)
+    private let lensRow = SliderRow(title: "Расстояние между линзами", unit: "мм", minimum: 52, maximum: 76)
+    private let depthRow = SliderRow(title: "Глаз → экран", unit: "мм", minimum: 30, maximum: 70)
+    private let k1Row = SliderRow(title: "Дисторсия k1", unit: "", minimum: 0, maximum: 0.8)
+    private let k2Row = SliderRow(title: "Дисторсия k2", unit: "", minimum: -0.2, maximum: 0.6)
+
+    init(frame: CGRect, profile: VRProfile) {
+        self.profile = profile
         super.init(frame: frame)
         backgroundColor = .black
+        build()
+        applyProfile()
+    }
 
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    private func build() {
         titleLabel.text = "HandAR Vision"
         titleLabel.textColor = .white
-        titleLabel.font = .systemFont(ofSize: 34, weight: .medium)
+        titleLabel.font = .systemFont(ofSize: 30, weight: .medium)
         titleLabel.textAlignment = .center
-        addSubview(titleLabel)
 
-        subtitleLabel.text = "AR browser"
+        subtitleLabel.text = "Вставь телефон в шлем и подгони линзы под себя"
         subtitleLabel.textColor = UIColor.white.withAlphaComponent(0.58)
-        subtitleLabel.font = .systemFont(ofSize: 15, weight: .regular)
+        subtitleLabel.font = .systemFont(ofSize: 14, weight: .regular)
         subtitleLabel.textAlignment = .center
-        addSubview(subtitleLabel)
 
         var config = UIButton.Configuration.filled()
-        config.title = "ВОЙТИ В AR"
+        config.title = "ВОЙТИ В VR"
         config.baseForegroundColor = .white
         config.baseBackgroundColor = UIColor(white: 0.16, alpha: 1)
         config.cornerStyle = .capsule
@@ -1304,17 +1616,133 @@ final class MainMenuView: UIView {
         enterButton.configuration = config
         enterButton.titleLabel?.font = .systemFont(ofSize: 18, weight: .semibold)
         enterButton.addAction(UIAction { [weak self] _ in self?.onEnter?() }, for: .touchUpInside)
-        addSubview(enterButton)
+
+        let passLabel = UILabel()
+        passLabel.text = "Сквозное видео с камеры"
+        passLabel.textColor = .white
+        passLabel.font = .systemFont(ofSize: 13)
+        passthroughSwitch.isOn = profile.passthrough
+        passthroughSwitch.addAction(UIAction { [weak self] _ in self?.collect() }, for: .valueChanged)
+
+        let passRow = UIStackView(arrangedSubviews: [passLabel, UIView(), passthroughSwitch])
+        passRow.axis = .horizontal
+        passRow.spacing = 12
+
+        stack.axis = .vertical
+        stack.spacing = 8
+        for row in [ipdRow, lensRow, depthRow, k1Row, k2Row] {
+            row.onChange = { [weak self] in self?.collect() }
+            stack.addArrangedSubview(row)
+        }
+        stack.addArrangedSubview(passRow)
+
+        for subview in [titleLabel, subtitleLabel, stack, enterButton] as [UIView] {
+            subview.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(subview)
+        }
+
+        NSLayoutConstraint.activate([
+            titleLabel.topAnchor.constraint(equalTo: safeAreaLayoutGuide.topAnchor, constant: 10),
+            titleLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 24),
+            titleLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -24),
+
+            subtitleLabel.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 2),
+            subtitleLabel.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
+            subtitleLabel.trailingAnchor.constraint(equalTo: titleLabel.trailingAnchor),
+
+            stack.topAnchor.constraint(equalTo: subtitleLabel.bottomAnchor, constant: 10),
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 48),
+            stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -48),
+
+            enterButton.topAnchor.constraint(greaterThanOrEqualTo: stack.bottomAnchor, constant: 10),
+            enterButton.centerXAnchor.constraint(equalTo: centerXAnchor),
+            enterButton.widthAnchor.constraint(equalToConstant: 240),
+            enterButton.heightAnchor.constraint(equalToConstant: 50),
+            enterButton.bottomAnchor.constraint(equalTo: safeAreaLayoutGuide.bottomAnchor, constant: -12)
+        ])
+    }
+
+    private func applyProfile() {
+        ipdRow.value = profile.ipdMM
+        lensRow.value = profile.lensSeparationMM
+        depthRow.value = profile.eyeToScreenMM
+        k1Row.value = profile.k1
+        k2Row.value = profile.k2
+        passthroughSwitch.isOn = profile.passthrough
+    }
+
+    private func collect() {
+        profile.ipdMM = ipdRow.value
+        profile.lensSeparationMM = lensRow.value
+        profile.eyeToScreenMM = depthRow.value
+        profile.k1 = k1Row.value
+        profile.k2 = k2Row.value
+        profile.passthrough = passthroughSwitch.isOn
+        profile.save()
+        onProfileChange?(profile)
+    }
+}
+
+/// Подпись, значение и ползунок в одной строке.
+final class SliderRow: UIView {
+    var onChange: (() -> Void)?
+
+    private let titleLabel = UILabel()
+    private let valueLabel = UILabel()
+    private let slider = UISlider()
+    private let unit: String
+
+    var value: Float {
+        get { slider.value }
+        set {
+            slider.value = newValue
+            refresh()
+        }
+    }
+
+    init(title: String, unit: String, minimum: Float, maximum: Float) {
+        self.unit = unit
+        super.init(frame: .zero)
+
+        titleLabel.text = title
+        titleLabel.textColor = .white
+        titleLabel.font = .systemFont(ofSize: 13)
+
+        valueLabel.textColor = UIColor.white.withAlphaComponent(0.7)
+        valueLabel.font = .monospacedDigitSystemFont(ofSize: 13, weight: .regular)
+        valueLabel.textAlignment = .right
+
+        slider.minimumValue = minimum
+        slider.maximumValue = maximum
+        slider.addAction(UIAction { [weak self] _ in
+            self?.refresh()
+            self?.onChange?()
+        }, for: .valueChanged)
+
+        let header = UIStackView(arrangedSubviews: [titleLabel, valueLabel])
+        header.axis = .horizontal
+
+        let container = UIStackView(arrangedSubviews: [header, slider])
+        container.axis = .vertical
+        container.spacing = 0
+        container.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(container)
+
+        NSLayoutConstraint.activate([
+            container.topAnchor.constraint(equalTo: topAnchor),
+            container.bottomAnchor.constraint(equalTo: bottomAnchor),
+            container.leadingAnchor.constraint(equalTo: leadingAnchor),
+            container.trailingAnchor.constraint(equalTo: trailingAnchor)
+        ])
     }
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
     }
 
-    override func layoutSubviews() {
-        super.layoutSubviews()
-        titleLabel.frame = CGRect(x: 24, y: bounds.midY - 100, width: bounds.width - 48, height: 48)
-        subtitleLabel.frame = CGRect(x: 24, y: bounds.midY - 55, width: bounds.width - 48, height: 22)
-        enterButton.frame = CGRect(x: bounds.midX - 120, y: bounds.midY + 8, width: 240, height: 54)
+    private func refresh() {
+        valueLabel.text = unit.isEmpty
+            ? String(format: "%.3f", slider.value)
+            : String(format: "%.1f %@", slider.value, unit)
     }
 }

@@ -1,0 +1,22 @@
+HAND AR BROWSER — СТАРТ
+
+1) Распакуй этот ZIP.
+2) Загрузить ВСЕ содержимое папки в репозиторий GitHub:
+   sevimmamedov8-a11y/HandARBrowser
+   Важно: не создавай внутри репозитория лишнюю папку HandARBrowser_V1.
+3) После commit GitHub Actions должен автоматически запустить:
+   Build HandARBrowser IPA
+4) Открой GitHub → Actions → Build HandARBrowser IPA.
+5) Дождись зелёной галочки.
+6) Открой завершившийся workflow и скачай artifact:
+   HandARBrowser-IPA
+7) Внутри ZIP будет:
+   HandARBrowser-unsigned.ipa
+8) Этот IPA можно подписать твоим ESign.
+
+TOM4OS НЕ НУЖЕН И НЕ ИСПОЛЬЗУЕТСЯ.
+
+Если workflow не запускается автоматически:
+Actions → Build HandARBrowser IPA → Run workflow → Run workflow.
+
+Никакие SDK или модели дополнительно скачивать не надо.

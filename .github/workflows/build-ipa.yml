@@ -15,7 +15,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Show Xcode and project targets
         run: |
@@ -26,6 +26,9 @@ jobs:
         run: |
           chmod +x Scripts/CHECK_PROJECT.command Scripts/BUILD_UNSIGNED_IPA.command
           ./Scripts/CHECK_PROJECT.command
+          grep -Fq "AVCaptureDevice.authorizationStatus" HandARBrowser/MainViewController.swift
+          grep -Fq "private var leftPreview: AVCaptureVideoPreviewLayer?" HandARBrowser/MainViewController.swift
+          ! grep -Fq "as! CMAttitude" HandARBrowser/MainViewController.swift
 
       - name: Build iPhoneOS app (unsigned)
         run: ./Scripts/BUILD_UNSIGNED_IPA.command

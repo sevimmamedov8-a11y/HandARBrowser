@@ -12,6 +12,7 @@
     <key>CFBundleVersion</key><string>1</string>
     <key>LSRequiresIPhoneOS</key><true/>
     <key>NSCameraUsageDescription</key><string>Камера показывает реальный мир и отслеживает ваши руки.</string>
+    <key>NSMotionUsageDescription</key><string>Датчики телефона нужны для управления положением виртуального браузера.</string>
     <key>UIApplicationSupportsIndirectInputEvents</key><true/>
     <key>UISupportedInterfaceOrientations</key>
     <array><string>UIInterfaceOrientationLandscapeLeft</string><string>UIInterfaceOrientationLandscapeRight</string></array>

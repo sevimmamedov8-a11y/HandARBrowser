@@ -5,7 +5,7 @@ cd "$ROOT"
 rm -rf build
 mkdir -p build
 xcodebuild -project HandARBrowser.xcodeproj \
-  -scheme HandARBrowser \
+  -target HandARBrowser \
   -configuration Release \
   -sdk iphoneos \
   -derivedDataPath build/DerivedData \

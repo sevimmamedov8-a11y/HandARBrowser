@@ -198,7 +198,14 @@ final class MainViewController: UIViewController {
         view.addSubview(lensMask)
         view.addSubview(leftBrowser)
         view.addSubview(rightBrowser)
+
+        // Connect the only main-menu button to the real AR entry flow.
+        menu.onEnter = { [weak self] in
+            self?.requestCameraAndEnterAR()
+        }
         view.addSubview(menu)
+        menu.isUserInteractionEnabled = true
+        view.bringSubviewToFront(menu)
         setARVisible(false)
     }
 

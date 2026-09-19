@@ -2,7 +2,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
-echo "== Hand AR Browser V28 project check =="
+echo "== Hand AR Browser V29 project check =="
 for f in "HandARBrowser.xcodeproj/project.pbxproj" "HandARBrowser/AppDelegate.swift" "HandARBrowser/MainViewController.swift" "HandARBrowser/Info.plist" "HandARBrowser/WebInput.js"; do
   [[ -f "$f" ]] && echo "[OK] $f" || { echo "[FAIL] missing $f"; exit 1; }
 done
@@ -11,42 +11,38 @@ SRC="HandARBrowser/MainViewController.swift"
 
 grep -Fq "import ARKit" "$SRC"
 grep -Fq "import SceneKit" "$SRC"
-grep -Fq "ARWorldTrackingConfiguration" "$SRC"
+grep -Fq "import Vision" "$SRC"
 grep -Fq "final class ARStereoTrackingManager" "$SRC"
-grep -Fq "ARSessionDelegate" "$SRC"
-grep -Fq "didUpdate anchors: [ARAnchor]" "$SRC"
-grep -Fq "private let browser: WKWebView = {" "$SRC"
-grep -Fq "private let arSceneView = ARSCNView(frame: .zero)" "$SRC"
-grep -Fq "private let leftEyeView = SCNView(frame: .zero)" "$SRC"
-grep -Fq "private let rightEyeView = SCNView(frame: .zero)" "$SRC"
+grep -Fq "ARWorldTrackingConfiguration" "$SRC"
+grep -Fq 'ARAnchor(name: "HandAR_Stereo_Browser"' "$SRC"
+grep -Fq "private let leftBrowser: WKWebView" "$SRC"
+grep -Fq "private let rightBrowser: WKWebView" "$SRC"
+grep -Fq "private let leftEyeView = SCNView" "$SRC"
+grep -Fq "private let rightEyeView = SCNView" "$SRC"
+grep -Fq "private let lensMask = StereoLensMaskView()" "$SRC"
+grep -Fq "final class HandSkeletonView" "$SRC"
+grep -Fq "try? observation.recognizedPoints(.all)" "$SRC"
+grep -Fq "frame.displayTransform" "$SRC"
 grep -Fq "frame.camera.unprojectPoint" "$SRC"
-grep -Fq "frame.displayTransform(" "$SRC"
-grep -Fq "browserWorldDistance: Float = 1.55" "$SRC"
+grep -Fq "SCNMatrix4(leftProjection)" "$SRC"
+grep -Fq "SCNMatrix4(rightProjection)" "$SRC"
+grep -Fq "browserWorldDistance: Float = 1.65" "$SRC"
 grep -Fq "eyeSeparation: Float = 0.064" "$SRC"
-grep -Fq "input.update(" "$SRC"
 
 grep -Fq "HandAR Vision" HandARBrowser/Info.plist
 grep -Fq "NSCameraUsageDescription" HandARBrowser/Info.plist
 
-! grep -Fq "EyeDisplayView" "$SRC"
-! grep -Fq "EyeContainer" "$SRC"
-! grep -Fq "EyeBridgeView" "$SRC"
-! grep -Fq "LensMaskView" "$SRC"
-! grep -Fq "fillEllipse" "$SRC"
+! grep -Fq "private let browser: WKWebView" "$SRC"
 ! grep -Fq "private let browserLeft" "$SRC"
 ! grep -Fq "private let browserRight" "$SRC"
+! grep -Fq "final class LensMaskView" "$SRC"
+! grep -Fq "SCNMatrix4FromMat4" "$SRC"
 ! grep -Fq "panel.position =" "$SRC"
 ! grep -Fq "panel.layer.position =" "$SRC"
-! grep -Fq "normalized(SIMD3<Float>" "$SRC"
-! grep -Fq "SCNMatrix4FromMat4" "$SRC"
-! grep -Fq "CGPoint(x: normalizedX, y: normalizedY)" "$SRC"
-! grep -Fq "private let center = UIButton(type: .system)" "$SRC"
 
-echo "[OK] V28 static project checks"
+echo "[OK] V29 static project checks"
 
 if command -v swiftc >/dev/null 2>&1; then
-  # Parser-only validation can fail on Linux because Apple SDK modules are unavailable;
-  # don't turn that environment limitation into a false project failure.
   if swiftc -parse "$SRC" >/tmp/handar_swift_parse.out 2>&1; then
     echo "[OK] Swift parser"
   else

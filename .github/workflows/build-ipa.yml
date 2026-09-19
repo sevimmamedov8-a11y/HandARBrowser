@@ -26,14 +26,15 @@ jobs:
         run: |
           chmod +x Scripts/CHECK_PROJECT.command Scripts/BUILD_UNSIGNED_IPA.command
           ./Scripts/CHECK_PROJECT.command
-          grep -Fq "AVCaptureDevice.authorizationStatus" HandARBrowser/MainViewController.swift
-          grep -Fq "private var startRequested = false" HandARBrowser/MainViewController.swift
-          grep -Fq "camera.prepareAndStart()" HandARBrowser/MainViewController.swift
           grep -Fq "HandAR Vision" HandARBrowser/Info.plist
-          grep -Fq "final class CameraPreviewView" HandARBrowser/MainViewController.swift
-          grep -Fq "private let centerButton = UIButton(type: .system)" HandARBrowser/MainViewController.swift
-          ! grep -Fq "private let center = UIButton(type: .system)" HandARBrowser/MainViewController.swift
-          ! grep -Fq "as! CMAttitude" HandARBrowser/MainViewController.swift
+          grep -Fq "UIInterfaceOrientationPortrait" HandARBrowser/Info.plist
+          grep -Fq "import ARKit" HandARBrowser/MainViewController.swift
+          grep -Fq "import RealityKit" HandARBrowser/MainViewController.swift
+          grep -Fq "ARWorldTrackingConfiguration" HandARBrowser/MainViewController.swift
+          grep -Fq "final class MainMenuView" HandARBrowser/MainViewController.swift
+          grep -Fq "ВОЙТИ В AR" HandARBrowser/MainViewController.swift
+          grep -Fq "final class LensMaskView" HandARBrowser/MainViewController.swift
+          grep -Fq "displayTransform(for: orientation" HandARBrowser/MainViewController.swift
 
       - name: Build iPhoneOS app (unsigned)
         run: ./Scripts/BUILD_UNSIGNED_IPA.command

@@ -46,4 +46,4 @@ HandARBrowser-IPA
 
 Для установки на iPhone IPA после unsigned-сборки нужно подписать ESign или другим совместимым способом.
 
-Само приложение использует только системные iOS API: AVFoundation, Vision, CoreMotion, WebKit и UIKit.
+Само приложение использует системные iOS API: RealityKit/ARKit для AR-сессии, Vision для руки и WebKit для браузера. AVFoundation используется только для проверки/запроса разрешения камеры.

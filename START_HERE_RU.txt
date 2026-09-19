@@ -1,18 +1,27 @@
-HAND AR BROWSER V10
+HANDAR VISION V18
 
-1) Это полностью новая чистая версия проекта. Старую HandARBrowser_V1 не удаляй.
-2) Распакуй этот архив. Содержимое папки HandARBrowser_V1 помести в локальную копию репозитория HandARBrowser, сохранив .git только из репозитория.
-3) Commit + Push origin.
-4) GitHub -> Actions -> Build HandARBrowser IPA.
-5) Дождись зелёной галочки. В Artifacts скачай HandARBrowser-IPA.zip.
-6) Внутри находится HandARBrowser-unsigned.ipa. Его можно подписать через ESign.
+Главное меню теперь минимальное: название и одна кнопка «ВОЙТИ В AR».
 
-V10 исправляет:
-- invalid PBXProject rootGroup;
-- xcodebuild -derivedDataPath incompatibility;
-- missing configureLandscapeConnection in CameraManager;
-- explicit self capture semantics for HandTracker semaphore;
-- current AVFoundation mirroring API;
-- current videoRotationAngle API without deprecated orientation usage in the normal iOS 17+ path.
+1) Содержимое этой папки помести в корень репозитория HandARBrowser.
+2) Не добавляй папку .git из архива поверх своего репозитория.
+3) В GitHub Desktop: Commit Summary = V18: AR glasses mode redesign
+4) Нажми Commit to main -> Push origin.
+5) GitHub -> Actions -> Build HandAR Vision IPA.
+6) После зелёной сборки скачай artifact HandARBrowser-IPA.
+7) Внутри будет HandARBrowser-unsigned.ipa. Его можно подписать через ESign.
+
+V18:
+- минимальное главное меню;
+- вход в AR одной кнопкой;
+- RealityKit ARView + ARWorldTrackingConfiguration;
+- задняя камера как live passthrough;
+- два синхронизированных глаза как одна виртуальная браузерная сцена;
+- маска под линзы и стерео-разнос панели;
+- ARKit tracking поворота и перемещения телефона;
+- правильная обработка portrait/landscape;
+- один курсор от указательного пальца;
+- pinch = click, pinch + движение = scroll/drag;
+- обе руки pinch = CENTER;
+- pinch у левого/правого края landscape = LEFT/RIGHT.
 
 TOM4OS не используется.

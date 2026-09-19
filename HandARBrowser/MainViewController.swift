@@ -466,6 +466,7 @@ private func smooth(_ old: CGPoint?, _ new: CGPoint, alpha: CGFloat) -> CGPoint 
                    y: old.y + (new.y - old.y) * alpha)
 }
 
+// V22_BUILD_FIX_MARKER: use simd_normalize for ARKit vector normalization.
 final class ARTrackingManager: NSObject, ARSessionDelegate {
     let session = ARSession()
     private var latestFrame: ARFrame?

@@ -1,4 +1,4 @@
-name: Build HandAR Vision IPA — V21
+name: Build HandAR Vision IPA — V22
 
 on:
   push:
@@ -37,6 +37,7 @@ jobs:
           grep -Fq "projectWorldPoint" HandARBrowser/MainViewController.swift
           grep -Fq ".camera.projectPoint" HandARBrowser/MainViewController.swift
           grep -Fq "simd_normalize(SIMD3<Float>" HandARBrowser/MainViewController.swift
+          ! grep -Fq "normalized(SIMD3<Float>" HandARBrowser/MainViewController.swift
           grep -Fq "browserWorldWidth: Float = 0.62" HandARBrowser/MainViewController.swift
           grep -Fq "AnchorEntity(world: anchorTransform)" HandARBrowser/MainViewController.swift
           grep -Fq "tracking.addAnchor(transform: anchorTransform)" HandARBrowser/MainViewController.swift

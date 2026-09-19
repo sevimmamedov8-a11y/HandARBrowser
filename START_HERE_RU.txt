@@ -1,22 +1,18 @@
-HAND AR BROWSER — СТАРТ
+HAND AR BROWSER V10
 
-1) Распакуй этот ZIP.
-2) Загрузить ВСЕ содержимое папки в репозиторий GitHub:
-   sevimmamedov8-a11y/HandARBrowser
-   Важно: не создавай внутри репозитория лишнюю папку HandARBrowser_V1.
-3) После commit GitHub Actions должен автоматически запустить:
-   Build HandARBrowser IPA
-4) Открой GitHub → Actions → Build HandARBrowser IPA.
-5) Дождись зелёной галочки.
-6) Открой завершившийся workflow и скачай artifact:
-   HandARBrowser-IPA
-7) Внутри ZIP будет:
-   HandARBrowser-unsigned.ipa
-8) Этот IPA можно подписать твоим ESign.
+1) Это полностью новая чистая версия проекта. Старую HandARBrowser_V1 не удаляй.
+2) Распакуй этот архив. Содержимое папки HandARBrowser_V1 помести в локальную копию репозитория HandARBrowser, сохранив .git только из репозитория.
+3) Commit + Push origin.
+4) GitHub -> Actions -> Build HandARBrowser IPA.
+5) Дождись зелёной галочки. В Artifacts скачай HandARBrowser-IPA.zip.
+6) Внутри находится HandARBrowser-unsigned.ipa. Его можно подписать через ESign.
 
-TOM4OS НЕ НУЖЕН И НЕ ИСПОЛЬЗУЕТСЯ.
+V10 исправляет:
+- invalid PBXProject rootGroup;
+- xcodebuild -derivedDataPath incompatibility;
+- missing configureLandscapeConnection in CameraManager;
+- explicit self capture semantics for HandTracker semaphore;
+- current AVFoundation mirroring API;
+- current videoRotationAngle API without deprecated orientation usage in the normal iOS 17+ path.
 
-Если workflow не запускается автоматически:
-Actions → Build HandARBrowser IPA → Run workflow → Run workflow.
-
-Никакие SDK или модели дополнительно скачивать не надо.
+TOM4OS не используется.

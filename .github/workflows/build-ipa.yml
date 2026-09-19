@@ -34,6 +34,7 @@ jobs:
         run: |
           test -f build/HandARBrowser-unsigned.ipa
           /usr/bin/unzip -l build/HandARBrowser-unsigned.ipa | grep -E 'Payload/HandARBrowser.app/' >/dev/null
+          /usr/bin/unzip -p build/HandARBrowser-unsigned.ipa Payload/HandARBrowser.app/Info.plist >/dev/null
           echo "IPA OK"
 
       - name: Upload IPA artifact

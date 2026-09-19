@@ -1,4 +1,4 @@
-# Hand AR Browser — V1
+# Hand AR Browser — V10
 
 Телефон превращается в простую AR-систему для телефонных VR-очков с двумя линзами.
 
@@ -50,6 +50,6 @@
 
 ## Для пользователя без Mac
 
-Самый простой путь: загрузить содержимое архива в GitHub-репозиторий `HandARBrowser` и дождаться workflow `Build HandARBrowser IPA`. Он запускается автоматически после push в `main`, а также вручную через `Actions → Run workflow`.
+Самый простой путь без Mac: загрузить содержимое этого архива в GitHub-репозиторий `HandARBrowser` и дождаться workflow `Build HandARBrowser IPA`. Он запускается автоматически после push в `main`, а также вручную через `Actions → Run workflow`.
 
 Результат: artifact `HandARBrowser-IPA` с файлом `HandARBrowser-unsigned.ipa`. Подпиши его своим ESign.

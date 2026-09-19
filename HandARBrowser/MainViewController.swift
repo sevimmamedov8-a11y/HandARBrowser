@@ -4,6 +4,17 @@ import Vision
 import WebKit
 import CoreMotion
 
+@inline(__always)
+private func configureLandscapeConnection(_ connection: AVCaptureConnection?) {
+    guard let connection else { return }
+    // iOS 17+ API used by the current deployment target.
+    // 90° is the landscape rotation used by the split-screen headset layout.
+    if connection.isVideoRotationAngleSupported(90) {
+        connection.videoRotationAngle = 90
+    }
+}
+
+
 final class MainViewController: UIViewController {
     private let camera = CameraManager()
     private let motion = MotionTracker()
@@ -207,15 +218,6 @@ final class MainViewController: UIViewController {
         return CGPoint(x: clamp(x, 0, screen.width), y: clamp(y, 0, screen.height))
     }
 
-    private func configureLandscapeConnection(_ connection: AVCaptureConnection?) {
-        guard let connection else { return }
-        // iOS 17+ uses videoRotationAngle; 90 degrees corresponds to the
-        // landscape orientation used by this headset layout.
-        if connection.isVideoRotationAngleSupported(90) {
-            connection.videoRotationAngle = 90
-        }
-    }
-
     private func toggleBrowser() {
         leftEye.isHidden.toggle()
         rightEye.isHidden = leftEye.isHidden
@@ -396,7 +398,7 @@ final class HandTracker {
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         guard gate.wait(timeout: .now()) == .success else { return }
         queue.async { [weak self] in
-            guard let self else { gate.signal(); return }
+            guard let self else { return }
             let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: orientation, options: [:])
             do {
                 try handler.perform([self.request])
@@ -425,7 +427,7 @@ final class HandTracker {
                 }
                 self.onUpdate?(left, right)
             } catch { }
-            gate.signal()
+            self.gate.signal()
         }
     }
 }

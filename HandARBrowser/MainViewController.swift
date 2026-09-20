@@ -1,8 +1,9 @@
 //
 //  MainViewController.swift
-//  HandAR Vision — V35
+//  HandAR Vision — V38
 //
 //  Стереоконвейер
+//  Передний план: реальные пиксели рук из камеры композятся поверх браузера по маске Vision.
 //  --------------
 //    ARKit (поза головы)
 //        └─► одна SCNScene, две камеры на реальном IPD
@@ -139,22 +140,20 @@ struct EyeFrustum {
 }
 
 enum VRLensMath {
-    /// Асимметричный фрустум для глаза. Центр линзы почти никогда не совпадает
-    /// с центром половины экрана, поэтому пирамида несимметрична.
+    /// Симметричный фрустум: левый и правый глаз получают одинаковую
+    /// ширину и одинаковый горизонтальный FOV. Межзрачковое расстояние
+    /// используется только для разнесения камер, а не для сдвига картинки
+    /// внутри своей половины экрана. Это устраняет неравномерное сведение
+    /// двух изображений под физические линзы шлема.
     static func frustum(eye: Int, profile: VRProfile) -> EyeFrustum {
-        let halfWidth = profile.screenWidthMM * 0.5
+        _ = eye
+        let halfEyeWidth = profile.screenWidthMM * 0.25
         let halfHeight = profile.screenHeightMM * 0.5
         let depth = max(profile.eyeToScreenMM, 1)
-
-        let sign: Float = (eye == 0) ? -1 : 1
-        let lensX = sign * profile.lensSeparationMM * 0.5
         let lensY = profile.lensVerticalOffsetMM
 
-        let viewportMinX: Float = (eye == 0) ? -halfWidth : 0
-        let viewportMaxX: Float = (eye == 0) ? 0 : halfWidth
-
-        var frustum = EyeFrustum(left: (viewportMinX - lensX) / depth,
-                                 right: (viewportMaxX - lensX) / depth,
+        var frustum = EyeFrustum(left: -halfEyeWidth / depth,
+                                 right: halfEyeWidth / depth,
                                  bottom: (-halfHeight - lensY) / depth,
                                  top: (halfHeight - lensY) / depth)
 
@@ -169,16 +168,13 @@ enum VRLensMath {
         return frustum
     }
 
-    /// Центр линзы в координатах половины экрана: 0…1, начало — левый верхний угол.
+    /// Центр каждой линзы всегда находится в центре своей половины дисплея.
+    /// Поэтому левое и правое изображения имеют одинаковую геометрию и
+    /// не расходятся по горизонтали.
     static func lensCenterUV(eye: Int, profile: VRProfile) -> SIMD2<Float> {
-        let halfWidth = profile.screenWidthMM * 0.5
-        let sign: Float = (eye == 0) ? -1 : 1
-        let lensX = sign * profile.lensSeparationMM * 0.5
-        let viewportMinX: Float = (eye == 0) ? -halfWidth : 0
-
-        let u = (lensX - viewportMinX) / max(halfWidth, 1)
-        let v = 0.5 - profile.lensVerticalOffsetMM / max(profile.screenHeightMM, 1)
-        return SIMD2<Float>(min(max(u, 0), 1), min(max(v, 0), 1))
+        _ = eye
+        return SIMD2<Float>(0.5,
+                            0.5 - profile.lensVerticalOffsetMM / max(profile.screenHeightMM, 1))
     }
 
     static func projection(_ frustum: EyeFrustum, near: Float, far: Float) -> SCNMatrix4 {
@@ -219,6 +215,7 @@ private struct VRUniforms {
     var chroma: Float = 0
     var rClip: Float = 1
     var passthrough: Float = 1
+    var handMaskEnabled: Float = 0
 }
 
 /// Финальный проход. Берёт офскрин-текстуру глаз (левый глаз слева, правый справа),
@@ -254,6 +251,7 @@ final class VRCompositor {
         float chroma;
         float rClip;
         float passthrough;
+        float handMaskEnabled;
     };
 
     vertex VOut vr_vertex(uint vid [[vertex_id]]) {
@@ -276,6 +274,7 @@ final class VRCompositor {
                                 texture2d<float> eyes [[texture(0)]],
                                 texture2d<float> camY [[texture(1)]],
                                 texture2d<float> camCbCr [[texture(2)]],
+                                texture2d<float> handMask [[texture(3)]],
                                 constant VRUniforms &u [[buffer(0)]]) {
         constexpr sampler smp(filter::linear, address::clamp_to_edge);
 
@@ -312,11 +311,14 @@ final class VRCompositor {
         float alpha = cg.a;
 
         float3 background = float3(0.0);
+        float2 camUV = float2(-1.0);
+        bool validCamUV = false;
         if (u.passthrough > 0.5) {
             float2 camScale = (eye < 0.5) ? u.camScaleL : u.camScaleR;
             float2 camOffset = (eye < 0.5) ? u.camOffsetL : u.camOffsetR;
-            float2 camUV = sampleG * camScale + camOffset;
-            if (camUV.x >= 0.0 && camUV.x <= 1.0 && camUV.y >= 0.0 && camUV.y <= 1.0) {
+            camUV = sampleG * camScale + camOffset;
+            validCamUV = camUV.x >= 0.0 && camUV.x <= 1.0 && camUV.y >= 0.0 && camUV.y <= 1.0;
+            if (validCamUV) {
                 float yy = camY.sample(smp, camUV).r;
                 float2 cc = camCbCr.sample(smp, camUV).rg;
                 background = clamp(ycbcr_to_rgb(yy, cc), 0.0, 1.0);
@@ -324,6 +326,19 @@ final class VRCompositor {
         }
 
         float3 color = mix(background, overlay, clamp(alpha, 0.0, 1.0));
+
+        // Реальный передний план руки: маска задаётся Vision, цвет берётся
+        // непосредственно из текущего кадра камеры, поэтому рука находится
+        // поверх виртуального браузера без нарисованного скелета.
+        if (u.handMaskEnabled > 0.5 && validCamUV) {
+            float handAlpha = handMask.sample(smp, camUV).r;
+            if (handAlpha > 0.01) {
+                float yyHand = camY.sample(smp, camUV).r;
+                float2 ccHand = camCbCr.sample(smp, camUV).rg;
+                float3 handColor = clamp(ycbcr_to_rgb(yyHand, ccHand), 0.0, 1.0);
+                color = mix(color, handColor, handAlpha);
+            }
+        }
 
         // Для fullscreen-профиля виньетка отключена: каждый глаз
         // заполняет всю свою половину дисплея без квадратной/круглой маски.
@@ -363,6 +378,7 @@ final class VRCompositor {
         eyeTexture: MTLTexture,
         cameraY: MTLTexture?,
         cameraCbCr: MTLTexture?,
+        handMask: MTLTexture,
         uniforms: VRUniforms
     ) {
         guard let pipeline else { return }
@@ -374,6 +390,7 @@ final class VRCompositor {
         encoder.setFragmentTexture(eyeTexture, index: 0)
         encoder.setFragmentTexture(cameraY ?? eyeTexture, index: 1)
         encoder.setFragmentTexture(cameraCbCr ?? eyeTexture, index: 2)
+        encoder.setFragmentTexture(handMask, index: 3)
         encoder.setFragmentBytes(&local, length: MemoryLayout<VRUniforms>.stride, index: 0)
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
     }
@@ -445,6 +462,15 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     private var eyeTextureSize: CGSize = .zero
     private var textureCache: CVMetalTextureCache?
     private var retainedCameraTextures: [CVMetalTexture] = []
+
+    // CPU-маска кисти. Шейдер использует её только как альфа-маттинг для
+    // настоящего изображения камеры, поэтому руки выглядят натурально.
+    private let handMaskWidth = 320
+    private let handMaskHeight = 320
+    private var handMaskTexture: MTLTexture?
+    private let handMaskLock = NSLock()
+    private var pendingHandMaskBytes = [UInt8]()
+    private var pendingHandMaskActive = false
 
     // Сцена: одна на оба глаза
     private let worldScene = SCNScene()
@@ -600,6 +626,16 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         compositor = VRCompositor(device: metalDevice)
         CVMetalTextureCacheCreate(kCFAllocatorDefault, nil, metalDevice, nil, &textureCache)
 
+        let handMaskDescriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .r8Unorm,
+            width: handMaskWidth,
+            height: handMaskHeight,
+            mipmapped: false
+        )
+        handMaskDescriptor.usage = [.shaderRead]
+        handMaskDescriptor.storageMode = .shared
+        handMaskTexture = metalDevice.makeTexture(descriptor: handMaskDescriptor)
+
         vrView = MTKView(frame: view.bounds, device: metalDevice)
         vrView.colorPixelFormat = .bgra8Unorm
         vrView.depthStencilPixelFormat = .invalid
@@ -644,7 +680,8 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         buildBrowserPanel()
         buildToolbar()
         buildPointer()
-        buildHandSkeleton()
+        // 3D-скелет больше не показываем: поверх браузера выводим настоящие
+        // пиксели руки из камеры через handMaskTexture.
     }
 
     private func buildBrowserPanel() {
@@ -1126,8 +1163,8 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         menu?.isUserInteractionEnabled = !visible
         browserPlaneNode.isHidden = true
         hidePointer()
-        leftHandSkeletonNode.isHidden = !visible
-        rightHandSkeletonNode.isHidden = !visible
+        leftHandSkeletonNode.isHidden = true
+        rightHandSkeletonNode.isHidden = true
         setNeedsUpdateOfHomeIndicatorAutoHidden()
     }
 
@@ -1290,7 +1327,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
 
     private func handleHands(left: HandSample?, right: HandSample?) {
         guard inVR else { return }
-        updateHandSkeleton(left: left, right: right)
+        queueHandForegroundMask(left: left, right: right)
 
         // Две руки: средний+большой палец = режим изменения размера.
         // Расходятся указательные — окно увеличивается, сходятся — уменьшается.
@@ -1463,6 +1500,131 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     /// Скелет кладём прямо на мировую плоскость браузера и сдвигаем на 18 мм
     /// к камере. Поэтому при движении браузера скелет остаётся совмещённым
     /// с рукой, но не проваливается под текстуру страницы.
+    private static let handMaskBonePairs: [(VNHumanHandPoseObservation.JointName, VNHumanHandPoseObservation.JointName)] = [
+        (.wrist, .thumbCMC), (.thumbCMC, .thumbMP), (.thumbMP, .thumbIP), (.thumbIP, .thumbTip),
+        (.wrist, .indexMCP), (.indexMCP, .indexPIP), (.indexPIP, .indexDIP), (.indexDIP, .indexTip),
+        (.wrist, .middleMCP), (.middleMCP, .middlePIP), (.middlePIP, .middleDIP), (.middleDIP, .middleTip),
+        (.wrist, .ringMCP), (.ringMCP, .ringPIP), (.ringPIP, .ringDIP), (.ringDIP, .ringTip),
+        (.wrist, .littleMCP), (.littleMCP, .littlePIP), (.littlePIP, .littleDIP), (.littleDIP, .littleTip)
+    ]
+
+    /// Создаёт маску кисти в координатах сырого кадра камеры. В ней нет
+    /// графики скелета — она только определяет, какие настоящие пиксели камеры
+    /// нужно показать поверх браузера.
+    private func queueHandForegroundMask(left: HandSample?, right: HandSample?) {
+        var bytes = [UInt8](repeating: 0, count: handMaskWidth * handMaskHeight)
+        let activeSamples = [left, right].compactMap { $0 }
+        guard !activeSamples.isEmpty,
+              let context = CGContext(
+                data: &bytes,
+                width: handMaskWidth,
+                height: handMaskHeight,
+                bitsPerComponent: 8,
+                bytesPerRow: handMaskWidth,
+                space: CGColorSpaceCreateDeviceGray(),
+                bitmapInfo: 0
+              ) else {
+            handMaskLock.lock()
+            pendingHandMaskBytes = bytes
+            pendingHandMaskActive = false
+            handMaskLock.unlock()
+            return
+        }
+
+        // Vision/камера используют верхний левый угол как начало UV в нашей схеме.
+        context.translateBy(x: 0, y: CGFloat(handMaskHeight))
+        context.scaleBy(x: 1, y: -1)
+        context.setAllowsAntialiasing(true)
+        context.setShouldAntialias(true)
+        context.setFillColor(UIColor.white.cgColor)
+        context.setStrokeColor(UIColor.white.cgColor)
+        context.setLineCap(.round)
+        context.setLineJoin(.round)
+
+        for sample in activeSamples {
+            drawHandMask(sample, in: context)
+        }
+
+        handMaskLock.lock()
+        pendingHandMaskBytes = bytes
+        pendingHandMaskActive = true
+        handMaskLock.unlock()
+    }
+
+    private func drawHandMask(_ sample: HandSample, in context: CGContext) {
+        let landscapeLeft = currentInterfaceOrientation() == .landscapeLeft
+        let width = CGFloat(handMaskWidth - 1)
+        let height = CGFloat(handMaskHeight - 1)
+
+        func toRawCameraPoint(_ visionPoint: CGPoint) -> CGPoint {
+            var u = visionPoint.x
+            var v = visionPoint.y
+            if landscapeLeft {
+                u = 1 - u
+            } else {
+                v = 1 - v
+            }
+            return CGPoint(
+                x: min(max(u, 0), 1) * width,
+                y: min(max(v, 0), 1) * height
+            )
+        }
+
+        let palmNames: [VNHumanHandPoseObservation.JointName] = [
+            .wrist, .littleMCP, .ringMCP, .middleMCP, .indexMCP
+        ]
+        let palmPoints = palmNames.compactMap { sample.joints[$0].map(toRawCameraPoint) }
+        if palmPoints.count >= 3 {
+            let path = CGMutablePath()
+            path.move(to: palmPoints[0])
+            for point in palmPoints.dropFirst() { path.addLine(to: point) }
+            path.closeSubpath()
+            context.addPath(path)
+            context.fillPath()
+        }
+
+        let fingerWidth = max(8, min(28, handMaskHeight * 0.055))
+        let palmWidth = fingerWidth * 1.35
+        for (a, b) in Self.handMaskBonePairs {
+            guard let pa = sample.joints[a].map(toRawCameraPoint),
+                  let pb = sample.joints[b].map(toRawCameraPoint) else { continue }
+            context.setLineWidth((a == .wrist || b == .wrist) ? palmWidth : fingerWidth)
+            context.move(to: pa)
+            context.addLine(to: pb)
+            context.strokePath()
+        }
+
+        let jointRadius = fingerWidth * 0.58
+        for point in sample.joints.values.map(toRawCameraPoint) {
+            context.fillEllipse(in: CGRect(
+                x: point.x - jointRadius,
+                y: point.y - jointRadius,
+                width: jointRadius * 2,
+                height: jointRadius * 2
+            ))
+        }
+    }
+
+    private func syncHandMaskTexture() -> Bool {
+        guard let texture = handMaskTexture else { return false }
+        handMaskLock.lock()
+        let active = pendingHandMaskActive
+        let bytes = pendingHandMaskBytes
+        handMaskLock.unlock()
+
+        guard !bytes.isEmpty else { return false }
+        bytes.withUnsafeBytes { rawBuffer in
+            guard let baseAddress = rawBuffer.baseAddress else { return }
+            texture.replace(
+                region: MTLRegionMake2D(0, 0, handMaskWidth, handMaskHeight),
+                mipmapLevel: 0,
+                withBytes: baseAddress,
+                bytesPerRow: handMaskWidth
+            )
+        }
+        return active
+    }
+
     private func updateHandSkeleton(left: HandSample?, right: HandSample?) {
         updateSingleHandSkeleton(sample: left, root: leftHandSkeletonNode, joints: leftSkeletonJoints, bones: leftSkeletonBones)
         updateSingleHandSkeleton(sample: right, root: rightHandSkeletonNode, joints: rightSkeletonJoints, bones: rightSkeletonBones)
@@ -1749,18 +1911,21 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         // Проход 3 — оптика линз плюс сквозное видео.
         let frame = tracking.latestFrameCopy
         let cameraTextures = makeCameraTextures(from: frame)
-        let uniforms = makeUniforms(
+        var uniforms = makeUniforms(
             drawableSize: drawableSize,
             frame: frame,
             hasCamera: cameraTextures != nil
         )
+        uniforms.handMaskEnabled = syncHandMaskTexture() ? 1 : 0
 
+        let handMaskTexture = handMaskTexture ?? eyeTexture
         if let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: passDescriptor) {
             compositor.encode(
                 into: encoder,
                 eyeTexture: eyeTexture,
                 cameraY: cameraTextures?.0,
                 cameraCbCr: cameraTextures?.1,
+                handMask: handMaskTexture,
                 uniforms: uniforms
             )
             encoder.endEncoding()

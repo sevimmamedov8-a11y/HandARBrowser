@@ -2,7 +2,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
-echo "== Hand AR Browser V35 project check =="
+echo "== Hand AR Browser V38 project check =="
 for f in "HandARBrowser.xcodeproj/project.pbxproj" "HandARBrowser/AppDelegate.swift" "HandARBrowser/MainViewController.swift" "HandARBrowser/Info.plist" "HandARBrowser/WebInput.js"; do
   [[ -f "$f" ]] && echo "[OK] $f" || { echo "[FAIL] missing $f"; exit 1; }
 done
@@ -28,6 +28,8 @@ grep -Fq "struct VRProfile" "$SRC"
 grep -Fq "enum VRLensMath" "$SRC"
 grep -Fq "static func frustum(eye: Int, profile: VRProfile)" "$SRC"
 grep -Fq "static func lensCenterUV(eye: Int, profile: VRProfile)" "$SRC"
+grep -Fq "let halfEyeWidth = profile.screenWidthMM * 0.25" "$SRC"
+grep -Fq "return SIMD2<Float>(0.5," "$SRC"
 grep -Fq "final class VRCompositor" "$SRC"
 grep -Fq "device.makeLibrary(source: VRCompositor.source, options: nil)" "$SRC"
 grep -Fq "vr_fragment" "$SRC"
@@ -71,9 +73,14 @@ grep -Fq "private let leftHandSkeletonNode = SCNNode()" "$SRC"
 grep -Fq "private let rightHandSkeletonNode = SCNNode()" "$SRC"
 grep -Fq "private static let handSkeletonBonePairs" "$SRC"
 grep -Fq "recognizedPoints(.all)" "$SRC"
-grep -Fq "updateHandSkeleton(left: left, right: right)" "$SRC"
-grep -Fq "renderingOrder = 220" "$SRC"
+grep -Fq "queueHandForegroundMask(left: left, right: right)" "$SRC"
+grep -Fq "handMaskEnabled" "$SRC"
+grep -Fq "handMaskTexture" "$SRC"
+grep -Fq "texture2d<float> handMask" "$SRC"
+grep -Fq "syncHandMaskTexture()" "$SRC"
 grep -Fq "readsFromDepthBuffer = false" "$SRC"
+! grep -Fq "leftHandSkeletonNode.isHidden = !visible" "$SRC"
+! grep -Fq "rightHandSkeletonNode.isHidden = !visible" "$SRC"
 grep -Fq "private func planeHit(" "$SRC"
 grep -Fq "private func updateDrag(with ray: WorldRay)" "$SRC"
 grep -Fq "dragZoneHeight" "$SRC"
@@ -108,14 +115,13 @@ grep -Fq "NSCameraUsageDescription" HandARBrowser/Info.plist
 ! grep -Fq "frame.camera.projectionMatrix(" "$SRC"
 ! grep -Fq "EyeDisplayView" "$SRC"
 ! grep -Fq "LensMaskView" "$SRC"
-! grep -Fq "fillEllipse" "$SRC"
 ! grep -Fq "private let browserLeft" "$SRC"
 ! grep -Fq "private let browserRight" "$SRC"
 ! grep -Fq "browserPlaneForUnprojection" "$SRC"
 ! grep -Fq "let isPinching: Bool" "$SRC"
 ! grep -Fq "cursorNode" "$SRC"
 
-echo "[OK] V35 static project checks"
+echo "[OK] V38 static project checks"
 
 if command -v swiftc >/dev/null 2>&1; then
   # Parser-only validation can fail on Linux because Apple SDK modules are unavailable;

@@ -106,7 +106,7 @@ grep -Fq "private let browser: WKWebView = {" "$SRC"
 grep -Fq "input.update(" "$SRC"
 grep -Fq "config.allowsPictureInPictureMediaPlayback = false" "$SRC"
 grep -Fq "config.preferences.isElementFullscreenEnabled = false" "$SRC"
-grep -Fq "let maxLensRadius = min(0.5" "$SRC"
+grep -Fq "uniforms.rClip = 5.0" "$SRC"
 
 grep -Fq "HandAR Vision" HandARBrowser/Info.plist
 grep -Fq "NSCameraUsageDescription" HandARBrowser/Info.plist

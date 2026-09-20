@@ -1,6 +1,6 @@
 //
 //  MainViewController.swift
-//  HandAR Vision — V40
+//  HandAR Vision — V50
 //
 //  Стереоконвейер
 //  Передний план: реальные пиксели рук из камеры композятся поверх браузера по маске Vision.
@@ -29,6 +29,7 @@ import ARKit
 import SceneKit
 import Vision
 import WebKit
+import GameController
 import Metal
 import MetalKit
 import simd
@@ -405,6 +406,8 @@ struct ToolbarItem {
     enum Action {
         case open(URL)
         case back
+        case home
+        case center
     }
 
     let title: String
@@ -420,6 +423,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     private let tracking = ARStereoTrackingManager()
     private let hands = HandTracker()
     private let input = WebInputBridge()
+    private let controller = VRBoxControllerService()
 
     // Одна логическая поверхность браузера. Стерео рождается из двух камер,
     // а не из двух копий страницы.
@@ -499,6 +503,8 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     // renderingOrder и отключённый depth test — поэтому они всегда поверх панели.
     private let leftHandSkeletonNode = SCNNode()
     private let rightHandSkeletonNode = SCNNode()
+    private let controllerHandRoot = SCNNode()
+    private let controllerHandTip = SCNNode()
     private var leftSkeletonJoints: [VNHumanHandPoseObservation.JointName: SCNNode] = [:]
     private var rightSkeletonJoints: [VNHumanHandPoseObservation.JointName: SCNNode] = [:]
     private var leftSkeletonBones: [(VNHumanHandPoseObservation.JointName, VNHumanHandPoseObservation.JointName, SCNNode)] = []
@@ -513,6 +519,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     private var highlightedToolbarIndex: Int?
 
     private var menu: MainMenuView!
+    private var diagnosticsView: VRBoxDiagnosticsView?
 
     private var profile = VRProfile.load()
     private var inVR = false
@@ -525,6 +532,13 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     private var dragDistance: Float = 1.55
     private var dragOffset = SIMD3<Float>(repeating: 0)
     private var wasClickPinching = false
+    private var controllerPointer = CGPoint(x: 0.5, y: 0.5)
+    private var controllerButtonDown = false
+    private var controllerConnected = false
+    private var lastHandSeenTime: CFTimeInterval = 0
+    private var controllerHandEuler = SIMD3<Float>(repeating: 0)
+    private var controllerMotionAvailable = false
+    private var controllerMotionRotation = SIMD3<Float>(repeating: 0)
 
     // Масштабирование двумя руками: обе руки делают средний+большой палец,
     // затем расстояние между кончиками указательных меняет размер панели.
@@ -536,15 +550,15 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     // с почтовый конверт на расстоянии вытянутой руки занимает жалкую часть
     // поля зрения и выглядит как маленький квадрат посреди черноты. Здесь
     // панель по умолчанию — это уже «большой монитор», а не окошко.
-    private static let defaultPanelWidth: Float = 2.70
-    private static let defaultPanelHeight: Float = 1.52
+    private static let defaultPanelWidth: Float = 2.90
+    private static let defaultPanelHeight: Float = 1.63
     private static let minimumPanelWidth: Float = 0.72
     private static let maximumPanelWidth: Float = 3.80
     private static let defaultPanelAspect: Float = defaultPanelHeight / defaultPanelWidth
     /// Видео на YouTube/TikTok разворачивается в «кинозал»: экран занимает
     /// большую часть поля зрения шлема, почти как в настоящем VR-кинотеатре.
-    private static let cinemaPanelWidth: Float = 2.85
-    private static let cinemaPanelHeight: Float = 1.62
+    private static let cinemaPanelWidth: Float = 3.15
+    private static let cinemaPanelHeight: Float = 1.77
     private var browserWorldWidth: Float = MainViewController.defaultPanelWidth
     private var browserWorldHeight: Float = MainViewController.defaultPanelHeight
     private let browserWorldDistance: Float = 1.65
@@ -570,17 +584,26 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     private static let homeURL = URL(string: "https://www.google.com/")!
     private static let youTubeURL = URL(string: "https://m.youtube.com/")!
     private static let tikTokURL = URL(string: "https://www.tiktok.com/")!
+    private static let telegramURL = URL(string: "https://web.telegram.org/")!
+    private static let discordURL = URL(string: "https://discord.com/app")!
+    private static let spotifyURL = URL(string: "https://open.spotify.com/")!
+    private static let mapsURL = URL(string: "https://maps.google.com/")!
+    private static let gmailURL = URL(string: "https://mail.google.com/")!
+    private static let redditURL = URL(string: "https://www.reddit.com/")!
+    private static let wikipediaURL = URL(string: "https://www.wikipedia.org/")!
 
     // MARK: Жизненный цикл
 
     override func viewDidLoad() {
         super.viewDidLoad()
+        UIDevice.current.isBatteryMonitoringEnabled = true
         view.backgroundColor = .black
         configureMetal()
         configureScene()
         configureBrowser()
         buildInterface()
         wireServices()
+        controller.start()
     }
 
     override func viewDidAppear(_ animated: Bool) {
@@ -611,6 +634,9 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         // WKUserContentController держит обработчик сильной ссылкой —
         // без явного снятия получился бы цикл ретейнов.
         browser.configuration.userContentController.removeScriptMessageHandler(forName: "handarVideo")
+        browser.configuration.userContentController.removeScriptMessageHandler(forName: "handarApp")
+        browser.configuration.userContentController.removeScriptMessageHandler(forName: "handarSystem")
+        controller.stop()
     }
 
     private func currentInterfaceOrientation() -> UIInterfaceOrientation {
@@ -687,6 +713,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         buildBrowserPanel()
         buildToolbar()
         buildPointer()
+        buildControllerHand()
         // 3D-скелет больше не показываем: поверх браузера выводим настоящие
         // пиксели руки из камеры через handMaskTexture.
     }
@@ -779,10 +806,10 @@ final class MainViewController: UIViewController, MTKViewDelegate {
 
     private func buildToolbar() {
         var items: [ToolbarItem] = [
-            ToolbarItem(title: "Google", action: .open(Self.homeURL)),
+            ToolbarItem(title: "Домой", action: .home),
+            ToolbarItem(title: "Назад", action: .back),
             ToolbarItem(title: "YouTube", action: .open(Self.youTubeURL)),
-            ToolbarItem(title: "TikTok", action: .open(Self.tikTokURL)),
-            ToolbarItem(title: "Назад", action: .back)
+            ToolbarItem(title: "Центр", action: .center)
         ]
 
         let gap: Float = 0.014
@@ -997,7 +1024,9 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         // когда видео на YouTube/TikTok разворачивается на весь экран —
         // это и включает кинорежим.
         browser.configuration.userContentController.add(self, name: "handarVideo")
-        browser.load(URLRequest(url: Self.homeURL))
+        browser.configuration.userContentController.add(self, name: "handarApp")
+        browser.configuration.userContentController.add(self, name: "handarSystem")
+        browser.loadHTMLString(Self.vrDesktopHTML, baseURL: URL(string: "https://handar.vision/") )
     }
 
     private func buildInterface() {
@@ -1016,6 +1045,9 @@ final class MainViewController: UIViewController, MTKViewDelegate {
             guard let self else { return }
             self.profile = updated
             self.applyEyeGeometry()
+        }
+        menu.onDiagnostics = { [weak self] in
+            self?.showVRBoxDiagnostics()
         }
         view.addSubview(menu)
 
@@ -1080,6 +1112,44 @@ final class MainViewController: UIViewController, MTKViewDelegate {
             }
         }
 
+        controller.onConnectionChanged = { [weak self] connected, _ in
+            DispatchQueue.main.async {
+                self?.controllerConnected = connected
+                self?.updateVRDesktopStatus()
+                if !connected {
+                    guard let self else { return }
+                    self.controllerHandRoot.isHidden = true
+                    self.controllerButtonDown = false
+                    self.input.release(webView: self.browser)
+                }
+            }
+        }
+
+        controller.onStick = { [weak self] x, y in
+            DispatchQueue.main.async {
+                self?.handleControllerStick(x: x, y: y)
+            }
+        }
+
+        controller.onGyro = { [weak self] rate in
+            DispatchQueue.main.async {
+                self?.handleControllerGyro(rate)
+            }
+        }
+
+        controller.onButton = { [weak self] button, pressed in
+            DispatchQueue.main.async {
+                self?.handleControllerButton(button, pressed: pressed)
+            }
+        }
+
+        controller.onMotion = { [weak self] hasGyro, _ in
+            guard hasGyro else { return }
+            // Для будущего 6DoF-профиля сохраняем сам факт motion; текущая
+            // виртуальная рука использует стик как надёжный 2D-позиционер.
+            self?.controllerConnected = true
+        }
+
         hands.onUpdate = { [weak self] left, right in
             DispatchQueue.main.async {
                 self?.handleHands(left: left, right: right)
@@ -1131,6 +1201,10 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         wasClickPinching = false
         isResizing = false
         resizeStartHandDistance = 0
+        controllerPointer = CGPoint(x: 0.5, y: 0.5)
+        controllerButtonDown = false
+        controllerPointer = CGPoint(x: 0.5, y: 0.5)
+        controllerHandRoot.isHidden = true
         resetPanelToDefaultSizeInstantly()
 
         applyEyeGeometry()
@@ -1187,6 +1261,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
 
         UIApplication.shared.isIdleTimerDisabled = false
         setVRVisible(false)
+        controllerHandRoot.isHidden = true
         requestLandscapeMode()
     }
 
@@ -1199,6 +1274,30 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     @objc private func handleExitTap() {
         guard inVR else { return }
         leaveVRToMenu()
+    }
+
+    private func showVRBoxDiagnostics() {
+        guard diagnosticsView == nil else { return }
+        let diagnostics = VRBoxDiagnosticsView(frame: view.bounds)
+        diagnostics.onClose = { [weak self, weak diagnostics] in
+            guard let diagnostics else { return }
+            diagnostics.willMove(toParent: nil)
+            diagnostics.view.removeFromSuperview()
+            diagnostics.removeFromParent()
+            self?.diagnosticsView = nil
+            self?.menu?.isHidden = false
+            self?.menu?.isUserInteractionEnabled = true
+        }
+        diagnosticsView = diagnostics
+        menu?.isHidden = true
+        menu?.isUserInteractionEnabled = false
+        addChild(diagnostics)
+        diagnostics.view.frame = view.bounds
+        diagnostics.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        view.addSubview(diagnostics.view)
+        diagnostics.didMove(toParent: self)
+        view.bringSubviewToFront(diagnostics.view)
+        diagnostics.startMonitoring()
     }
 
     private func requestLandscapeMode() {
@@ -1326,9 +1425,88 @@ final class MainViewController: UIViewController, MTKViewDelegate {
 
     // MARK: Руки и указатель
 
+    private func handleControllerStick(x: CGFloat, y: CGFloat) {
+        guard inVR, controllerConnected else { return }
+        guard CACurrentMediaTime() - lastHandSeenTime > 0.45 else { return }
+        let dead: CGFloat = 0.12
+        let sx = abs(x) < dead ? 0 : x
+        let sy = abs(y) < dead ? 0 : y
+        guard sx != 0 || sy != 0 else {
+            updateControllerHand()
+            return
+        }
+        let speed: CGFloat = 0.018
+        controllerPointer.x = min(max(controllerPointer.x + sx * speed, 0.015), 0.985)
+        controllerPointer.y = min(max(controllerPointer.y + sy * speed, 0.015), 0.985)
+        updateControllerHand()
+    }
+
+    private func handleControllerGyro(_ rate: SIMD3<Float>) {
+        guard inVR, controllerConnected else { return }
+        guard CACurrentMediaTime() - lastHandSeenTime > 0.45 else { return }
+        let dt: CGFloat = 1.0 / 30.0
+        let sensitivity: CGFloat = 1.25
+        let dx = CGFloat(rate.y) * dt * sensitivity
+        let dy = CGFloat(rate.x) * dt * sensitivity
+        controllerPointer.x = min(max(controllerPointer.x + dx, 0.015), 0.985)
+        controllerPointer.y = min(max(controllerPointer.y - dy, 0.015), 0.985)
+        updateControllerHand()
+    }
+
+    private func handleControllerButton(_ button: VRBoxButton, pressed: Bool) {
+        guard inVR, controllerConnected else { return }
+        guard CACurrentMediaTime() - lastHandSeenTime > 0.45 else { return }
+        switch button {
+        case .a:
+            controllerButtonDown = pressed
+            updateControllerHand()
+        case .b:
+            if pressed {
+                if browser.canGoBack { browser.goBack() }
+            }
+        case .x:
+            if pressed { openVRDesktop() }
+        case .y:
+            if pressed { resetBrowserAnchor(); UIImpactFeedbackGenerator(style: .light).impactOccurred() }
+        case .menu:
+            if pressed { leaveVRToMenu() }
+        }
+    }
+
+    private func updateControllerHand() {
+        guard inVR, controllerConnected, let transform = browserWorldTransform else {
+            controllerHandRoot.isHidden = true
+            return
+        }
+        let x = min(max(controllerPointer.x, 0), 1)
+        let y = min(max(controllerPointer.y, 0), 1)
+        let local = SIMD3<Float>(
+            Float(x - 0.5) * browserWorldWidth,
+            Float(0.5 - y) * browserWorldHeight,
+            0.035
+        )
+        let world4 = transform * SIMD4<Float>(local.x, local.y, local.z, 1)
+        let world = SIMD3<Float>(world4.x, world4.y, world4.z)
+        let towardCamera = simd_normalize(headNode.simdWorldPosition - world)
+        controllerHandRoot.simdWorldPosition = world + towardCamera * 0.13
+        controllerHandRoot.simdWorldOrientation = browserPlaneNode.simdWorldOrientation
+        controllerHandTip.simdWorldPosition = world + towardCamera * 0.02
+        controllerHandRoot.isHidden = false
+        showPointerDot(at: world, transform: transform, active: controllerButtonDown)
+        showRay(
+            from: WorldRay(origin: headNode.simdWorldPosition, direction: simd_normalize(world - headNode.simdWorldPosition)),
+            hit: world
+        )
+        input.update(normalizedPoint: CGPoint(x: x, y: y), pinch: controllerButtonDown, webView: browser)
+    }
+
     private func handleHands(left: HandSample?, right: HandSample?) {
         guard inVR else { return }
         queueHandForegroundMask(left: left, right: right)
+        if left != nil || right != nil {
+            lastHandSeenTime = CACurrentMediaTime()
+            controllerHandRoot.isHidden = true
+        }
 
         // Две руки: средний+большой палец = режим изменения размера.
         // Расходятся указательные — окно увеличивается, сходятся — уменьшается.
@@ -1353,6 +1531,11 @@ final class MainViewController: UIViewController, MTKViewDelegate {
             releasePointer()
             hidePointer()
             wasClickPinching = false
+            if controllerConnected && CACurrentMediaTime() - lastHandSeenTime > 0.45 {
+                updateControllerHand()
+            } else {
+                controllerHandRoot.isHidden = true
+            }
             return
         }
 
@@ -1493,6 +1676,11 @@ final class MainViewController: UIViewController, MTKViewDelegate {
             if browser.canGoBack {
                 browser.goBack()
             }
+        case .home:
+            openVRDesktop()
+        case .center:
+            resetBrowserAnchor()
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
         }
     }
 
@@ -1954,12 +2142,11 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         uniforms.k1 = profile.k1
         uniforms.k2 = profile.k2
         uniforms.chroma = profile.chroma
-        // Прямоугольные (не круглые) окна: каждый глаз занимает свою
-        // половину экрана целиком, без круглой маски и виньетки. Шейдер
-        // уже умеет отключать круглый клип и мягкий край по значению
-        // rClip >= 5.0 (см. `u.rClip < 5.0` в vr_fragment) — этим и
-        // пользуемся вместо вычисления радиуса круга.
-        uniforms.rClip = 5.0
+        // Круглая линза максимально заполняет свою половину дисплея.
+        // Радиус ограничен и по высоте, и по ширине, поэтому окружность
+        // не превращается в овал и одинакова для обоих глаз.
+        let maxLensRadius = min(0.5, 0.5 / max(uniforms.aspect, 0.001))
+        uniforms.rClip = 0.497
         uniforms.passthrough = (profile.passthrough && hasCamera) ? 1 : 0
 
         guard let frame, profile.passthrough, hasCamera else { return uniforms }
@@ -2101,20 +2288,372 @@ extension MainViewController: WKScriptMessageHandler {
         _ userContentController: WKUserContentController,
         didReceive message: WKScriptMessage
     ) {
-        guard
-            message.name == "handarVideo",
-            let body = message.body as? [String: Any],
-            let active = body["active"] as? Bool
-        else {
-            return
+        switch message.name {
+        case "handarVideo":
+            guard
+                let body = message.body as? [String: Any],
+                let active = body["active"] as? Bool
+            else { return }
+            setCinemaMode(active)
+
+        case "handarApp":
+            guard let body = message.body as? [String: Any],
+                  let id = body["id"] as? String else { return }
+            openVRApp(id: id)
+
+        case "handarSystem":
+            guard let body = message.body as? [String: Any],
+                  let action = body["action"] as? String else { return }
+            handleVRSystemAction(action)
+
+        default:
+            break
         }
-        setCinemaMode(active)
+    }
+}
+
+// MARK: - VR desktop / VR apps ------------------------------------------------
+
+extension MainViewController {
+    private static let vrDesktopHTML = #"""
+<!doctype html>
+<html lang="ru">
+<head>
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta charset="utf-8">
+<title>HandAR VR Desktop</title>
+<style>
+:root{--glass:rgba(20,24,34,.54);--glass2:rgba(255,255,255,.12);--text:#fff;--muted:rgba(255,255,255,.7)}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;width:100%;height:100%;overflow:hidden;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","Helvetica Neue",Arial,sans-serif;color:var(--text);background:linear-gradient(145deg,#0e1732 0%,#43276d 50%,#0a132b 100%);}
+body:before{content:"";position:fixed;inset:-20%;background:radial-gradient(circle at 28% 30%,rgba(95,170,255,.32),transparent 34%),radial-gradient(circle at 72% 64%,rgba(226,92,255,.28),transparent 32%);filter:blur(28px);}
+.wall{position:relative;height:100%;padding:18px 34px 20px;display:flex;flex-direction:column;gap:14px;}
+.status{height:30px;display:flex;align-items:center;justify-content:space-between;font-size:16px;font-weight:650;text-shadow:0 2px 10px rgba(0,0,0,.35)}
+.status .right{display:flex;gap:10px;align-items:center;font-size:13px;font-weight:550}.status .right span{white-space:nowrap}.pill{padding:6px 10px;border-radius:999px;background:rgba(0,0,0,.22);backdrop-filter:blur(18px)}
+.search{height:50px;border-radius:22px;background:rgba(255,255,255,.16);border:1px solid rgba(255,255,255,.25);backdrop-filter:blur(22px);display:flex;align-items:center;gap:12px;padding:0 17px;font-size:17px;color:#fff;box-shadow:0 8px 24px rgba(0,0,0,.14)}
+.searchIcon{font-size:19px;opacity:.9}.searchText{opacity:.78}.searchHint{margin-left:auto;font-size:12px;opacity:.52;padding:5px 8px;border-radius:9px;background:rgba(0,0,0,.16)}
+.grid{flex:1;display:grid;grid-template-columns:repeat(6,1fr);grid-auto-rows:minmax(88px,1fr);gap:12px 16px;align-items:start;padding:2px 2px 0}
+.app{min-width:0;text-align:center;cursor:pointer;user-select:none}.app:active{transform:scale(.93)}
+.icon{width:64px;height:64px;margin:0 auto 6px;border-radius:20px;display:flex;align-items:center;justify-content:center;box-shadow:inset 0 1px 1px rgba(255,255,255,.24),0 9px 18px rgba(0,0,0,.20);border:1px solid rgba(255,255,255,.16);overflow:hidden}.icon svg{width:34px;height:34px;fill:none;stroke:#fff;stroke-width:2.2;stroke-linecap:round;stroke-linejoin:round}.icon .solid{fill:#fff;stroke:none}
+.app span{display:block;font-size:13px;line-height:16px;font-weight:560;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-shadow:0 1px 6px rgba(0,0,0,.35)}
+.blue{background:linear-gradient(135deg,#54a9ff,#1866e8)}.red{background:linear-gradient(135deg,#ff4d55,#cf111c)}.pink{background:linear-gradient(135deg,#ff5bb8,#7d26ff)}.teal{background:linear-gradient(135deg,#42d9ca,#007d87)}.indigo{background:linear-gradient(135deg,#7e82ff,#4647b9)}.green{background:linear-gradient(135deg,#55df76,#159447)}.cyan{background:linear-gradient(135deg,#55d8ff,#1a74db)}.orange{background:linear-gradient(135deg,#ffb657,#e46710)}.gray{background:linear-gradient(135deg,#737b88,#343943)}.dark{background:rgba(13,18,28,.82)}
+.dock{height:82px;border-radius:28px;background:rgba(235,240,255,.18);border:1px solid rgba(255,255,255,.22);backdrop-filter:blur(28px);display:flex;align-items:center;justify-content:space-around;padding:9px 22px;box-shadow:0 12px 30px rgba(0,0,0,.2)}
+.dock .icon{width:54px;height:54px;border-radius:17px;margin:0}.dock .app span{display:none}.dock .app{width:56px}
+.note{text-align:center;font-size:11px;color:rgba(255,255,255,.48);margin-top:-4px}.launch{animation:launch .22s ease-out}.launch .icon{box-shadow:0 0 0 5px rgba(255,255,255,.28),0 0 30px rgba(255,255,255,.25)}
+@keyframes launch{from{transform:scale(.96)}to{transform:scale(1)}}
+</style>
+</head>
+<body>
+<div class="wall">
+  <div class="status"><div id="time">--:--</div><div class="right"><span>⌁</span><span>Wi‑Fi</span><span id="controllerState">VR BOX — нет</span><span id="battery">🔋 --%</span><span class="pill">VR</span></div></div>
+  <div class="search" onclick="post('google')"><span class="searchIcon">⌕</span><span class="searchText">Поиск в VR</span><span class="searchHint">Google</span></div>
+  <div class="grid">
+    <div class="app" data-id="safari"><div class="icon blue"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M15.5 8.5 13 13l-4.5 2.5L11 11z"/></svg></div><span>Safari</span></div>
+    <div class="app" data-id="youtube"><div class="icon red"><svg viewBox="0 0 24 24"><path class="solid" d="M21 7.4a2.8 2.8 0 0 0-2-2C17.2 5 12 5 12 5s-5.2 0-7 .4a2.8 2.8 0 0 0-2 2A29 29 0 0 0 2.6 12 29 29 0 0 0 3 16.6a2.8 2.8 0 0 0 2 2c1.8.4 7 .4 7 .4s5.2 0 7-.4a2.8 2.8 0 0 0 2-2 29 29 0 0 0 .4-4.6A29 29 0 0 0 21 7.4Z"/><path d="m10 9 5 3-5 3z" fill="#e21c2a" stroke="none"/></svg></div><span>YouTube</span></div>
+    <div class="app" data-id="tiktok"><div class="icon dark"><svg viewBox="0 0 24 24"><path d="M14 5v9a4 4 0 1 1-3.2-3.9"/><path d="M14 5c1.2 2.2 2.8 3.4 5 3.6"/></svg></div><span>TikTok</span></div>
+    <div class="app" data-id="telegram"><div class="icon cyan"><svg viewBox="0 0 24 24"><path class="solid" d="M20.8 4.4 3.2 11.2c-1 .4-1 1.1-.2 1.4l4.5 1.4 1.7 5.1c.2.6.1.9.8.9.5 0 .8-.2 1.1-.5l2.1-2 4.4 3.3c.8.4 1.4.2 1.6-.7l3.1-14.4c.3-1.2-.5-1.8-1.5-1.3Z"/></svg></div><span>Telegram</span></div>
+    <div class="app" data-id="discord"><div class="icon indigo"><svg viewBox="0 0 24 24"><path d="M7 7.8c2.9-1.1 7.1-1.1 10 0 1.5 1.3 2.3 4.6 1.9 7.6-1.9 1.3-3.7 2-5.5 2.4l-.8-1.1"/><path d="M7 7.8c-1.5 1.3-2.3 4.6-1.9 7.6 1.9 1.3 3.7 2 5.5 2.4l.8-1.1"/><circle cx="9.2" cy="12.5" r="1"/><circle cx="14.8" cy="12.5" r="1"/></svg></div><span>Discord</span></div>
+    <div class="app" data-id="spotify"><div class="icon green"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M7 10.2c3.7-1.2 6.8-.9 10 .5"/><path d="M7.8 13c3.1-.8 5.6-.5 8.3.6"/><path d="M8.8 15.5c2.4-.4 4.3-.2 6.4.5"/></svg></div><span>Музыка</span></div>
+    <div class="app" data-id="maps"><div class="icon orange"><svg viewBox="0 0 24 24"><path d="M12 20s6-6 6-10a6 6 0 1 0-12 0c0 4 6 10 6 10Z"/><circle cx="12" cy="10" r="2"/></svg></div><span>Карты</span></div>
+    <div class="app" data-id="gmail"><div class="icon red"><svg viewBox="0 0 24 24"><path d="M4 6h16v12H4z"/><path d="m4 7 8 6 8-6"/></svg></div><span>Почта</span></div>
+    <div class="app" data-id="google"><div class="icon dark"><svg viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.2-5.5"/><path d="M20 7v5h-5"/></svg></div><span>Google</span></div>
+    <div class="app" data-id="wikipedia"><div class="icon gray"><svg viewBox="0 0 24 24"><path d="M4 6h4l4 10 4-10h4"/><path d="M9 18h6"/></svg></div><span>Wikipedia</span></div>
+    <div class="app" data-id="reddit"><div class="icon orange"><svg viewBox="0 0 24 24"><circle cx="12" cy="13" r="6.5"/><circle cx="9.5" cy="12.5" r=".9" fill="#fff" stroke="none"/><circle cx="14.5" cy="12.5" r=".9" fill="#fff" stroke="none"/><path d="M9 15c1.7 1.2 4.3 1.2 6 0"/><path d="m14.5 6 1.8-2.2"/><circle cx="17.2" cy="3.5" r="1"/></svg></div><span>Reddit</span></div>
+    <div class="app" data-id="notes"><div class="icon orange"><svg viewBox="0 0 24 24"><path d="M6 4h12v16H6z"/><path d="M9 8h6M9 12h6M9 16h4"/></svg></div><span>Заметки</span></div>
+    <div class="app" data-id="calculator"><div class="icon dark"><svg viewBox="0 0 24 24"><rect x="5" y="3" width="14" height="18" rx="2"/><path d="M8 7h8M8 11h2M12 11h2M16 11h0M8 15h2M12 15h2M8 18h8"/></svg></div><span>Калькулятор</span></div>
+    <div class="app" data-id="photos"><div class="icon pink"><svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="4"/><circle cx="12" cy="12" r="3"/><path d="M8 7h1"/></svg></div><span>Фото</span></div>
+    <div class="app" data-id="files"><div class="icon blue"><svg viewBox="0 0 24 24"><path d="M4 7h6l2 2h8v9H4z"/><path d="M4 10h16"/></svg></div><span>Файлы</span></div>
+    <div class="app" data-id="messages"><div class="icon green"><svg viewBox="0 0 24 24"><path d="M4 5h16v11H9l-5 4z"/></svg></div><span>Сообщения</span></div>
+    <div class="app" data-id="phone"><div class="icon green"><svg viewBox="0 0 24 24"><path d="M7 4c1.1 0 2 .9 2 2 0 1-.2 1.8-.6 2.6-.2.4-.1.8.2 1.1l2.1 2.1c.3.3.7.4 1.1.2.8-.4 1.6-.6 2.6-.6 1.1 0 2 .9 2 2v3c0 1.1-.9 2-2 2C9.8 18.4 5.6 14.2 4.6 9.1 4.4 8.1 5.2 7 6.3 6.7z"/></svg></div><span>Телефон</span></div>
+    <div class="app" data-id="settings"><div class="icon gray"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 0 0-.1-1.2l2-1.5-2-3.4-2.3.9a7 7 0 0 0-2-1.1L14.3 3h-4.6l-.4 2.7a7 7 0 0 0-2 1.1L5 5.9 3 9.3l2 1.5A7 7 0 0 0 5 12c0 .4 0 .8.1 1.2l-2 1.5 2 3.4 2.3-.9a7 7 0 0 0 2 1.1l.4 2.7h4.6l.4-2.7a7 7 0 0 0 2-1.1l2.3.9 2-3.4-2-1.5c.1-.4.1-.8.1-1.2Z"/></svg></div><span>Настройки</span></div>
+  </div>
+  <div class="dock">
+    <div class="app" data-id="safari"><div class="icon blue"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M15.5 8.5 13 13l-4.5 2.5L11 11z"/></svg></div></div>
+    <div class="app" data-id="youtube"><div class="icon red"><svg viewBox="0 0 24 24"><path d="M5 5h14v14H5z"/><path d="m10 8 5 4-5 4z" fill="#fff" stroke="none"/></svg></div></div>
+    <div class="app" data-id="telegram"><div class="icon cyan"><svg viewBox="0 0 24 24"><path d="m5 12 13-6-4 12-3-4-4-1z"/></svg></div></div>
+    <div class="app" data-id="messages"><div class="icon green"><svg viewBox="0 0 24 24"><path d="M4 5h16v11H9l-5 4z"/></svg></div></div>
+    <div class="app" data-id="settings"><div class="icon gray"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 0 0-.1-1.2l2-1.5-2-3.4-2.3.9a7 7 0 0 0-2-1.1L14.3 3h-4.6l-.4 2.7a7 7 0 0 0-2 1.1L5 5.9 3 9.3l2 1.5A7 7 0 0 0 5 12c0 .4 0 .8.1 1.2l-2 1.5 2 3.4 2.3-.9a7 7 0 0 0 2 1.1l.4 2.7h4.6l.4-2.7a7 7 0 0 0 2-1.1l2.3.9 2-3.4-2-1.5c.1-.4.1-.8.1-1.2Z"/></svg></div></div><div class="icon gray"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 0 0-.1-1.2l2-1.5-2-3.4-2.3.9a7 7 0 0 0-2-1.1L14.3 3h-4.6l-.4 2.7a7 7 0 0 0-2 1.1L5 5.9 3 9.3l2 1.5A7 7 0 0 0 5 12c0 .4 0 .8.1 1.2l-2 1.5 2 3.4 2.3-.9a7 7 0 0 0 2 1.1l.4 2.7h4.6l.4-2.7a7 7 0 0 0 2-1.1l2.3.9 2-3.4-2-1.5c.1-.4.1-.8.1-1.2Z"/></svg></div></div>
+  </div>
+  <div class="note">VR Desktop • рабочее пространство HandAR в стерео-VR • рука / VR BOX</div>
+</div>
+<script>
+function post(id){try{window.webkit.messageHandlers.handarApp.postMessage({id:id});}catch(e){}}
+function clock(){const d=new Date();document.getElementById('time').textContent=d.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});}
+setInterval(clock,1000);clock();
+document.querySelectorAll('.app').forEach(function(a){a.addEventListener('click',function(){a.classList.add('launch');post(a.dataset.id);setTimeout(()=>a.classList.remove('launch'),320);});});
+</script>
+</body>
+</html>
+"""#
+
+    private static func htmlPage(title: String, icon: String, accent: String, body: String, scripts: String = "") -> String {
+        let template = #"""
+<!doctype html><html lang="ru"><head>
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta charset="utf-8"><title>HandAR VR App</title>
+<style>
+:root{--accent:%ACCENT%}
+*{box-sizing:border-box}html,body{margin:0;width:100%%;height:100%%;overflow:hidden;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","Helvetica Neue",Arial,sans-serif;background:linear-gradient(135deg,#0d1118,#1a2030);color:#fff}body:before{content:"";position:fixed;inset:0;background:radial-gradient(circle at 70%% 20%%,var(--accent),transparent 42%%);opacity:.28}.wrap{position:relative;height:100%%;padding:22px 34px;display:flex;flex-direction:column;gap:18px}.top{height:44px;display:flex;align-items:center;justify-content:space-between}.brand{display:flex;align-items:center;gap:12px}.back{border:1px solid rgba(255,255,255,.2);background:rgba(255,255,255,.1);color:#fff;border-radius:15px;padding:10px 15px;font-size:15px}.title{font-size:22px;font-weight:700}.card{flex:1;border:1px solid rgba(255,255,255,.15);background:rgba(255,255,255,.07);backdrop-filter:blur(25px);border-radius:28px;padding:26px;overflow:auto}.hero{display:flex;align-items:center;gap:18px}.bigicon{width:74px;height:74px;border-radius:22px;background:var(--accent);display:flex;align-items:center;justify-content:center;font-size:34px;box-shadow:0 10px 30px rgba(0,0,0,.24)}h1{margin:0;font-size:32px}p{color:rgba(255,255,255,.7);line-height:1.45}.row{display:flex;gap:12px;flex-wrap:wrap}.btn{border:1px solid rgba(255,255,255,.2);background:rgba(255,255,255,.12);color:#fff;border-radius:17px;padding:13px 18px;font-size:15px}.btn.primary{background:var(--accent);border-color:transparent}.small{font-size:12px;color:rgba(255,255,255,.48)}textarea{width:100%%;height:58%%;resize:none;border:1px solid rgba(255,255,255,.18);background:rgba(0,0,0,.2);color:#fff;border-radius:18px;padding:16px;font:inherit;outline:none}.display{font-size:48px;text-align:right;padding:18px;background:rgba(0,0,0,.25);border-radius:20px;margin-bottom:14px}.keys{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}.key{padding:20px 10px;border:0;border-radius:16px;background:rgba(255,255,255,.1);color:#fff;font-size:22px}.key.op{background:var(--accent)}.photo-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-top:22px}.photo{aspect-ratio:1.25;border-radius:22px;display:flex;align-items:flex-end;padding:14px;font-weight:700;background:linear-gradient(145deg,var(--accent),rgba(255,255,255,.1)),radial-gradient(circle at 70% 25%,#fff5,transparent 35%);border:1px solid rgba(255,255,255,.14)}.p2{filter:saturate(.75)}.p3{filter:hue-rotate(28deg)}.p4{filter:hue-rotate(90deg)}.p5{filter:hue-rotate(145deg)}.p6{filter:hue-rotate(220deg)}.file-list,.chat-list{display:flex;flex-direction:column;gap:10px;margin-top:24px}.file-row,.chat{border:1px solid rgba(255,255,255,.13);background:rgba(255,255,255,.06);color:#fff;border-radius:18px;padding:15px 17px;text-align:left}.file-row{display:grid;grid-template-columns:34px 1fr;gap:3px 10px}.file-row span{grid-row:1/3;font-size:22px}.file-row small{color:rgba(255,255,255,.48)}.chat{display:grid;grid-template-columns:1fr auto;gap:4px 12px}.chat span{color:rgba(255,255,255,.68)}.chat time{grid-column:2;grid-row:1/3;color:rgba(255,255,255,.38);font-size:12px}.phone-display{font-size:36px;letter-spacing:2px;text-align:center;padding:18px;border-radius:18px;background:rgba(0,0,0,.22);margin:22px 0 14px}.phone-keys{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
+</style></head><body><div class="wrap">
+<div class="top"><div class="brand"><button class="back" onclick="post('home')">‹ Домой</button><div class="title">%TITLE%</div></div><div class="small">HandAR VR</div></div>
+<div class="card">%BODY%</div></div>
+<script>function post(id){try{window.webkit.messageHandlers.handarApp.postMessage({id:id});}catch(e){}}%SCRIPTS%</script>
+</body></html>
+"""#
+        return template
+            .replacingOccurrences(of: "%ACCENT%", with: accent)
+            .replacingOccurrences(of: "%TITLE%", with: title)
+            .replacingOccurrences(of: "%BODY%", with: body)
+            .replacingOccurrences(of: "%SCRIPTS%", with: scripts)
+            .replacingOccurrences(of: "%%", with: "%")
+    }
+
+    private static let vrNotesHTML = htmlPage(
+        title: "Заметки",
+        icon: "✎",
+        accent: "#f59e0b",
+        body: """
+<div class="hero"><div class="bigicon">✎</div><div><h1>Заметки</h1><p>Локальная VR-заметка сохраняется на этом устройстве внутри WebView.</p></div></div>
+<textarea id="note" placeholder="Напиши здесь..."></textarea>
+<div class="row"><button class="btn primary" id="save">Сохранить</button><button class="btn" id="clear">Очистить</button></div>
+""",
+        scripts: """
+const note=document.getElementById('note');note.value=localStorage.getItem('handar-note')||'';
+document.getElementById('save').onclick=()=>localStorage.setItem('handar-note',note.value);
+document.getElementById('clear').onclick=()=>{note.value='';localStorage.removeItem('handar-note');};
+"""
+    )
+
+    private static let vrCalculatorHTML = htmlPage(
+        title: "Калькулятор",
+        icon: "＋",
+        accent: "#4b5563",
+        body: """
+<div class="display" id="display">0</div><div class="keys">
+<button class="key" data-k="7">7</button><button class="key" data-k="8">8</button><button class="key" data-k="9">9</button><button class="key op" data-k="/">÷</button>
+<button class="key" data-k="4">4</button><button class="key" data-k="5">5</button><button class="key" data-k="6">6</button><button class="key op" data-k="*">×</button>
+<button class="key" data-k="1">1</button><button class="key" data-k="2">2</button><button class="key" data-k="3">3</button><button class="key op" data-k="-">−</button>
+<button class="key" data-k="0">0</button><button class="key" data-k=".">.</button><button class="key op" data-k="=">=</button><button class="key op" data-k="+">+</button>
+</div><div class="row" style="margin-top:14px"><button class="btn" id="clear">Сбросить</button></div>
+""",
+        scripts: """
+let expr='';const d=document.getElementById('display');function render(){d.textContent=expr||'0'}
+document.querySelectorAll('[data-k]').forEach(b=>b.onclick=()=>{const k=b.dataset.k;if(k==='='){try{expr=String(Function('return '+expr)())}catch(e){expr='Ошибка'}}else{expr+=k}render()});document.getElementById('clear').onclick=()=>{expr='';render()};
+"""
+    )
+
+    private static let vrPhotosHTML = htmlPage(
+        title: "Фото",
+        icon: "▦",
+        accent: "#d946ef",
+        body: """
+<div class="hero"><div class="bigicon">▦</div><div><h1>Фото</h1><p>VR-галерея HandAR. Здесь можно пролистывать локальные снимки без выхода из VR.</p></div></div>
+<div class="photo-grid">
+<div class="photo p1">Закат</div><div class="photo p2">Горы</div><div class="photo p3">Город</div><div class="photo p4">Море</div><div class="photo p5">Путешествие</div><div class="photo p6">Избранное</div>
+</div>
+""",
+        scripts: """
+// Фото в этой демо-версии намеренно локальные UI-заглушки: системную библиотеку iOS нельзя встроить внутрь стороннего WKWebView.
+"""
+    )
+
+    private static let vrFilesHTML = htmlPage(
+        title: "Файлы",
+        icon: "▰",
+        accent: "#3b82f6",
+        body: """
+<div class="hero"><div class="bigicon">▰</div><div><h1>Файлы</h1><p>VR-файловый менеджер HandAR с виртуальными папками для контента шлема.</p></div></div>
+<div class="file-list">
+<button class="file-row"><span>▱</span><b>На iPhone</b><small>Локальные данные приложения</small></button>
+<button class="file-row"><span>▱</span><b>VR Downloads</b><small>Загруженные веб-файлы</small></button>
+<button class="file-row"><span>▱</span><b>Избранное</b><small>Быстрый доступ</small></button>
+</div>
+"""
+    )
+
+    private static let vrMessagesHTML = htmlPage(
+        title: "Сообщения",
+        icon: "☏",
+        accent: "#22c55e",
+        body: """
+<div class="hero"><div class="bigicon">☏</div><div><h1>Сообщения</h1><p>Внутренний VR-интерфейс чатов. Это не системное приложение Messages.</p></div></div>
+<div class="chat-list">
+<div class="chat"><b>HandAR</b><span>Добро пожаловать в VR Desktop</span><time>сейчас</time></div>
+<div class="chat"><b>VR Friends</b><span>Новый сеанс готов</span><time>сегодня</time></div>
+<div class="chat"><b>Заметки</b><span>Проверь настройки линз</span><time>вчера</time></div>
+</div>
+"""
+    )
+
+    private static let vrPhoneHTML = htmlPage(
+        title: "Телефон",
+        icon: "☎",
+        accent: "#22c55e",
+        body: """
+<div class="hero"><div class="bigicon">☎</div><div><h1>Телефон</h1><p>VR-набор номера. Звонок через системное приложение здесь не встраивается.</p></div></div>
+<div class="phone-display" id="phone-display">⌕</div>
+<div class="phone-keys">
+<button class="key" data-k="1">1</button><button class="key" data-k="2">2</button><button class="key" data-k="3">3</button>
+<button class="key" data-k="4">4</button><button class="key" data-k="5">5</button><button class="key" data-k="6">6</button>
+<button class="key" data-k="7">7</button><button class="key" data-k="8">8</button><button class="key" data-k="9">9</button>
+<button class="key" data-k="*">*</button><button class="key" data-k="0">0</button><button class="key" data-k="#">#</button>
+</div>
+""",
+        scripts: """
+let number='';const pd=document.getElementById('phone-display');document.querySelectorAll('[data-k]').forEach(b=>b.onclick=()=>{number+=b.dataset.k;pd.textContent=number;});
+"""
+    )
+
+    private static let vrSettingsHTML = htmlPage(
+        title: "Настройки",
+        icon: "⚙",
+        accent: "#6b7280",
+        body: """
+<div class="hero"><div class="bigicon">⚙</div><div><h1>VR Settings</h1><p>Быстрые действия для шлема. Подробная физическая калибровка остаётся в обычном меню HandAR.</p></div></div>
+<div class="row"><button class="btn primary" onclick="post('center')">Перецентрировать экран</button><button class="btn" onclick="post('controller-diagnostics')">Диагностика VR BOX</button><button class="btn" onclick="post('exit')">Выйти из VR</button></div>
+<div style="margin-top:24px"><p><b>О контроллере:</b> приложение пытается получать Game Controller и motion-профиль. Если iOS не отдаёт VR BOX как контроллер, этот режим не может изобрести его сигналы.</p><p class="small">Нативные сторонние iPhone-приложения нельзя встроить внутрь окна HandAR. Поэтому значки на VR Desktop открывают VR-версии на базе WKWebView. Системный iOS запуск возможен только как отдельный переход из приложения.</p></div>
+"""
+    )
+
+    private func openVRDesktop() {
+        isCinemaMode = false
+        browserWorldWidth = Self.defaultPanelWidth
+        browserWorldHeight = Self.defaultPanelHeight
+        updatePanelSize(width: browserWorldWidth)
+        toolbarNode.isHidden = false
+        browser.loadHTMLString(Self.vrDesktopHTML, baseURL: URL(string: "https://handar.vision/"))
+    }
+
+    private func openVRApp(id: String) {
+        isCinemaMode = false
+        browserWorldWidth = Self.defaultPanelWidth
+        browserWorldHeight = Self.defaultPanelHeight
+        updatePanelSize(width: browserWorldWidth)
+        toolbarNode.isHidden = false
+        switch id {
+        case "home":
+            openVRDesktop()
+        case "safari", "google":
+            browser.load(URLRequest(url: Self.homeURL))
+        case "youtube":
+            browser.load(URLRequest(url: Self.youTubeURL))
+        case "tiktok":
+            browser.load(URLRequest(url: Self.tikTokURL))
+        case "telegram":
+            browser.load(URLRequest(url: Self.telegramURL))
+        case "discord":
+            browser.load(URLRequest(url: Self.discordURL))
+        case "spotify":
+            browser.load(URLRequest(url: Self.spotifyURL))
+        case "maps":
+            browser.load(URLRequest(url: Self.mapsURL))
+        case "gmail":
+            browser.load(URLRequest(url: Self.gmailURL))
+        case "reddit":
+            browser.load(URLRequest(url: Self.redditURL))
+        case "wikipedia":
+            browser.load(URLRequest(url: Self.wikipediaURL))
+        case "notes":
+            browser.loadHTMLString(Self.vrNotesHTML, baseURL: URL(string: "https://handar.vision/"))
+        case "calculator":
+            browser.loadHTMLString(Self.vrCalculatorHTML, baseURL: URL(string: "https://handar.vision/"))
+        case "photos":
+            browser.loadHTMLString(Self.vrPhotosHTML, baseURL: URL(string: "https://handar.vision/"))
+        case "files":
+            browser.loadHTMLString(Self.vrFilesHTML, baseURL: URL(string: "https://handar.vision/"))
+        case "messages":
+            browser.loadHTMLString(Self.vrMessagesHTML, baseURL: URL(string: "https://handar.vision/"))
+        case "phone":
+            browser.loadHTMLString(Self.vrPhoneHTML, baseURL: URL(string: "https://handar.vision/"))
+        case "settings":
+            browser.loadHTMLString(Self.vrSettingsHTML, baseURL: URL(string: "https://handar.vision/"))
+        default:
+            openVRDesktop()
+        }
+    }
+
+    private func handleVRSystemAction(_ action: String) {
+        switch action {
+        case "home": openVRDesktop()
+        case "center": resetBrowserAnchor()
+        case "exit": leaveVRToMenu()
+        case "controller-diagnostics": showVRBoxDiagnostics()
+        default: break
+        }
+    }
+
+    private func buildControllerHand() {
+        let skin = SCNMaterial()
+        skin.lightingModel = .physicallyBased
+        skin.diffuse.contents = UIColor(red: 0.80, green: 0.60, blue: 0.43, alpha: 1)
+        skin.roughness.contents = 0.62
+        skin.metalness.contents = 0.0
+
+        let palmGeometry = SCNBox(width: 0.145, height: 0.070, length: 0.048, chamferRadius: 0.022)
+        palmGeometry.firstMaterial = skin
+        let palm = SCNNode(geometry: palmGeometry)
+        palm.position = SCNVector3(0, 0, 0)
+        controllerHandRoot.addChildNode(palm)
+
+        let fingerXs: [Float] = [-0.052, -0.017, 0.018, 0.053]
+        for (index, x) in fingerXs.enumerated() {
+            let length: CGFloat = index == 1 ? 0.084 : 0.073
+            let geometry = SCNBox(width: 0.028, height: length, length: 0.028, chamferRadius: 0.012)
+            geometry.firstMaterial = skin
+            let node = SCNNode(geometry: geometry)
+            node.position = SCNVector3(Double(x), Double(0.040 + Float(length) * 0.5), 0)
+            node.eulerAngles.x = index == 1 ? 0.02 : -0.12
+            controllerHandRoot.addChildNode(node)
+        }
+
+        let thumbGeometry = SCNBox(width: 0.030, height: 0.078, length: 0.032, chamferRadius: 0.012)
+        thumbGeometry.firstMaterial = skin
+        let thumb = SCNNode(geometry: thumbGeometry)
+        thumb.position = SCNVector3(-0.082, 0.005, 0.010)
+        thumb.eulerAngles.z = -0.75
+        controllerHandRoot.addChildNode(thumb)
+
+        let tipGeometry = SCNSphere(radius: 0.011)
+        tipGeometry.firstMaterial = pointerTipMaterial()
+        controllerHandTip.geometry = tipGeometry
+        controllerHandTip.renderingOrder = 240
+        controllerHandRoot.addChildNode(controllerHandTip)
+
+        controllerHandRoot.renderingOrder = 235
+        controllerHandRoot.isHidden = true
+        worldScene.rootNode.addChildNode(controllerHandRoot)
+    }
+
+    private func pointerTipMaterial() -> SCNMaterial {
+        let m = SCNMaterial()
+        m.lightingModel = .constant
+        m.diffuse.contents = UIColor.white
+        m.emission.contents = UIColor(red: 0.35, green: 0.85, blue: 1, alpha: 1)
+        m.readsFromDepthBuffer = false
+        m.writesToDepthBuffer = false
+        return m
+    }
+}
+
+private extension MainViewController {
+    func updateVRDesktopStatus() {
+        let battery = UIDevice.current.batteryLevel
+        let batteryText = battery >= 0 ? String(format: "%.0f%%", battery * 100) : "—"
+        let controllerText = controllerConnected ? "VR BOX" : "VR BOX — нет"
+        let script = """
+(function(){
+  var b=document.getElementById('battery'); if(b) b.textContent='🔋 \(batteryText)';
+  var c=document.getElementById('controllerState'); if(c) c.textContent='\(controllerText)';
+})();
+"""
+        browser.evaluateJavaScript(script, completionHandler: nil)
     }
 }
 
 extension MainViewController: WKNavigationDelegate, WKUIDelegate {
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         updateBrowserSnapshot()
+        updateVRDesktopStatus()
     }
 
     func webView(
@@ -2497,6 +3036,7 @@ final class WebInputBridge {
 final class MainMenuView: UIView {
     var onEnter: (() -> Void)?
     var onProfileChange: ((VRProfile) -> Void)?
+    var onDiagnostics: (() -> Void)?
 
     private let titleLabel = UILabel()
     private let subtitleLabel = UILabel()
@@ -2511,10 +3051,6 @@ final class MainMenuView: UIView {
     private let depthRow = SliderRow(title: "Глаз → экран", unit: "мм", minimum: 30, maximum: 70, step: 0.5)
     private let k1Row = SliderRow(title: "Дисторсия k1", unit: "", minimum: 0, maximum: 0.8, step: 0.005)
     private let k2Row = SliderRow(title: "Дисторсия k2", unit: "", minimum: -0.2, maximum: 0.6, step: 0.005)
-    // Насколько плотно картинка заполняет круглую линзу. 1.0 — без запаса
-    // (может остаться чёрное кольцо перед самым краем круга под линзами
-    // с сильной кривизной), больше — картинка тянется дальше к краю круга.
-    private let fovRow = SliderRow(title: "Заполнение линзы", unit: "×", minimum: 1.0, maximum: 1.8, step: 0.02)
 
     init(frame: CGRect, profile: VRProfile) {
         self.profile = profile
@@ -2549,6 +3085,12 @@ final class MainMenuView: UIView {
         enterButton.titleLabel?.font = .systemFont(ofSize: 17, weight: .semibold)
         enterButton.addAction(UIAction { [weak self] _ in self?.onEnter?() }, for: .touchUpInside)
 
+        let diagnosticsButton = UIButton(type: .system)
+        diagnosticsButton.setTitle("ПРОВЕРИТЬ VR BOX 3.0", for: .normal)
+        diagnosticsButton.setTitleColor(UIColor(white: 0.78, alpha: 1), for: .normal)
+        diagnosticsButton.titleLabel?.font = .systemFont(ofSize: 14, weight: .medium)
+        diagnosticsButton.addAction(UIAction { [weak self] _ in self?.onDiagnostics?() }, for: .touchUpInside)
+
         let passLabel = UILabel()
         passLabel.text = "Сквозное видео с камеры"
         passLabel.textColor = .white
@@ -2570,7 +3112,7 @@ final class MainMenuView: UIView {
 
         stack.axis = .vertical
         stack.spacing = 14
-        for row in [ipdRow, lensRow, depthRow, k1Row, k2Row, fovRow] {
+        for row in [ipdRow, lensRow, depthRow, k1Row, k2Row] {
             row.onChange = { [weak self] in self?.collect() }
             stack.addArrangedSubview(row)
         }
@@ -2586,7 +3128,7 @@ final class MainMenuView: UIView {
         stack.translatesAutoresizingMaskIntoConstraints = false
         scrollView.addSubview(stack)
 
-        for subview in [titleLabel, subtitleLabel, scrollView, enterButton] as [UIView] {
+        for subview in [titleLabel, subtitleLabel, scrollView, enterButton, diagnosticsButton] as [UIView] {
             subview.translatesAutoresizingMaskIntoConstraints = false
             addSubview(subview)
         }
@@ -2614,7 +3156,11 @@ final class MainMenuView: UIView {
             enterButton.centerXAnchor.constraint(equalTo: centerXAnchor),
             enterButton.widthAnchor.constraint(equalToConstant: 230),
             enterButton.heightAnchor.constraint(equalToConstant: 46),
-            enterButton.bottomAnchor.constraint(equalTo: safeAreaLayoutGuide.bottomAnchor, constant: -10)
+            enterButton.bottomAnchor.constraint(equalTo: safeAreaLayoutGuide.bottomAnchor, constant: -56),
+
+            diagnosticsButton.centerXAnchor.constraint(equalTo: centerXAnchor),
+            diagnosticsButton.heightAnchor.constraint(equalToConstant: 36),
+            diagnosticsButton.bottomAnchor.constraint(equalTo: safeAreaLayoutGuide.bottomAnchor, constant: -10)
         ])
     }
 
@@ -2624,7 +3170,6 @@ final class MainMenuView: UIView {
         depthRow.value = profile.eyeToScreenMM
         k1Row.value = profile.k1
         k2Row.value = profile.k2
-        fovRow.value = profile.fovScale
         passthroughSwitch.isOn = profile.passthrough
     }
 
@@ -2634,7 +3179,6 @@ final class MainMenuView: UIView {
         profile.eyeToScreenMM = depthRow.value
         profile.k1 = k1Row.value
         profile.k2 = k2Row.value
-        profile.fovScale = fovRow.value
         profile.passthrough = passthroughSwitch.isOn
         profile.save()
         onProfileChange?(profile)
@@ -2748,4 +3292,281 @@ final class SliderRow: UIView {
             ? String(format: "%.3f", slider.value)
             : String(format: "%.1f %@", slider.value, unit)
     }
+}
+
+
+// MARK: - VR BOX controller bridge -------------------------------------------
+
+enum VRBoxButton {
+    case a, b, x, y, menu
+}
+
+final class VRBoxControllerService: NSObject {
+    var onConnectionChanged: ((Bool, String) -> Void)?
+    var onStick: ((CGFloat, CGFloat) -> Void)?
+    var onButton: ((VRBoxButton, Bool) -> Void)?
+    var onMotion: ((Bool, String) -> Void)?
+    var onMotionSample: ((Bool, String) -> Void)?
+    var onGyro: ((SIMD3<Float>) -> Void)?
+
+    private var controllers: [GCController] = []
+    private var attached = Set<ObjectIdentifier>()
+    private var motionTimer: Timer?
+
+    func start() {
+        NotificationCenter.default.addObserver(self, selector: #selector(didConnect(_:)), name: GCController.didConnectNotification, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(didDisconnect(_:)), name: GCController.didDisconnectNotification, object: nil)
+        for controller in GCController.controllers() { attach(controller) }
+        publishStatus()
+        startMotionPolling()
+        pollMotion()
+    }
+
+    func stop() {
+        NotificationCenter.default.removeObserver(self)
+        motionTimer?.invalidate()
+        motionTimer = nil
+        controllers.removeAll()
+        attached.removeAll()
+    }
+
+    private func startMotionPolling() {
+        motionTimer?.invalidate()
+        motionTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
+            self?.pollMotion()
+        }
+        RunLoop.main.add(motionTimer!, forMode: .common)
+    }
+
+    private func pollMotion() {
+        guard let motion = controllers.first?.motion else {
+            onMotionSample?(false, "нет motion-профиля")
+            return
+        }
+        if motion.hasRotationRate {
+            let r = motion.rotationRate
+            let vector = SIMD3<Float>(Float(r.x), Float(r.y), Float(r.z))
+            onGyro?(vector)
+            onMotionSample?(true, String(format: "gyro x=%+.2f  y=%+.2f  z=%+.2f rad/s", r.x, r.y, r.z))
+        } else if motion.hasAttitude {
+            onMotionSample?(false, "attitude есть, rotation rate недоступен")
+        } else if motion.hasGravityAndUserAcceleration {
+            let a = motion.acceleration
+            onMotionSample?(false, String(format: "accel x=%+.2f  y=%+.2f  z=%+.2f", a.x, a.y, a.z))
+        } else {
+            onMotionSample?(false, "motion-профиль есть, измерения не объявлены")
+        }
+    }
+
+    @objc private func didConnect(_ note: Notification) {
+        guard let controller = note.object as? GCController else { return }
+        attach(controller)
+        publishStatus()
+        pollMotion()
+    }
+
+    @objc private func didDisconnect(_ note: Notification) {
+        guard let controller = note.object as? GCController else { return }
+        controllers.removeAll { $0 === controller }
+        attached.remove(ObjectIdentifier(controller))
+        publishStatus()
+        pollMotion()
+    }
+
+    private func attach(_ controller: GCController) {
+        let oid = ObjectIdentifier(controller)
+        guard !attached.contains(oid) else { return }
+        attached.insert(oid)
+        controllers.append(controller)
+
+        if let extended = controller.extendedGamepad {
+            extended.valueChangedHandler = { [weak self] pad, element in
+                guard let self else { return }
+                let rawX = CGFloat(pad.leftThumbstick.xAxis.value)
+                let rawY = CGFloat(pad.leftThumbstick.yAxis.value)
+                if abs(rawX) > 0.03 || abs(rawY) > 0.03 {
+                    self.onStick?(rawX, rawY)
+                } else if element === pad.leftThumbstick.xAxis || element === pad.leftThumbstick.yAxis {
+                    self.onStick?(0, 0)
+                }
+                if element === pad.buttonA { self.onButton?(.a, pad.buttonA.isPressed) }
+                if element === pad.buttonB { self.onButton?(.b, pad.buttonB.isPressed) }
+                if element === pad.buttonX { self.onButton?(.x, pad.buttonX.isPressed) }
+                if element === pad.buttonY { self.onButton?(.y, pad.buttonY.isPressed) }
+                if element === pad.buttonMenu { self.onButton?(.menu, pad.buttonMenu.isPressed) }
+            }
+        } else if let gamepad = controller.gamepad {
+            gamepad.valueChangedHandler = { [weak self] pad, element in
+                guard let self else { return }
+                if element === pad.dpad.xAxis || element === pad.dpad.yAxis {
+                    self.onStick?(CGFloat(pad.dpad.xAxis.value), CGFloat(pad.dpad.yAxis.value))
+                }
+                if element === pad.buttonA { self.onButton?(.a, pad.buttonA.isPressed) }
+                if element === pad.buttonB { self.onButton?(.b, pad.buttonB.isPressed) }
+                if element === pad.buttonX { self.onButton?(.x, pad.buttonX.isPressed) }
+                if element === pad.buttonY { self.onButton?(.y, pad.buttonY.isPressed) }
+            }
+        }
+
+        if let motion = controller.motion {
+            var labels: [String] = []
+            if motion.hasAttitude { labels.append("attitude") }
+            if motion.hasRotationRate { labels.append("gyro") }
+            if motion.hasGravityAndUserAcceleration { labels.append("accel") }
+            onMotion?(motion.hasRotationRate, labels.joined(separator: ", ").isEmpty ? "motion: профиль есть" : labels.joined(separator: ", "))
+        }
+    }
+
+    private func publishStatus() {
+        let found = controllers.first
+        let name = found?.vendorName ?? found?.productCategory ?? "Нет GameController"
+        DispatchQueue.main.async { [weak self] in
+            self?.onConnectionChanged?(found != nil, name)
+        }
+    }
+}
+
+// MARK: - Диагностика VR BOX --------------------------------------------------
+
+final class VRBoxDiagnosticsView: UIViewController {
+    var onClose: (() -> Void)?
+
+    private let service = VRBoxControllerService()
+    private let status = UILabel()
+    private let motion = UILabel()
+    private let input = UILabel()
+    private let log = UITextView()
+    private let stickDot = UIView()
+    private let stickPad = UIView()
+    private var pointer = CGPoint(x: 0.5, y: 0.5)
+
+    override func loadView() {
+        view = UIView()
+        view.backgroundColor = UIColor(white: 0.04, alpha: 1)
+    }
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        build()
+        wire()
+    }
+
+    func startMonitoring() { service.start(); refresh() }
+
+    private func build() {
+        let title = UILabel()
+        title.text = "VR BOX 3.0 • ДИАГНОСТИКА"
+        title.textColor = .white
+        title.font = .systemFont(ofSize: 24, weight: .bold)
+        title.textAlignment = .center
+
+        for label in [status, motion, input] {
+            label.textColor = UIColor.white.withAlphaComponent(0.82)
+            label.font = .monospacedSystemFont(ofSize: 14, weight: .regular)
+            label.numberOfLines = 3
+        }
+
+        input.text = "Stick/Button: ждём события…"
+
+        log.textColor = UIColor(white: 0.78, alpha: 1)
+        log.backgroundColor = UIColor.black.withAlphaComponent(0.32)
+        log.layer.cornerRadius = 18
+        log.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+        log.isEditable = false
+        log.isSelectable = false
+
+        let close = UIButton(type: .system)
+        close.setTitle("Закрыть", for: .normal)
+        close.setTitleColor(.white, for: .normal)
+        close.backgroundColor = UIColor(white: 0.16, alpha: 1)
+        close.layer.cornerRadius = 14
+        close.addAction(UIAction { [weak self] _ in self?.service.stop(); self?.onClose?() }, for: .touchUpInside)
+
+        stickPad.backgroundColor = UIColor(white: 0.12, alpha: 1)
+        stickPad.layer.cornerRadius = 90
+        stickPad.layer.borderWidth = 1
+        stickPad.layer.borderColor = UIColor.white.withAlphaComponent(0.18).cgColor
+        stickDot.backgroundColor = UIColor(red: 0.38, green: 0.86, blue: 1, alpha: 1)
+        stickDot.layer.cornerRadius = 12
+        stickPad.addSubview(stickDot)
+
+        let stack = UIStackView(arrangedSubviews: [title, status, motion, input, stickPad, log, close])
+        stack.axis = .vertical
+        stack.spacing = 12
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 18),
+            stack.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 28),
+            stack.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -28),
+            stack.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -18),
+            stickPad.heightAnchor.constraint(equalToConstant: 180),
+            stickPad.widthAnchor.constraint(equalToConstant: 180),
+            close.heightAnchor.constraint(equalToConstant: 46)
+        ])
+        stickPad.translatesAutoresizingMaskIntoConstraints = false
+        stickPad.addConstraint(stickPad.widthAnchor.constraint(equalTo: stickPad.heightAnchor))
+    }
+
+    private func wire() {
+        service.onConnectionChanged = { [weak self] connected, name in
+            DispatchQueue.main.async {
+                self?.status.text = connected ? "Bluetooth/GameController: ПОДКЛЮЧЕН\nУстройство: \(name)" : "Bluetooth/GameController: НЕ ВИДИТ\nУстройство: \(name)"
+                self?.append("GameController: \(connected ? "connected" : "none") — \(name)")
+            }
+        }
+        service.onMotion = { [weak self] hasGyro, detail in
+            DispatchQueue.main.async {
+                self?.motion.text = "Motion: \(hasGyro ? "GYRO ЕСТЬ" : "GYRO НЕ ОБНАРУЖЕН")\n\(detail)"
+            }
+        }
+        service.onMotionSample = { [weak self] hasGyro, sample in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                let prefix = hasGyro ? "LIVE GYRO" : "LIVE MOTION"
+                self.motion.text = self.motion.text.components(separatedBy: "\nLIVE").first ?? self.motion.text
+                self.motion.text += "\n\(prefix): \(sample)"
+            }
+        }
+        service.onStick = { [weak self] x, y in
+            DispatchQueue.main.async {
+                self?.pointer.x = min(max(0.5 + x * 0.5, 0), 1)
+                self?.pointer.y = min(max(0.5 + y * 0.5, 0), 1)
+                self?.input.text = String(format: "Stick: X=%+.2f  Y=%+.2f\nPointer: X=%.2f  Y=%.2f", x, y, self?.pointer.x ?? 0.5, self?.pointer.y ?? 0.5)
+                self?.layoutStickDot()
+                self?.append(String(format: "STICK  x=%+.2f  y=%+.2f", x, y))
+            }
+        }
+        service.onButton = { [weak self] button, pressed in
+            DispatchQueue.main.async {
+                let name: String
+                switch button { case .a: name="A"; case .b: name="B"; case .x: name="X"; case .y: name="Y"; case .menu: name="MENU" }
+                self?.input.text = "BUTTON \(name): \(pressed ? "DOWN" : "UP")"
+                self?.append("BUTTON \(name) \(pressed ? "DOWN" : "UP")")
+            }
+        }
+        layoutStickDot()
+    }
+
+    private func refresh() {
+        status.text = "Ищем контроллеры iOS…"
+        motion.text = "Motion: ждём данные…"
+        input.text = "Stick/Button: ждём события…"
+        log.text = "Пошевели джойстик и нажми каждую кнопку.\n\n"
+    }
+
+    private func layoutStickDot() {
+        let r = stickPad.bounds.width * 0.5 - 18
+        let c = CGPoint(x: stickPad.bounds.midX + (pointer.x - 0.5) * r * 2,
+                        y: stickPad.bounds.midY + (pointer.y - 0.5) * r * 2)
+        stickDot.frame = CGRect(x: c.x - 12, y: c.y - 12, width: 24, height: 24)
+    }
+
+    private func append(_ line: String) {
+        log.text.append(line + "\n")
+        let range = NSRange(location: max(log.text.count - 1, 0), length: 1)
+        log.scrollRangeToVisible(range)
+    }
+
+    deinit { service.stop() }
 }

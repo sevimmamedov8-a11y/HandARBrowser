@@ -2,7 +2,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
-echo "== Hand AR Browser V40 project check =="
+echo "== Hand AR Browser V50 project check =="
 for f in "HandARBrowser.xcodeproj/project.pbxproj" "HandARBrowser/AppDelegate.swift" "HandARBrowser/MainViewController.swift" "HandARBrowser/Info.plist" "HandARBrowser/WebInput.js"; do
   [[ -f "$f" ]] && echo "[OK] $f" || { echo "[FAIL] missing $f"; exit 1; }
 done
@@ -86,7 +86,7 @@ grep -Fq "readsFromDepthBuffer = false" "$SRC"
 grep -Fq "private func planeHit(" "$SRC"
 grep -Fq "private func updateDrag(with ray: WorldRay)" "$SRC"
 grep -Fq "dragZoneHeight" "$SRC"
-grep -Fq "private static let defaultPanelWidth: Float = 2.70" "$SRC"
+grep -Fq "private static let defaultPanelWidth: Float = 2.90" "$SRC"
 ! grep -Fq "private let browserWorldWidth: Float = 0.82" "$SRC"
 grep -Fq "struct ToolbarItem" "$SRC"
 grep -Fq "private var linkItems: [ToolbarItem] = []" "$SRC"
@@ -106,7 +106,29 @@ grep -Fq "private let browser: WKWebView = {" "$SRC"
 grep -Fq "input.update(" "$SRC"
 grep -Fq "config.allowsPictureInPictureMediaPlayback = false" "$SRC"
 grep -Fq "config.preferences.isElementFullscreenEnabled = false" "$SRC"
-grep -Fq "uniforms.rClip = 5.0" "$SRC"
+grep -Fq "let maxLensRadius = min(0.5" "$SRC"
+
+# --- V50 VR desktop + internal VR apps ---
+grep -Fq "private static let vrDesktopHTML" "$SRC"
+grep -Fq "handarApp" "$SRC"
+grep -Fq "case \"youtube\"" "$SRC"
+grep -Fq "case \"telegram\"" "$SRC"
+grep -Fq "case \"notes\"" "$SRC"
+grep -Fq "case \"calculator\"" "$SRC"
+grep -Fq "final class VRBoxControllerService" "$SRC"
+grep -Fq "final class VRBoxDiagnosticsView" "$SRC"
+grep -Fq "import GameController" "$SRC"
+grep -Fq "controller.onStick" "$SRC"
+grep -Fq "private let controllerHandRoot = SCNNode()" "$SRC"
+grep -Fq "GCSupportsControllerUserInteraction" "HandARBrowser/Info.plist"
+grep -Fq 'data-id="photos"' "$SRC"
+grep -Fq 'data-id="files"' "$SRC"
+grep -Fq 'data-id="messages"' "$SRC"
+grep -Fq 'data-id="phone"' "$SRC"
+grep -Fq 'private static let vrPhotosHTML' "$SRC"
+grep -Fq 'private static let vrFilesHTML' "$SRC"
+grep -Fq 'private static let vrMessagesHTML' "$SRC"
+grep -Fq 'private static let vrPhoneHTML' "$SRC"
 
 grep -Fq "HandAR Vision" HandARBrowser/Info.plist
 grep -Fq "NSCameraUsageDescription" HandARBrowser/Info.plist
@@ -126,7 +148,7 @@ grep -Fq "NSCameraUsageDescription" HandARBrowser/Info.plist
 ! grep -Fq "let isPinching: Bool" "$SRC"
 ! grep -Fq "cursorNode" "$SRC"
 
-echo "[OK] V40 static project checks"
+echo "[OK] V50 static project checks"
 
 if command -v swiftc >/dev/null 2>&1; then
   # Parser-only validation can fail on Linux because Apple SDK modules are unavailable;

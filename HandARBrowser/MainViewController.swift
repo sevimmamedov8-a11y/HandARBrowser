@@ -1,6 +1,6 @@
 //
 //  MainViewController.swift
-//  HandAR Vision — V30
+//  HandAR Vision — V33
 //
 //  Стереоконвейер
 //  --------------
@@ -34,6 +34,7 @@ struct HandSample {
     let indexTip: CGPoint
     let middleTip: CGPoint
     let thumbTip: CGPoint
+    let joints: [VNHumanHandPoseObservation.JointName: CGPoint]
     /// Средний + большой: нажатие.
     let clickPinch: Bool
     /// Указательный + большой: захват панели.
@@ -455,6 +456,15 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     private let pointerDotNode = SCNNode()
     private let pointerRingNode = SCNNode()
 
+    // Скелеты рук находятся в той же мировой сцене, но имеют высокий
+    // renderingOrder и отключённый depth test — поэтому они всегда поверх панели.
+    private let leftHandSkeletonNode = SCNNode()
+    private let rightHandSkeletonNode = SCNNode()
+    private var leftSkeletonJoints: [VNHumanHandPoseObservation.JointName: SCNNode] = [:]
+    private var rightSkeletonJoints: [VNHumanHandPoseObservation.JointName: SCNNode] = [:]
+    private var leftSkeletonBones: [(VNHumanHandPoseObservation.JointName, VNHumanHandPoseObservation.JointName, SCNNode)] = []
+    private var rightSkeletonBones: [(VNHumanHandPoseObservation.JointName, VNHumanHandPoseObservation.JointName, SCNNode)] = []
+
     // Планка ссылок над браузером.
     private let toolbarNode = SCNNode()
     private var linkItems: [ToolbarItem] = []
@@ -620,6 +630,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         buildBrowserPanel()
         buildToolbar()
         buildPointer()
+        buildHandSkeleton()
     }
 
     private func buildBrowserPanel() {
@@ -794,6 +805,73 @@ final class MainViewController: UIViewController, MTKViewDelegate {
             )
             title.draw(in: textRect, withAttributes: attributes)
             _ = context
+        }
+    }
+
+    private static let handSkeletonBonePairs: [(VNHumanHandPoseObservation.JointName, VNHumanHandPoseObservation.JointName)] = [
+        (.wrist, .thumbCMC), (.thumbCMC, .thumbMP), (.thumbMP, .thumbIP), (.thumbIP, .thumbTip),
+        (.wrist, .indexMCP), (.indexMCP, .indexPIP), (.indexPIP, .indexDIP), (.indexDIP, .indexTip),
+        (.wrist, .middleMCP), (.middleMCP, .middlePIP), (.middlePIP, .middleDIP), (.middleDIP, .middleTip),
+        (.wrist, .ringMCP), (.ringMCP, .ringPIP), (.ringPIP, .ringDIP), (.ringDIP, .ringTip),
+        (.wrist, .littleMCP), (.littleMCP, .littlePIP), (.littlePIP, .littleDIP), (.littleDIP, .littleTip),
+        (.indexMCP, .middleMCP), (.middleMCP, .ringMCP), (.ringMCP, .littleMCP)
+    ]
+
+    private func buildHandSkeleton() {
+        buildSingleHandSkeleton(root: leftHandSkeletonNode, joints: &leftSkeletonJoints, bones: &leftSkeletonBones, color: UIColor(red: 0.35, green: 0.90, blue: 1.0, alpha: 1))
+        buildSingleHandSkeleton(root: rightHandSkeletonNode, joints: &rightSkeletonJoints, bones: &rightSkeletonBones, color: UIColor(red: 1.0, green: 0.58, blue: 0.32, alpha: 1))
+        leftHandSkeletonNode.renderingOrder = 220
+        rightHandSkeletonNode.renderingOrder = 220
+        leftHandSkeletonNode.isHidden = true
+        rightHandSkeletonNode.isHidden = true
+        worldScene.rootNode.addChildNode(leftHandSkeletonNode)
+        worldScene.rootNode.addChildNode(rightHandSkeletonNode)
+    }
+
+    private func buildSingleHandSkeleton(
+        root: SCNNode,
+        joints: inout [VNHumanHandPoseObservation.JointName: SCNNode],
+        bones: inout [(VNHumanHandPoseObservation.JointName, VNHumanHandPoseObservation.JointName, SCNNode)],
+        color: UIColor
+    ) {
+        let jointMaterial = SCNMaterial()
+        jointMaterial.lightingModel = .constant
+        jointMaterial.diffuse.contents = color
+        jointMaterial.emission.contents = color
+        jointMaterial.readsFromDepthBuffer = false
+        jointMaterial.writesToDepthBuffer = false
+
+        let boneMaterial = jointMaterial.copy() as! SCNMaterial
+
+        let jointNames: [VNHumanHandPoseObservation.JointName] = [
+            .wrist,
+            .thumbCMC, .thumbMP, .thumbIP, .thumbTip,
+            .indexMCP, .indexPIP, .indexDIP, .indexTip,
+            .middleMCP, .middlePIP, .middleDIP, .middleTip,
+            .ringMCP, .ringPIP, .ringDIP, .ringTip,
+            .littleMCP, .littlePIP, .littleDIP, .littleTip
+        ]
+
+        for jointName in jointNames {
+            let sphere = SCNSphere(radius: 0.011)
+            sphere.segmentCount = 10
+            sphere.firstMaterial = jointMaterial.copy() as? SCNMaterial
+            let node = SCNNode(geometry: sphere)
+            node.renderingOrder = 221
+            node.isHidden = true
+            root.addChildNode(node)
+            joints[jointName] = node
+        }
+
+        for (a, b) in Self.handSkeletonBonePairs {
+            let cylinder = SCNCylinder(radius: 0.0042, height: 1.0)
+            cylinder.radialSegmentCount = 8
+            cylinder.firstMaterial = boneMaterial.copy() as? SCNMaterial
+            let node = SCNNode(geometry: cylinder)
+            node.renderingOrder = 220
+            node.isHidden = true
+            root.addChildNode(node)
+            bones.append((a, b, node))
         }
     }
 
@@ -1039,6 +1117,8 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         menu?.isUserInteractionEnabled = !visible
         browserPlaneNode.isHidden = true
         hidePointer()
+        leftHandSkeletonNode.isHidden = !visible
+        rightHandSkeletonNode.isHidden = !visible
         setNeedsUpdateOfHomeIndicatorAutoHidden()
     }
 
@@ -1200,6 +1280,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
 
     private func handleHands(left: HandSample?, right: HandSample?) {
         guard inVR else { return }
+        updateHandSkeleton(left: left, right: right)
 
         // Нажатие обеими руками — поставить панель заново перед собой.
         if left?.clickPinch == true && right?.clickPinch == true {
@@ -1303,6 +1384,71 @@ final class MainViewController: UIViewController, MTKViewDelegate {
 
     /// Пересечение луча с плоскостью панели. Считаем напрямую: это дешевле
     /// и честнее, чем гонять точку через вьюпорты.
+    /// Скелет кладём прямо на мировую плоскость браузера и сдвигаем на 18 мм
+    /// к камере. Поэтому при движении браузера скелет остаётся совмещённым
+    /// с рукой, но не проваливается под текстуру страницы.
+    private func updateHandSkeleton(left: HandSample?, right: HandSample?) {
+        updateSingleHandSkeleton(sample: left, root: leftHandSkeletonNode, joints: leftSkeletonJoints, bones: leftSkeletonBones)
+        updateSingleHandSkeleton(sample: right, root: rightHandSkeletonNode, joints: rightSkeletonJoints, bones: rightSkeletonBones)
+    }
+
+    private func updateSingleHandSkeleton(
+        sample: HandSample?,
+        root: SCNNode,
+        joints: [VNHumanHandPoseObservation.JointName: SCNNode],
+        bones: [(VNHumanHandPoseObservation.JointName, VNHumanHandPoseObservation.JointName, SCNNode)]
+    ) {
+        guard let sample, let transform = browserWorldTransform else {
+            root.isHidden = true
+            return
+        }
+
+        var positions: [VNHumanHandPoseObservation.JointName: SIMD3<Float>] = [:]
+        positions.reserveCapacity(sample.joints.count)
+
+        for (jointName, visionPoint) in sample.joints {
+            guard let ray = tracking.worldRay(visionPoint: visionPoint),
+                  let hit = planeHit(ray: ray, transform: transform) else { continue }
+            let towardCamera = simd_normalize(ray.origin - hit.point)
+            positions[jointName] = hit.point + towardCamera * 0.018
+        }
+
+        guard positions.count >= 3 else {
+            root.isHidden = true
+            return
+        }
+
+        var shown = false
+        for (jointName, node) in joints {
+            guard let point = positions[jointName] else {
+                node.isHidden = true
+                continue
+            }
+            node.simdPosition = point
+            node.isHidden = false
+            shown = true
+        }
+
+        for (a, b, node) in bones {
+            guard let start = positions[a], let end = positions[b] else {
+                node.isHidden = true
+                continue
+            }
+            let delta = end - start
+            let length = simd_length(delta)
+            guard length > 0.002 else {
+                node.isHidden = true
+                continue
+            }
+            node.simdPosition = (start + end) * 0.5
+            node.simdOrientation = simd_quatf(from: SIMD3<Float>(0, 1, 0), to: delta / length)
+            node.scale = SCNVector3(1, length, 1)
+            node.isHidden = false
+        }
+
+        root.isHidden = !shown
+    }
+
     private func planeHit(
         ray: WorldRay,
         transform: simd_float4x4
@@ -1890,6 +2036,7 @@ final class HandTracker {
         var index: CGPoint?
         var middle: CGPoint?
         var thumb: CGPoint?
+        var joints: [VNHumanHandPoseObservation.JointName: CGPoint] = [:]
         var clickPinch = false
         var grabPinch = false
 
@@ -1897,6 +2044,7 @@ final class HandTracker {
             index = nil
             middle = nil
             thumb = nil
+            joints.removeAll(keepingCapacity: true)
             clickPinch = false
             grabPinch = false
         }
@@ -1933,11 +2081,12 @@ final class HandTracker {
 
                 for observation in self.request.results ?? [] {
                     guard
-                        let index = try? observation.recognizedPoint(.indexTip),
-                        let middle = try? observation.recognizedPoint(.middleTip),
-                        let thumb = try? observation.recognizedPoint(.thumbTip),
-                        let wrist = try? observation.recognizedPoint(.wrist),
-                        let middleBase = try? observation.recognizedPoint(.middleMCP),
+                        let allPoints = try? observation.recognizedPoints(.all),
+                        let index = allPoints[.indexTip],
+                        let middle = allPoints[.middleTip],
+                        let thumb = allPoints[.thumbTip],
+                        let wrist = allPoints[.wrist],
+                        let middleBase = allPoints[.middleMCP],
                         index.confidence > 0.62,
                         middle.confidence > 0.62,
                         thumb.confidence > 0.60,
@@ -1950,31 +2099,32 @@ final class HandTracker {
                     let isLeft = observation.chirality == .left
                     var state = isLeft ? self.leftState : self.rightState
 
-                    let filteredIndex = smooth(
-                        state.index,
-                        index.location,
-                        alpha: adaptiveAlpha(previous: state.index, current: index.location)
-                    )
-                    let filteredMiddle = smooth(
-                        state.middle,
-                        middle.location,
-                        alpha: adaptiveAlpha(previous: state.middle, current: middle.location)
-                    )
-                    let filteredThumb = smooth(
-                        state.thumb,
-                        thumb.location,
-                        alpha: adaptiveAlpha(previous: state.thumb, current: thumb.location)
-                    )
+                    var filteredJoints: [VNHumanHandPoseObservation.JointName: CGPoint] = [:]
+                    filteredJoints.reserveCapacity(allPoints.count)
+                    for (jointName, point) in allPoints where point.confidence > 0.32 {
+                        filteredJoints[jointName] = smooth(
+                            state.joints[jointName],
+                            point.location,
+                            alpha: adaptiveAlpha(previous: state.joints[jointName], current: point.location)
+                        )
+                    }
+
+                    let filteredIndex = filteredJoints[.indexTip] ?? index.location
+                    let filteredMiddle = filteredJoints[.middleTip] ?? middle.location
+                    let filteredThumb = filteredJoints[.thumbTip] ?? thumb.location
+                    let filteredWrist = filteredJoints[.wrist] ?? wrist.location
+                    let filteredMiddleBase = filteredJoints[.middleMCP] ?? middleBase.location
 
                     // Нормируем на размер ладони: так порог не зависит от того,
                     // насколько далеко рука от камеры.
-                    let palmSize = max(distance(wrist.location, middleBase.location), 0.03)
+                    let palmSize = max(distance(filteredWrist, filteredMiddleBase), 0.03)
                     let clickRatio = distance(filteredMiddle, filteredThumb) / palmSize
                     let grabRatio = distance(filteredIndex, filteredThumb) / palmSize
 
                     state.index = filteredIndex
                     state.middle = filteredMiddle
                     state.thumb = filteredThumb
+                    state.joints = filteredJoints
                     state.clickPinch = pinchHysteresis(previous: state.clickPinch, ratio: clickRatio)
                     state.grabPinch = pinchHysteresis(previous: state.grabPinch, ratio: grabRatio)
 
@@ -1982,6 +2132,7 @@ final class HandTracker {
                         indexTip: filteredIndex,
                         middleTip: filteredMiddle,
                         thumbTip: filteredThumb,
+                        joints: filteredJoints,
                         clickPinch: state.clickPinch,
                         grabPinch: state.grabPinch
                     )

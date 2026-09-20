@@ -2,7 +2,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
-echo "== Hand AR Browser V31 project check =="
+echo "== Hand AR Browser V33 project check =="
 for f in "HandARBrowser.xcodeproj/project.pbxproj" "HandARBrowser/AppDelegate.swift" "HandARBrowser/MainViewController.swift" "HandARBrowser/Info.plist" "HandARBrowser/WebInput.js"; do
   [[ -f "$f" ]] && echo "[OK] $f" || { echo "[FAIL] missing $f"; exit 1; }
 done
@@ -67,6 +67,13 @@ grep -Fq "let grabPinch: Bool" "$SRC"
 grep -Fq "recognizedPoint(.middleTip)" "$SRC"
 grep -Fq "private let rayNode = SCNNode()" "$SRC"
 grep -Fq "private let pointerRingNode = SCNNode()" "$SRC"
+grep -Fq "private let leftHandSkeletonNode = SCNNode()" "$SRC"
+grep -Fq "private let rightHandSkeletonNode = SCNNode()" "$SRC"
+grep -Fq "private static let handSkeletonBonePairs" "$SRC"
+grep -Fq "recognizedPoints(.all)" "$SRC"
+grep -Fq "updateHandSkeleton(left: left, right: right)" "$SRC"
+grep -Fq "renderingOrder = 220" "$SRC"
+grep -Fq "readsFromDepthBuffer = false" "$SRC"
 grep -Fq "private func planeHit(" "$SRC"
 grep -Fq "private func updateDrag(with ray: WorldRay)" "$SRC"
 grep -Fq "dragZoneHeight" "$SRC"
@@ -108,7 +115,7 @@ grep -Fq "NSCameraUsageDescription" HandARBrowser/Info.plist
 ! grep -Fq "let isPinching: Bool" "$SRC"
 ! grep -Fq "cursorNode" "$SRC"
 
-echo "[OK] V31 static project checks"
+echo "[OK] V33 static project checks"
 
 if command -v swiftc >/dev/null 2>&1; then
   # Parser-only validation can fail on Linux because Apple SDK modules are unavailable;

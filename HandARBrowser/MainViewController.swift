@@ -3019,7 +3019,7 @@ final class DirectVideoLensMaskView: UIView {
         if rightCircle.width > 1 && rightCircle.height > 1 {
             context.addEllipse(in: rightCircle)
         }
-        context.eoFillPath()
+        context.drawPath(using: .eoFill)
     }
 }
 

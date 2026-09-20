@@ -22,7 +22,7 @@
     const target=el(x,y);
     target.dispatchEvent(new PointerEvent('pointerup',{bubbles:true,cancelable:true,pointerId:id,pointerType:'mouse',clientX:x,clientY:y,buttons:0}));
     target.dispatchEvent(new MouseEvent('mouseup',{bubbles:true,cancelable:true,clientX:x,clientY:y,buttons:0}));
-    if(Math.hypot(x-a.x,y-a.y)<22){
+    if(Math.hypot(x-a.x,y-a.y)<52){
       const clickable=target.closest('a,button,input,textarea,select,summary,label,[role=button]')||target;
       clickable.dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true,clientX:x,clientY:y}));
       if(typeof clickable.click==='function'){try{clickable.click();}catch(e){}}

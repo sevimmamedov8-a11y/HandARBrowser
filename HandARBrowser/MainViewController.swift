@@ -1,6 +1,6 @@
 //
 //  MainViewController.swift
-//  HandAR Vision — V34
+//  HandAR Vision — V35
 //
 //  Стереоконвейер
 //  --------------
@@ -17,6 +17,8 @@
 //      там горит точка с кольцом — видно, куда наведён.
 //    • Нажатие: СРЕДНИЙ + большой палец.
 //    • Перетаскивание панели: УКАЗАТЕЛЬНЫЙ + большой, рука в нижней трети кадра.
+//    • Масштаб: две руки, средний + большой на каждой; двигаем указательные
+//      дальше друг от друга — окно увеличивается, ближе — уменьшается.
 //    • Панель ссылок над браузером: Google, YouTube, TikTok, Назад.
 //
 
@@ -70,23 +72,23 @@ struct VRProfile: Codable, Equatable {
     var eyeToScreenMM: Float = 42
 
     /// Коэффициенты радиального предыскажения.
-    var k1: Float = 0.34
-    var k2: Float = 0.18
-    /// Компенсация хроматической аберрации линзы.
-    var chroma: Float = 0.006
-    /// Радиус видимой части линзы. Всё за ним — чёрное.
-    var lensClipRadius: Float = 1.0
+    var k1: Float = 0.0
+    var k2: Float = 0.0
+    /// Без искусственной хроматики: картинка заполняет весь экран.
+    var chroma: Float = 0.0
+    /// Радиус клиппинга больше диагонали — круглая маска отключена.
+    var lensClipRadius: Float = 10.0
 
     /// Запас поля зрения под предыскажение. Больше — картинка плотнее
     /// заполняет круглую линзу, меньше чёрных полей по краю.
-    var fovScale: Float = 1.25
+    var fovScale: Float = 1.0
     /// Суперсэмплинг офскрин-буфера.
     var supersample: Float = 1.2
 
     /// Сквозное видео с камеры.
     var passthrough: Bool = true
 
-    static let storageKey = "handar.vr.profile.v1"
+    static let storageKey = "handar.vr.profile.v2"
 
     static func makeDefault() -> VRProfile {
         let native = UIScreen.main.nativeBounds
@@ -285,7 +287,7 @@ final class VRCompositor {
         float2 p = (eyeUV - center) * float2(u.aspect, 1.0);
         float r2 = dot(p, p);
         float r = sqrt(r2);
-        if (r > u.rClip) {
+        if (u.rClip < 5.0 && r > u.rClip) {
             return float4(0.0, 0.0, 0.0, 1.0);
         }
 
@@ -323,8 +325,12 @@ final class VRCompositor {
 
         float3 color = mix(background, overlay, clamp(alpha, 0.0, 1.0));
 
-        // Мягкий край линзы вместо рваной окружности.
-        float vignette = smoothstep(u.rClip, u.rClip * 0.88, r);
+        // Для fullscreen-профиля виньетка отключена: каждый глаз
+        // заполняет всю свою половину дисплея без квадратной/круглой маски.
+        float vignette = 1.0;
+        if (u.rClip < 5.0) {
+            vignette = smoothstep(u.rClip, u.rClip * 0.88, r);
+        }
         return float4(color * vignette, 1.0);
     }
     """
@@ -479,7 +485,6 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     private var inVR = false
     private var browserAnchor: ARAnchor?
     private var browserWorldTransform: simd_float4x4?
-    private var lastCenterGestureTime: CFTimeInterval = 0
     private var didCreateInitialAnchor = false
 
     // Перетаскивание панели
@@ -488,12 +493,21 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     private var dragOffset = SIMD3<Float>(repeating: 0)
     private var wasClickPinching = false
 
+    // Масштабирование двумя руками: обе руки делают средний+большой палец,
+    // затем расстояние между кончиками указательных меняет размер панели.
+    private var isResizing = false
+    private var resizeStartHandDistance: CGFloat = 0
+    private var resizeStartWidth: Float = MainViewController.defaultPanelWidth
+
     // Панель браузера в мире. Размер большой намеренно: панель размером
     // с почтовый конверт на расстоянии вытянутой руки занимает жалкую часть
     // поля зрения и выглядит как маленький квадрат посреди черноты. Здесь
     // панель по умолчанию — это уже «большой монитор», а не окошко.
-    private static let defaultPanelWidth: Float = 1.60
-    private static let defaultPanelHeight: Float = 1.00
+    private static let defaultPanelWidth: Float = 2.70
+    private static let defaultPanelHeight: Float = 1.52
+    private static let minimumPanelWidth: Float = 0.72
+    private static let maximumPanelWidth: Float = 3.80
+    private static let defaultPanelAspect: Float = defaultPanelHeight / defaultPanelWidth
     /// Видео на YouTube/TikTok разворачивается в «кинозал»: экран занимает
     /// большую часть поля зрения шлема, почти как в настоящем VR-кинотеатре.
     private static let cinemaPanelWidth: Float = 2.85
@@ -984,15 +998,16 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         vrView?.frame = bounds
         menu?.frame = bounds
 
-        let browserSize = CGSize(
-            width: max(bounds.width - 80, 480),
-            height: max(bounds.height - 80, 320)
-        )
+        // Внутренний WKWebView рендерим в фиксированном 16:9, чтобы
+        // снимок страницы не превращался в квадрат. Сам VR-вывод при этом
+        // занимает 100% физического экрана.
+        let browserWidth: CGFloat = 1280
+        let browserHeight: CGFloat = 720
         browser.frame = CGRect(
-            x: (bounds.width - browserSize.width) * 0.5,
-            y: (bounds.height - browserSize.height) * 0.5,
-            width: browserSize.width,
-            height: browserSize.height
+            x: (bounds.width - browserWidth) * 0.5,
+            y: (bounds.height - browserHeight) * 0.5,
+            width: browserWidth,
+            height: browserHeight
         )
     }
 
@@ -1071,12 +1086,13 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     private func enterVR() {
         guard !inVR else { return }
         inVR = true
-        lastCenterGestureTime = 0
         didCreateInitialAnchor = false
         browserAnchor = nil
         browserWorldTransform = nil
         isDragging = false
         wasClickPinching = false
+        isResizing = false
+        resizeStartHandDistance = 0
         resetPanelToDefaultSizeInstantly()
 
         applyEyeGeometry()
@@ -1098,15 +1114,8 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         browserWorldWidth = Self.defaultPanelWidth
         browserWorldHeight = Self.defaultPanelHeight
 
-        SCNTransaction.begin()
-        SCNTransaction.disableActions = true
-        browserPlaneGeometry.width = CGFloat(browserWorldWidth)
-        browserPlaneGeometry.height = CGFloat(browserWorldHeight)
-        browserFrameGeometry.width = CGFloat(browserWorldWidth) + 0.018
-        browserFrameGeometry.height = CGFloat(browserWorldHeight) + 0.018
-        browserHandleNode.position = SCNVector3(0, -Double(browserWorldHeight) * 0.5 - 0.028, 0)
+        updatePanelSize(width: browserWorldWidth)
         toolbarNode.opacity = 1
-        SCNTransaction.commit()
         toolbarNode.isHidden = false
     }
 
@@ -1135,6 +1144,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         browserWorldTransform = nil
         didCreateInitialAnchor = false
         isDragging = false
+        isResizing = false
         inVR = false
 
         UIApplication.shared.isIdleTimerDisabled = false
@@ -1264,7 +1274,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         let configuration = WKSnapshotConfiguration()
         // Кинопанель почти вдвое шире обычной — тот же снимок на ней
         // размылился бы, поэтому берём его крупнее.
-        configuration.snapshotWidth = NSNumber(value: isCinemaMode ? 1536 : 1024)
+        configuration.snapshotWidth = NSNumber(value: isCinemaMode ? 1536 : 1280)
         browser.takeSnapshot(with: configuration) { [weak self] image, _ in
             DispatchQueue.main.async {
                 guard let self else { return }
@@ -1282,19 +1292,19 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         guard inVR else { return }
         updateHandSkeleton(left: left, right: right)
 
-        // Нажатие обеими руками — поставить панель заново перед собой.
-        if left?.clickPinch == true && right?.clickPinch == true {
-            let now = CACurrentMediaTime()
-            if now - lastCenterGestureTime > 1.0 {
-                lastCenterGestureTime = now
-                resetBrowserAnchor()
-                UIImpactFeedbackGenerator(style: .light).impactOccurred()
-            }
+        // Две руки: средний+большой палец = режим изменения размера.
+        // Расходятся указательные — окно увеличивается, сходятся — уменьшается.
+        if let left, let right, left.clickPinch && right.clickPinch {
+            updateResize(left: left, right: right)
             endDrag()
             releasePointer()
             hidePointer()
             wasClickPinching = true
             return
+        }
+
+        if isResizing {
+            endResize()
         }
 
         guard
@@ -1369,6 +1379,72 @@ final class MainViewController: UIViewController, MTKViewDelegate {
             webView: browser
         )
         wasClickPinching = sample.clickPinch
+    }
+
+    private func updateResize(left: HandSample, right: HandSample) {
+        let distance = distance(left.indexTip, right.indexTip)
+        guard distance > 0.06 else { return }
+
+        if !isResizing {
+            isResizing = true
+            resizeStartHandDistance = distance
+            resizeStartWidth = browserWorldWidth
+            isCinemaMode = false
+            toolbarNode.isHidden = false
+            input.release(webView: browser)
+            UIImpactFeedbackGenerator(style: .soft).impactOccurred()
+        }
+
+        guard resizeStartHandDistance > 0.001 else { return }
+        let scale = max(0.45, min(2.5, distance / resizeStartHandDistance))
+        let width = max(
+            Self.minimumPanelWidth,
+            min(Self.maximumPanelWidth, resizeStartWidth * Float(scale))
+        )
+        updatePanelSize(width: width)
+    }
+
+    private func endResize() {
+        guard isResizing else { return }
+        isResizing = false
+        resizeStartHandDistance = 0
+        commitAnchor()
+        UIImpactFeedbackGenerator(style: .soft).impactOccurred()
+    }
+
+    private func updatePanelSize(width: Float) {
+        browserWorldWidth = max(Self.minimumPanelWidth, min(Self.maximumPanelWidth, width))
+        browserWorldHeight = browserWorldWidth * Self.defaultPanelAspect
+
+        SCNTransaction.begin()
+        SCNTransaction.disableActions = true
+        browserPlaneGeometry.width = CGFloat(browserWorldWidth)
+        browserPlaneGeometry.height = CGFloat(browserWorldHeight)
+        browserFrameGeometry.width = CGFloat(browserWorldWidth) + 0.018
+        browserFrameGeometry.height = CGFloat(browserWorldHeight) + 0.018
+        browserHandleNode.position = SCNVector3(0, -Double(browserWorldHeight) * 0.5 - 0.028, 0)
+
+        let gap: Float = 0.014
+        let count = Float(toolbarButtonNodes.count)
+        if count > 0 {
+            let buttonWidth = max(0.06, (browserWorldWidth - gap * (count - 1)) / count)
+            toolbarCenterY = browserWorldHeight * 0.5 + 0.02 + toolbarButtonHeight * 0.5
+            for index in toolbarButtonNodes.indices {
+                let minX = -browserWorldWidth * 0.5 + Float(index) * (buttonWidth + gap)
+                linkItems[index].minX = minX
+                linkItems[index].maxX = minX + buttonWidth
+                if let plane = toolbarButtonNodes[index].geometry as? SCNPlane {
+                    plane.width = CGFloat(buttonWidth)
+                }
+                toolbarButtonNodes[index].position = SCNVector3(
+                    Double(minX + buttonWidth * 0.5),
+                    Double(toolbarCenterY),
+                    0.003
+                )
+            }
+        }
+        SCNTransaction.commit()
+        startBrowserCapture()
     }
 
     private func perform(item: ToolbarItem) {
@@ -2083,15 +2159,11 @@ final class HandTracker {
                     guard
                         let allPoints = try? observation.recognizedPoints(.all),
                         let index = allPoints[.indexTip],
-                        let middle = allPoints[.middleTip],
                         let thumb = allPoints[.thumbTip],
                         let wrist = allPoints[.wrist],
-                        let middleBase = allPoints[.middleMCP],
-                        index.confidence > 0.62,
-                        middle.confidence > 0.62,
-                        thumb.confidence > 0.60,
-                        wrist.confidence > 0.48,
-                        middleBase.confidence > 0.48
+                        index.confidence > 0.45,
+                        thumb.confidence > 0.45,
+                        wrist.confidence > 0.35
                     else {
                         continue
                     }
@@ -2110,27 +2182,32 @@ final class HandTracker {
                     }
 
                     let filteredIndex = filteredJoints[.indexTip] ?? index.location
-                    let filteredMiddle = filteredJoints[.middleTip] ?? middle.location
+                    let filteredMiddle = filteredJoints[.middleTip]
                     let filteredThumb = filteredJoints[.thumbTip] ?? thumb.location
                     let filteredWrist = filteredJoints[.wrist] ?? wrist.location
-                    let filteredMiddleBase = filteredJoints[.middleMCP] ?? middleBase.location
+                    let indexBase = filteredJoints[.indexMCP]
+                    let middleBase = filteredJoints[.middleMCP]
 
-                    // Нормируем на размер ладони: так порог не зависит от того,
-                    // насколько далеко рука от камеры.
-                    let palmSize = max(distance(filteredWrist, filteredMiddleBase), 0.03)
-                    let clickRatio = distance(filteredMiddle, filteredThumb) / palmSize
+                    // Нормируем на ладонь, но не требуем идеального распознавания
+                    // среднего пальца каждый кадр. Так курсор остаётся стабильным,
+                    // а средний+большой используется только как команда клика.
+                    let palmReference = indexBase ?? middleBase ?? filteredWrist
+                    let palmSize = max(distance(filteredWrist, palmReference), 0.035)
+                    let clickRatio = filteredMiddle.map { distance($0, filteredThumb) / palmSize }
                     let grabRatio = distance(filteredIndex, filteredThumb) / palmSize
 
                     state.index = filteredIndex
                     state.middle = filteredMiddle
                     state.thumb = filteredThumb
                     state.joints = filteredJoints
-                    state.clickPinch = pinchHysteresis(previous: state.clickPinch, ratio: clickRatio)
-                    state.grabPinch = pinchHysteresis(previous: state.grabPinch, ratio: grabRatio)
+                    state.clickPinch = clickRatio.map {
+                        pinchHysteresis(previous: state.clickPinch, ratio: $0, close: 0.52, open: 0.70)
+                    } ?? false
+                    state.grabPinch = pinchHysteresis(previous: state.grabPinch, ratio: grabRatio, close: 0.46, open: 0.64)
 
                     let sample = HandSample(
                         indexTip: filteredIndex,
-                        middleTip: filteredMiddle,
+                        middleTip: filteredMiddle ?? filteredIndex,
                         thumbTip: filteredThumb,
                         joints: filteredJoints,
                         clickPinch: state.clickPinch,
@@ -2174,13 +2251,18 @@ private func smooth(_ old: CGPoint?, _ new: CGPoint, alpha: CGFloat) -> CGPoint 
 private func adaptiveAlpha(previous: CGPoint?, current: CGPoint) -> CGFloat {
     guard let previous else { return 1.0 }
     let jump = min(distance(previous, current), 0.30)
-    return min(0.84, max(0.22, 0.22 + jump * 2.1))
+    return min(0.62, max(0.30, 0.30 + jump * 1.15))
 }
 
 @inline(__always)
-private func pinchHysteresis(previous: Bool, ratio: CGFloat) -> Bool {
-    if previous { return ratio < 0.60 }
-    return ratio < 0.43
+private func pinchHysteresis(
+    previous: Bool,
+    ratio: CGFloat,
+    close: CGFloat = 0.52,
+    open: CGFloat = 0.70
+) -> Bool {
+    if previous { return ratio < open }
+    return ratio < close
 }
 
 @inline(__always)

@@ -1,6 +1,6 @@
 //
 //  MainViewController.swift
-//  HandAR Vision — V33
+//  HandAR Vision — V34
 //
 //  Стереоконвейер
 //  --------------

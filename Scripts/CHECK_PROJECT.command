@@ -2,7 +2,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
-echo "== Hand AR Browser V33 project check =="
+echo "== Hand AR Browser V34 project check =="
 for f in "HandARBrowser.xcodeproj/project.pbxproj" "HandARBrowser/AppDelegate.swift" "HandARBrowser/MainViewController.swift" "HandARBrowser/Info.plist" "HandARBrowser/WebInput.js"; do
   [[ -f "$f" ]] && echo "[OK] $f" || { echo "[FAIL] missing $f"; exit 1; }
 done
@@ -64,7 +64,7 @@ grep -Fq "findDominantVideo" "$JS"
 grep -Fq "struct WorldRay" "$SRC"
 grep -Fq "let clickPinch: Bool" "$SRC"
 grep -Fq "let grabPinch: Bool" "$SRC"
-grep -Fq "recognizedPoint(.middleTip)" "$SRC"
+grep -Fq "allPoints[.middleTip]" "$SRC"
 grep -Fq "private let rayNode = SCNNode()" "$SRC"
 grep -Fq "private let pointerRingNode = SCNNode()" "$SRC"
 grep -Fq "private let leftHandSkeletonNode = SCNNode()" "$SRC"
@@ -115,7 +115,7 @@ grep -Fq "NSCameraUsageDescription" HandARBrowser/Info.plist
 ! grep -Fq "let isPinching: Bool" "$SRC"
 ! grep -Fq "cursorNode" "$SRC"
 
-echo "[OK] V33 static project checks"
+echo "[OK] V34 static project checks"
 
 if command -v swiftc >/dev/null 2>&1; then
   # Parser-only validation can fail on Linux because Apple SDK modules are unavailable;

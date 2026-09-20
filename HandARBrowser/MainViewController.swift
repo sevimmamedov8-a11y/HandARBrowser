@@ -469,6 +469,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     private let directVideoStage = UIView(frame: .zero)
     private var directVideoLeft: WKWebView!
     private var directVideoRight: WKWebView!
+    private let directVideoLensMask = DirectVideoLensMaskView(frame: .zero)
     private let directVideoPointer = UIView(frame: .zero)
     private var directVideoActive = false
     private var directVideoURL: URL?
@@ -1074,6 +1075,10 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         directVideoStage.addSubview(directVideoLeft)
         directVideoStage.addSubview(directVideoRight)
 
+        directVideoLensMask.backgroundColor = .clear
+        directVideoLensMask.isUserInteractionEnabled = false
+        directVideoStage.addSubview(directVideoLensMask)
+
         directVideoPointer.bounds = CGRect(x: 0, y: 0, width: 18, height: 18)
         directVideoPointer.layer.cornerRadius = 9
         directVideoPointer.layer.borderWidth = 2
@@ -1112,6 +1117,10 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         webView.navigationDelegate = self
         webView.uiDelegate = self
         webView.isOpaque = true
+        webView.alpha = 1
+        webView.isHidden = false
+        webView.layer.masksToBounds = false
+        webView.layer.cornerRadius = 0
         webView.backgroundColor = .black
         webView.scrollView.backgroundColor = .black
         webView.scrollView.bounces = false
@@ -1139,11 +1148,22 @@ final class MainViewController: UIViewController, MTKViewDelegate {
           window.__handarDirectPlay=function(){
             var v=video(); if(!v) return;
             try{v.muted=false;v.volume=1;}catch(e){}
+            try{
+              v.style.setProperty('display','block','important');
+              v.style.setProperty('visibility','visible','important');
+              v.style.setProperty('opacity','1','important');
+              v.style.setProperty('background-color','#000','important');
+              v.style.setProperty('object-fit','contain','important');
+              v.style.setProperty('transform','translateZ(0)','important');
+            }catch(e){}
             try{var p=v.play();if(p&&p.catch){p.catch(function(){})}}catch(e){}
           };
+          var style=document.createElement('style');
+          style.textContent='html,body{background:#000!important;margin:0!important;} video{display:block!important;visibility:visible!important;opacity:1!important;transform:translateZ(0)!important;}';
+          (document.head||document.documentElement).appendChild(style);
           setInterval(window.__handarTuneDirectVideo,800);
           setTimeout(window.__handarTuneDirectVideo,50);
-          setTimeout(window.__handarTuneDirectVideo,500);
+          setTimeout(window.__handarDirectPlay,600);
         })();
         """
     }
@@ -1162,10 +1182,20 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         let right = CGRect(x: startX + diameter + gap, y: startY, width: diameter, height: diameter)
         directVideoLeft.frame = left
         directVideoRight.frame = right
-        for w in [directVideoLeft, directVideoRight] {
-            w?.layer.cornerRadius = diameter * 0.5
-            w?.clipsToBounds = true
-        }
+
+        // Hardware-decoded HTML5 video inside WKWebView can render black when
+        // the WKWebView layer itself is clipped by cornerRadius/masksToBounds.
+        // Keep the two video webviews rectangular and draw the circular lens
+        // cut-outs in a sibling overlay instead. This preserves the VR lens
+        // appearance without masking the video layer itself.
+        directVideoLeft.layer.cornerRadius = 0
+        directVideoRight.layer.cornerRadius = 0
+        directVideoLeft.clipsToBounds = false
+        directVideoRight.clipsToBounds = false
+        directVideoLensMask.frame = directVideoStage.bounds
+        directVideoLensMask.leftCircle = left
+        directVideoLensMask.rightCircle = right
+        directVideoLensMask.setNeedsDisplay()
     }
 
     private func directVideoTarget(for point: CGPoint) -> (WKWebView, CGPoint)? {
@@ -2970,6 +3000,29 @@ let number='';const pd=document.getElementById('phone-display');document.querySe
         return m
     }
 }
+
+
+/// Black overlay with two transparent circular holes. It creates the VR-lens
+/// silhouette without applying a Core Animation mask to the WKWebView layers,
+/// which can interfere with hardware-decoded HTML5 video presentation.
+final class DirectVideoLensMaskView: UIView {
+    var leftCircle: CGRect = .zero { didSet { setNeedsDisplay() } }
+    var rightCircle: CGRect = .zero { didSet { setNeedsDisplay() } }
+
+    override func draw(_ rect: CGRect) {
+        guard let context = UIGraphicsGetCurrentContext() else { return }
+        context.setFillColor(UIColor.black.cgColor)
+        context.addRect(bounds)
+        if leftCircle.width > 1 && leftCircle.height > 1 {
+            context.addEllipse(in: leftCircle)
+        }
+        if rightCircle.width > 1 && rightCircle.height > 1 {
+            context.addEllipse(in: rightCircle)
+        }
+        context.eoFillPath()
+    }
+}
+
 
 private extension MainViewController {
     func updateVRDesktopStatus() {

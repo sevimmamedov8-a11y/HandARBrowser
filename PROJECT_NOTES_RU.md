@@ -77,3 +77,20 @@
 
 Защита от регрессий: `onAnchorUpdate` игнорирует обновления во время
 перетаскивания, иначе ARKit возвращал бы панель на старое место каждый кадр.
+
+## V30.1 — фикс сборки
+
+CI падал на `error: overriding property must be as accessible as its enclosing
+type` / `property 'toolbarItems' ... cannot override a property with type
+'[UIBarButtonItem]?'`. Причина: `UIViewController` уже объявляет
+`var toolbarItems: [UIBarButtonItem]?` (через категорию, см. `UINavigationController.h`),
+и одноимённое приватное свойство `[ToolbarItem]` в `MainViewController`
+компилятор трактует как несовместимое переопределение.
+
+Переименовал `toolbarItems` → `linkItems` везде (объявление и все обращения).
+Остальные имена свойств панели ссылок (`toolbarNode`, `toolbarButtonNodes`,
+`toolbarCenterY`, `toolbarButtonHeight`, `highlightedToolbarIndex`) не
+конфликтуют — в UIKit таких свойств у `UIViewController` нет.
+
+`Scripts/CHECK_PROJECT.command` теперь проверяет и наличие `linkItems`,
+и отсутствие `private var toolbarItems`, чтобы регрессия не прошла тихо.

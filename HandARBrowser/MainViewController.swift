@@ -456,7 +456,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
 
     // Планка ссылок над браузером.
     private let toolbarNode = SCNNode()
-    private var toolbarItems: [ToolbarItem] = []
+    private var linkItems: [ToolbarItem] = []
     private var toolbarButtonNodes: [SCNNode] = []
     private var toolbarCenterY: Float = 0
     private let toolbarButtonHeight: Float = 0.072
@@ -703,7 +703,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
             toolbarButtonNodes.append(node)
         }
 
-        toolbarItems = items
+        linkItems = items
         browserPlaneNode.addChildNode(toolbarNode)
     }
 
@@ -1178,11 +1178,11 @@ final class MainViewController: UIViewController, MTKViewDelegate {
 
         // Планка ссылок над браузером.
         if abs(hit.localY - toolbarCenterY) <= toolbarButtonHeight * 0.5 {
-            let index = toolbarItems.firstIndex { hit.localX >= $0.minX && hit.localX <= $0.maxX }
+            let index = linkItems.firstIndex { hit.localX >= $0.minX && hit.localX <= $0.maxX }
             highlightToolbar(index)
             releasePointer()
             if let index, sample.clickPinch, !wasClickPinching {
-                perform(item: toolbarItems[index])
+                perform(item: linkItems[index])
                 UIImpactFeedbackGenerator(style: .rigid).impactOccurred()
             }
             wasClickPinching = sample.clickPinch
@@ -1343,7 +1343,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         highlightedToolbarIndex = index
         for (position, node) in toolbarButtonNodes.enumerated() {
             let image = MainViewController.buttonImage(
-                title: toolbarItems[position].title,
+                title: linkItems[position].title,
                 highlighted: position == index
             )
             node.geometry?.firstMaterial?.diffuse.contents = image

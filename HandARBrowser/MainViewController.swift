@@ -1954,12 +1954,19 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         uniforms.k1 = profile.k1
         uniforms.k2 = profile.k2
         uniforms.chroma = profile.chroma
-        // Прямоугольные (не круглые) окна: каждый глаз занимает свою
-        // половину экрана целиком, без круглой маски и виньетки. Шейдер
-        // уже умеет отключать круглый клип и мягкий край по значению
-        // rClip >= 5.0 (см. `u.rClip < 5.0` в vr_fragment) — этим и
-        // пользуемся вместо вычисления радиуса круга.
-        uniforms.rClip = 5.0
+        // Круглая линза максимально заполняет свою половину дисплея.
+        // p.x = (u-0.5)*aspect, p.y = (v-0.5) — обе оси уже нормированы
+        // на высоту экрана (aspect = полуширина/высота), поэтому радиус
+        // в p-пространстве — это просто физический радиус, делённый на
+        // высоту. Отсюда предел по высоте: r <= 0.5 (упирается в верх/низ),
+        // и предел по ширине половины экрана: r <= aspect * 0.5 (упирается
+        // в левый/правый край своей половины). Берём меньшее из двух, чтобы
+        // круг не вылезал ни по высоте, ни по ширине и был одинаков для
+        // обоих глаз. (Раньше здесь было 0.5 / aspect — обратная и потому
+        // неверная формула, из-за которой круги были меньше, чем могли бы
+        // быть, на любом экране шире, чем высокая половина кадра.)
+        let maxLensRadius = min(0.5, uniforms.aspect * 0.5)
+        uniforms.rClip = maxLensRadius * 0.985
         uniforms.passthrough = (profile.passthrough && hasCamera) ? 1 : 0
 
         guard let frame, profile.passthrough, hasCamera else { return uniforms }
@@ -2511,10 +2518,6 @@ final class MainMenuView: UIView {
     private let depthRow = SliderRow(title: "Глаз → экран", unit: "мм", minimum: 30, maximum: 70, step: 0.5)
     private let k1Row = SliderRow(title: "Дисторсия k1", unit: "", minimum: 0, maximum: 0.8, step: 0.005)
     private let k2Row = SliderRow(title: "Дисторсия k2", unit: "", minimum: -0.2, maximum: 0.6, step: 0.005)
-    // Насколько плотно картинка заполняет круглую линзу. 1.0 — без запаса
-    // (может остаться чёрное кольцо перед самым краем круга под линзами
-    // с сильной кривизной), больше — картинка тянется дальше к краю круга.
-    private let fovRow = SliderRow(title: "Заполнение линзы", unit: "×", minimum: 1.0, maximum: 1.8, step: 0.02)
 
     init(frame: CGRect, profile: VRProfile) {
         self.profile = profile
@@ -2570,7 +2573,7 @@ final class MainMenuView: UIView {
 
         stack.axis = .vertical
         stack.spacing = 14
-        for row in [ipdRow, lensRow, depthRow, k1Row, k2Row, fovRow] {
+        for row in [ipdRow, lensRow, depthRow, k1Row, k2Row] {
             row.onChange = { [weak self] in self?.collect() }
             stack.addArrangedSubview(row)
         }
@@ -2624,7 +2627,6 @@ final class MainMenuView: UIView {
         depthRow.value = profile.eyeToScreenMM
         k1Row.value = profile.k1
         k2Row.value = profile.k2
-        fovRow.value = profile.fovScale
         passthroughSwitch.isOn = profile.passthrough
     }
 
@@ -2634,7 +2636,6 @@ final class MainMenuView: UIView {
         profile.eyeToScreenMM = depthRow.value
         profile.k1 = k1Row.value
         profile.k2 = k2Row.value
-        profile.fovScale = fovRow.value
         profile.passthrough = passthroughSwitch.isOn
         profile.save()
         onProfileChange?(profile)

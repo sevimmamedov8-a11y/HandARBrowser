@@ -1,26 +1,23 @@
 //
 //  MainViewController.swift
-//  HandAR Vision — V29, настоящий VR-режим
+//  HandAR Vision — V30
 //
-//  Что изменилось относительно V28
-//  --------------------------------
-//  Было: полноэкранный ARSCNView с видео камеры + два прозрачных SCNView сверху.
-//  Обе камеры глаз брали ОДНУ И ТУ ЖЕ матрицу проекции реальной камеры
-//  (frame.camera.projectionMatrix), предыскажения под линзы не было вообще.
-//  Результат — split-screen, а не VR: сквозное видео не разделено по глазам,
-//  прямые линии выгибаются в линзах, картинки не сливаются.
-//
-//  Стало: полный стереоконвейер.
+//  Стереоконвейер
+//  --------------
 //    ARKit (поза головы)
 //        └─► одна SCNScene, две камеры на реальном IPD
 //              └─► SCNRenderer × 2 → офскрин-текстура (левая/правая половина)
-//                    └─► Metal-проход: YCbCr-passthrough пер-глаз,
-//                        barrel-предыскажение, хроматика, маска линзы
+//                    └─► Metal: YCbCr-passthrough пер-глаз, barrel-предыскажение,
+//                        хроматика, маска линзы
 //                          └─► экран
 //
-//  Проекция каждого глаза — асимметричный фрустум, построенный из физической
-//  геометрии шлема (размер экрана, расстояние между линзами, глаз→экран).
-//  Шейдер компилируется в рантайме, .metal-файл в проект добавлять не нужно.
+//  Управление
+//  ----------
+//    • Луч выходит из кончика указательного пальца. Где он встречает панель,
+//      там горит точка с кольцом — видно, куда наведён.
+//    • Нажатие: СРЕДНИЙ + большой палец.
+//    • Перетаскивание панели: УКАЗАТЕЛЬНЫЙ + большой, рука в нижней трети кадра.
+//    • Панель ссылок над браузером: Google, YouTube, TikTok, Назад.
 //
 
 import UIKit
@@ -35,8 +32,22 @@ import simd
 
 struct HandSample {
     let indexTip: CGPoint
+    let middleTip: CGPoint
     let thumbTip: CGPoint
-    let isPinching: Bool
+    /// Средний + большой: нажатие.
+    let clickPinch: Bool
+    /// Указательный + большой: захват панели.
+    let grabPinch: Bool
+}
+
+/// Луч в мировых координатах.
+struct WorldRay {
+    var origin: SIMD3<Float>
+    var direction: SIMD3<Float>
+
+    func point(at distance: Float) -> SIMD3<Float> {
+        origin + direction * distance
+    }
 }
 
 // MARK: - Профиль шлема --------------------------------------------------------
@@ -125,8 +136,7 @@ struct EyeFrustum {
 
 enum VRLensMath {
     /// Асимметричный фрустум для глаза. Центр линзы почти никогда не совпадает
-    /// с центром половины экрана, поэтому пирамида несимметрична — именно этого
-    /// не хватало прошлой версии.
+    /// с центром половины экрана, поэтому пирамида несимметрична.
     static func frustum(eye: Int, profile: VRProfile) -> EyeFrustum {
         let halfWidth = profile.screenWidthMM * 0.5
         let halfHeight = profile.screenHeightMM * 0.5
@@ -250,7 +260,7 @@ final class VRCompositor {
         return out;
     }
 
-    static inline float3 ycbcr_to_rgb(float y, float2 cbcr) {
+    inline float3 ycbcr_to_rgb(float y, float2 cbcr) {
         float cb = cbcr.x - 0.5;
         float cr = cbcr.y - 0.5;
         return float3(y + 1.402 * cr,
@@ -361,6 +371,22 @@ final class VRCompositor {
     }
 }
 
+// MARK: - Панель ссылок --------------------------------------------------------
+
+/// Кнопка на планке над браузером.
+struct ToolbarItem {
+    enum Action {
+        case open(URL)
+        case back
+    }
+
+    let title: String
+    let action: Action
+    /// Границы по локальной оси X панели, в метрах от её центра.
+    var minX: Float = 0
+    var maxX: Float = 0
+}
+
 // MARK: - Главный контроллер ---------------------------------------------------
 
 final class MainViewController: UIViewController, MTKViewDelegate {
@@ -394,6 +420,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         webView.backgroundColor = .white
         webView.scrollView.backgroundColor = .white
         webView.scrollView.alwaysBounceVertical = true
+        webView.allowsBackForwardNavigationGestures = false
         webView.customUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15"
         return webView
     }()
@@ -419,8 +446,21 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     private let leftCameraNode = SCNNode()
     private let rightCameraNode = SCNNode()
     private let browserPlaneNode = SCNNode()
-    private let cursorNode = SCNNode()
     private let browserMaterial = SCNMaterial()
+
+    // Указатель: луч из пальца плюс точка с кольцом в месте попадания.
+    private let rayNode = SCNNode()
+    private let pointerNode = SCNNode()
+    private let pointerDotNode = SCNNode()
+    private let pointerRingNode = SCNNode()
+
+    // Планка ссылок над браузером.
+    private let toolbarNode = SCNNode()
+    private var toolbarItems: [ToolbarItem] = []
+    private var toolbarButtonNodes: [SCNNode] = []
+    private var toolbarCenterY: Float = 0
+    private let toolbarButtonHeight: Float = 0.072
+    private var highlightedToolbarIndex: Int?
 
     private var menu: MainMenuView!
 
@@ -431,10 +471,20 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     private var lastCenterGestureTime: CFTimeInterval = 0
     private var didCreateInitialAnchor = false
 
+    // Перетаскивание панели
+    private var isDragging = false
+    private var dragDistance: Float = 1.55
+    private var dragOffset = SIMD3<Float>(repeating: 0)
+    private var wasClickPinching = false
+
     // Панель браузера в мире.
     private let browserWorldWidth: Float = 0.82
     private let browserWorldHeight: Float = 0.47
     private let browserWorldDistance: Float = 1.55
+    /// Ниже этой доли кадра щипок указательным считается захватом панели.
+    private let dragZoneHeight: CGFloat = 0.34
+    /// На таком расстоянии от камеры рисуется начало луча — примерно там кисть.
+    private let fingerRayOrigin: Float = 0.32
 
     override var prefersStatusBarHidden: Bool { true }
     override var shouldAutorotate: Bool { true }
@@ -447,6 +497,8 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     override var prefersHomeIndicatorAutoHidden: Bool { inVR }
 
     private static let homeURL = URL(string: "https://www.google.com/")!
+    private static let youTubeURL = URL(string: "https://m.youtube.com/")!
+    private static let tikTokURL = URL(string: "https://www.tiktok.com/")!
 
     // MARK: Жизненный цикл
 
@@ -548,6 +600,12 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         worldScene.rootNode.addChildNode(headNode)
         applyEyeGeometry()
 
+        buildBrowserPanel()
+        buildToolbar()
+        buildPointer()
+    }
+
+    private func buildBrowserPanel() {
         let geometry = SCNPlane(
             width: CGFloat(browserWorldWidth),
             height: CGFloat(browserWorldHeight)
@@ -569,7 +627,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         browserPlaneNode.isHidden = true
         worldScene.rootNode.addChildNode(browserPlaneNode)
 
-        // Тонкая рамка: мозгу нужен край, чтобы зацепиться за глубину панели.
+        // Рамка: мозгу нужен край, чтобы зацепиться за глубину панели.
         let frameGeometry = SCNBox(
             width: CGFloat(browserWorldWidth) + 0.018,
             height: CGFloat(browserWorldHeight) + 0.018,
@@ -585,20 +643,153 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         frameNode.position = SCNVector3(0, 0, -0.005)
         browserPlaneNode.addChildNode(frameNode)
 
-        let cursorGeometry = SCNSphere(radius: 0.011)
-        cursorGeometry.segmentCount = 12
-        let cursorMaterial = SCNMaterial()
-        cursorMaterial.lightingModel = .constant
-        cursorMaterial.isDoubleSided = true
-        cursorMaterial.diffuse.contents = UIColor.white
-        cursorMaterial.emission.contents = UIColor.white
-        cursorMaterial.writesToDepthBuffer = false
-        cursorMaterial.readsFromDepthBuffer = false
-        cursorGeometry.firstMaterial = cursorMaterial
-        cursorNode.geometry = cursorGeometry
-        cursorNode.renderingOrder = 100
-        cursorNode.isHidden = true
-        worldScene.rootNode.addChildNode(cursorNode)
+        // Ручка внизу — подсказка, за что тянуть.
+        let handleGeometry = SCNBox(
+            width: CGFloat(browserWorldWidth) * 0.3,
+            height: 0.012,
+            length: 0.006,
+            chamferRadius: 0.005
+        )
+        let handleMaterial = SCNMaterial()
+        handleMaterial.lightingModel = .constant
+        handleMaterial.diffuse.contents = UIColor(white: 0.45, alpha: 1)
+        handleMaterial.emission.contents = UIColor(white: 0.45, alpha: 1)
+        handleGeometry.firstMaterial = handleMaterial
+        let handleNode = SCNNode(geometry: handleGeometry)
+        handleNode.position = SCNVector3(0, -Double(browserWorldHeight) * 0.5 - 0.028, 0)
+        browserPlaneNode.addChildNode(handleNode)
+    }
+
+    private func buildToolbar() {
+        var items: [ToolbarItem] = [
+            ToolbarItem(title: "Google", action: .open(Self.homeURL)),
+            ToolbarItem(title: "YouTube", action: .open(Self.youTubeURL)),
+            ToolbarItem(title: "TikTok", action: .open(Self.tikTokURL)),
+            ToolbarItem(title: "Назад", action: .back)
+        ]
+
+        let gap: Float = 0.014
+        let count = Float(items.count)
+        let buttonWidth = (browserWorldWidth - gap * (count - 1)) / count
+        toolbarCenterY = browserWorldHeight * 0.5 + 0.02 + toolbarButtonHeight * 0.5
+
+        for index in items.indices {
+            let minX = -browserWorldWidth * 0.5 + Float(index) * (buttonWidth + gap)
+            items[index].minX = minX
+            items[index].maxX = minX + buttonWidth
+
+            let plane = SCNPlane(
+                width: CGFloat(buttonWidth),
+                height: CGFloat(toolbarButtonHeight)
+            )
+            plane.cornerRadius = CGFloat(toolbarButtonHeight) * 0.28
+            let material = SCNMaterial()
+            material.lightingModel = .constant
+            material.isDoubleSided = true
+            material.diffuse.contents = MainViewController.buttonImage(
+                title: items[index].title,
+                highlighted: false
+            )
+            material.emission.contents = material.diffuse.contents
+            plane.firstMaterial = material
+
+            let node = SCNNode(geometry: plane)
+            node.position = SCNVector3(
+                Double(minX + buttonWidth * 0.5),
+                Double(toolbarCenterY),
+                0.003
+            )
+            toolbarNode.addChildNode(node)
+            toolbarButtonNodes.append(node)
+        }
+
+        toolbarItems = items
+        browserPlaneNode.addChildNode(toolbarNode)
+    }
+
+    /// Текстура кнопки. Рисуем заранее — в VR нет места для UIKit-слоёв.
+    private static func buttonImage(title: String, highlighted: Bool) -> UIImage {
+        let size = CGSize(width: 320, height: 120)
+        let renderer = UIGraphicsImageRenderer(size: size)
+        return renderer.image { context in
+            let rect = CGRect(origin: .zero, size: size)
+            let path = UIBezierPath(roundedRect: rect.insetBy(dx: 4, dy: 4), cornerRadius: 30)
+            let background = highlighted
+                ? UIColor(red: 0.30, green: 0.68, blue: 0.95, alpha: 1)
+                : UIColor(white: 0.14, alpha: 1)
+            background.setFill()
+            path.fill()
+
+            UIColor(white: highlighted ? 1.0 : 0.42, alpha: 1).setStroke()
+            path.lineWidth = 4
+            path.stroke()
+
+            let style = NSMutableParagraphStyle()
+            style.alignment = .center
+            let attributes: [NSAttributedString.Key: Any] = [
+                .font: UIFont.systemFont(ofSize: 46, weight: .semibold),
+                .foregroundColor: highlighted ? UIColor.black : UIColor.white,
+                .paragraphStyle: style
+            ]
+            let textSize = title.size(withAttributes: attributes)
+            let textRect = CGRect(
+                x: 0,
+                y: (size.height - textSize.height) * 0.5,
+                width: size.width,
+                height: textSize.height
+            )
+            title.draw(in: textRect, withAttributes: attributes)
+            _ = context
+        }
+    }
+
+    private func buildPointer() {
+        // Луч. Цилиндр вытягивается по длине каждый кадр.
+        let rayGeometry = SCNCylinder(radius: 0.0032, height: 1)
+        rayGeometry.radialSegmentCount = 8
+        let rayMaterial = SCNMaterial()
+        rayMaterial.lightingModel = .constant
+        rayMaterial.diffuse.contents = UIColor(red: 0.38, green: 0.86, blue: 1.0, alpha: 1)
+        rayMaterial.emission.contents = UIColor(red: 0.38, green: 0.86, blue: 1.0, alpha: 1)
+        rayMaterial.transparency = 0.55
+        rayMaterial.writesToDepthBuffer = false
+        rayMaterial.readsFromDepthBuffer = false
+        rayGeometry.firstMaterial = rayMaterial
+        rayNode.geometry = rayGeometry
+        rayNode.renderingOrder = 90
+        rayNode.isHidden = true
+        worldScene.rootNode.addChildNode(rayNode)
+
+        // Точка попадания: диск плюс кольцо вокруг.
+        let dotGeometry = SCNCylinder(radius: 0.009, height: 0.0012)
+        dotGeometry.radialSegmentCount = 24
+        let dotMaterial = SCNMaterial()
+        dotMaterial.lightingModel = .constant
+        dotMaterial.diffuse.contents = UIColor.white
+        dotMaterial.emission.contents = UIColor.white
+        dotMaterial.writesToDepthBuffer = false
+        dotMaterial.readsFromDepthBuffer = false
+        dotGeometry.firstMaterial = dotMaterial
+        pointerDotNode.geometry = dotGeometry
+
+        let ringGeometry = SCNTorus(ringRadius: 0.019, pipeRadius: 0.0022)
+        ringGeometry.ringSegmentCount = 36
+        ringGeometry.pipeSegmentCount = 8
+        let ringMaterial = SCNMaterial()
+        ringMaterial.lightingModel = .constant
+        ringMaterial.diffuse.contents = UIColor(red: 0.38, green: 0.86, blue: 1.0, alpha: 1)
+        ringMaterial.emission.contents = UIColor(red: 0.38, green: 0.86, blue: 1.0, alpha: 1)
+        ringMaterial.transparency = 0.9
+        ringMaterial.writesToDepthBuffer = false
+        ringMaterial.readsFromDepthBuffer = false
+        ringGeometry.firstMaterial = ringMaterial
+        pointerRingNode.geometry = ringGeometry
+
+        pointerNode.addChildNode(pointerDotNode)
+        pointerNode.addChildNode(pointerRingNode)
+        pointerNode.renderingOrder = 95
+        pointerNode.isHidden = true
+        worldScene.rootNode.addChildNode(pointerNode)
     }
 
     /// Пересчитывает IPD и матрицы проекции под текущий профиль шлема.
@@ -685,7 +876,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
 
         tracking.onAnchorUpdate = { [weak self] anchor in
             DispatchQueue.main.async {
-                guard let self, self.inVR else { return }
+                guard let self, self.inVR, !self.isDragging else { return }
                 guard self.browserAnchor?.identifier == anchor.identifier else { return }
                 self.browserAnchor = anchor
                 self.browserWorldTransform = anchor.transform
@@ -748,6 +939,8 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         didCreateInitialAnchor = false
         browserAnchor = nil
         browserWorldTransform = nil
+        isDragging = false
+        wasClickPinching = false
 
         applyEyeGeometry()
         requestLandscapeMode()
@@ -767,7 +960,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         menu?.isHidden = visible
         menu?.isUserInteractionEnabled = !visible
         browserPlaneNode.isHidden = true
-        cursorNode.isHidden = true
+        hidePointer()
         setNeedsUpdateOfHomeIndicatorAutoHidden()
     }
 
@@ -783,6 +976,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         browserAnchor = nil
         browserWorldTransform = nil
         didCreateInitialAnchor = false
+        isDragging = false
         inVR = false
 
         UIApplication.shared.isIdleTimerDisabled = false
@@ -821,7 +1015,6 @@ final class MainViewController: UIViewController, MTKViewDelegate {
             cameraTransform.columns.3.z
         )
 
-        // Панель ставим вертикально: наклон головы не должен её заваливать.
         var forward = SIMD3<Float>(
             -cameraTransform.columns.2.x,
             0,
@@ -832,22 +1025,45 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         }
         forward = simd_normalize(forward)
 
+        let transform = panelTransform(
+            center: position + forward * browserWorldDistance,
+            forward: forward
+        )
+        browserWorldTransform = transform
+        didCreateInitialAnchor = true
+        commitAnchor()
+        applyBrowserWorldTransform()
+    }
+
+    /// Панель всегда стоит вертикально: наклон головы не должен её заваливать.
+    private func panelTransform(center: SIMD3<Float>, forward: SIMD3<Float>) -> simd_float4x4 {
+        var flatForward = SIMD3<Float>(forward.x, 0, forward.z)
+        if simd_length(flatForward) < 1e-4 {
+            flatForward = SIMD3<Float>(0, 0, -1)
+        }
+        flatForward = simd_normalize(flatForward)
+
         let up = SIMD3<Float>(0, 1, 0)
-        let rightAxis = simd_normalize(simd_cross(up, -forward))
+        let rightAxis = simd_normalize(simd_cross(up, -flatForward))
 
         var transform = matrix_identity_float4x4
         transform.columns.0 = SIMD4<Float>(rightAxis, 0)
         transform.columns.1 = SIMD4<Float>(up, 0)
-        transform.columns.2 = SIMD4<Float>(-forward, 0)
-        transform.columns.3 = SIMD4<Float>(position + forward * browserWorldDistance, 1)
+        transform.columns.2 = SIMD4<Float>(-flatForward, 0)
+        transform.columns.3 = SIMD4<Float>(center, 1)
+        return transform
+    }
 
+    /// Перевешивает якорь на текущее положение панели. ARAnchor неизменяем,
+    /// поэтому старый снимается, новый ставится.
+    private func commitAnchor() {
+        guard let transform = browserWorldTransform else { return }
+        if let anchor = browserAnchor {
+            tracking.remove(anchor: anchor)
+        }
         let anchor = ARAnchor(name: "HandAR_Stereo_Browser", transform: transform)
-
         browserAnchor = anchor
-        browserWorldTransform = transform
-        didCreateInitialAnchor = true
         tracking.add(anchor: anchor)
-        applyBrowserWorldTransform()
     }
 
     private func applyBrowserWorldTransform() {
@@ -863,6 +1079,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         browserAnchor = nil
         browserWorldTransform = nil
         didCreateInitialAnchor = false
+        isDragging = false
         browserPlaneNode.isHidden = true
     }
 
@@ -896,37 +1113,116 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         }
     }
 
-    // MARK: Руки
+    // MARK: Руки и указатель
 
     private func handleHands(left: HandSample?, right: HandSample?) {
         guard inVR else { return }
 
-        // Щипок обеими руками — поставить панель заново перед собой.
-        if left?.isPinching == true && right?.isPinching == true {
+        // Нажатие обеими руками — поставить панель заново перед собой.
+        if left?.clickPinch == true && right?.clickPinch == true {
             let now = CACurrentMediaTime()
             if now - lastCenterGestureTime > 1.0 {
                 lastCenterGestureTime = now
                 resetBrowserAnchor()
                 UIImpactFeedbackGenerator(style: .light).impactOccurred()
             }
+            endDrag()
             releasePointer()
-            hideCursor()
+            hidePointer()
+            wasClickPinching = true
             return
         }
 
         guard
             let sample = right ?? left,
-            let transform = browserWorldTransform,
-            let worldPoint = tracking.worldPointOnBrowser(
-                visionPoint: sample.indexTip,
-                planeTransform: browserPlaneForUnprojection(transform)
-            )
+            let ray = tracking.worldRay(visionPoint: sample.indexTip)
         else {
+            endDrag()
             releasePointer()
-            hideCursor()
+            hidePointer()
+            wasClickPinching = false
             return
         }
 
+        // Захват: указательный + большой, рука в нижней трети кадра.
+        let inDragZone = sample.indexTip.y < dragZoneHeight
+        if sample.grabPinch && (isDragging || inDragZone) {
+            updateDrag(with: ray)
+            releasePointer()
+            highlightToolbar(nil)
+            pointerNode.isHidden = true
+            wasClickPinching = false
+            return
+        }
+        endDrag()
+
+        guard let transform = browserWorldTransform else {
+            showRay(from: ray, hit: nil)
+            hidePointerDot()
+            releasePointer()
+            wasClickPinching = sample.clickPinch
+            return
+        }
+
+        guard let hit = planeHit(ray: ray, transform: transform) else {
+            showRay(from: ray, hit: nil)
+            hidePointerDot()
+            releasePointer()
+            highlightToolbar(nil)
+            wasClickPinching = sample.clickPinch
+            return
+        }
+
+        showRay(from: ray, hit: hit.point)
+        showPointerDot(at: hit.point, transform: transform, active: sample.clickPinch)
+
+        // Планка ссылок над браузером.
+        if abs(hit.localY - toolbarCenterY) <= toolbarButtonHeight * 0.5 {
+            let index = toolbarItems.firstIndex { hit.localX >= $0.minX && hit.localX <= $0.maxX }
+            highlightToolbar(index)
+            releasePointer()
+            if let index, sample.clickPinch, !wasClickPinching {
+                perform(item: toolbarItems[index])
+                UIImpactFeedbackGenerator(style: .rigid).impactOccurred()
+            }
+            wasClickPinching = sample.clickPinch
+            return
+        }
+        highlightToolbar(nil)
+
+        let normalizedX = hit.localX / browserWorldWidth + 0.5
+        let normalizedY = 0.5 - hit.localY / browserWorldHeight
+        guard normalizedX >= 0, normalizedX <= 1, normalizedY >= 0, normalizedY <= 1 else {
+            releasePointer()
+            wasClickPinching = sample.clickPinch
+            return
+        }
+
+        input.update(
+            normalizedPoint: CGPoint(x: CGFloat(normalizedX), y: CGFloat(normalizedY)),
+            pinch: sample.clickPinch,
+            webView: browser
+        )
+        wasClickPinching = sample.clickPinch
+    }
+
+    private func perform(item: ToolbarItem) {
+        switch item.action {
+        case .open(let url):
+            browser.load(URLRequest(url: url))
+        case .back:
+            if browser.canGoBack {
+                browser.goBack()
+            }
+        }
+    }
+
+    /// Пересечение луча с плоскостью панели. Считаем напрямую: это дешевле
+    /// и честнее, чем гонять точку через вьюпорты.
+    private func planeHit(
+        ray: WorldRay,
+        transform: simd_float4x4
+    ) -> (point: SIMD3<Float>, localX: Float, localY: Float)? {
         let center = SIMD3<Float>(
             transform.columns.3.x,
             transform.columns.3.y,
@@ -942,45 +1238,127 @@ final class MainViewController: UIViewController, MTKViewDelegate {
             transform.columns.1.y,
             transform.columns.1.z
         ))
+        let normal = simd_normalize(SIMD3<Float>(
+            transform.columns.2.x,
+            transform.columns.2.y,
+            transform.columns.2.z
+        ))
 
-        let delta = worldPoint - center
-        let normalizedX = simd_dot(delta, rightAxis) / browserWorldWidth + 0.5
-        let normalizedY = 0.5 - simd_dot(delta, upAxis) / browserWorldHeight
+        let denominator = simd_dot(ray.direction, normal)
+        guard abs(denominator) > 1e-5 else { return nil }
 
-        guard normalizedX >= 0, normalizedX <= 1, normalizedY >= 0, normalizedY <= 1 else {
-            releasePointer()
-            hideCursor()
+        let distance = simd_dot(center - ray.origin, normal) / denominator
+        guard distance > 0.05, distance < 12 else { return nil }
+
+        let point = ray.point(at: distance)
+        let delta = point - center
+        return (point, simd_dot(delta, rightAxis), simd_dot(delta, upAxis))
+    }
+
+    private func updateDrag(with ray: WorldRay) {
+        guard let transform = browserWorldTransform else { return }
+        let center = SIMD3<Float>(
+            transform.columns.3.x,
+            transform.columns.3.y,
+            transform.columns.3.z
+        )
+
+        if !isDragging {
+            isDragging = true
+            dragDistance = max(0.55, min(5.0, simd_length(center - ray.origin)))
+            // Запоминаем смещение, иначе панель прыгнет к пальцу в момент захвата.
+            dragOffset = center - ray.point(at: dragDistance)
+            input.release(webView: browser)
+            UIImpactFeedbackGenerator(style: .soft).impactOccurred()
+        }
+
+        var moved = transform
+        moved.columns.3 = SIMD4<Float>(ray.point(at: dragDistance) + dragOffset, 1)
+        browserWorldTransform = moved
+        applyBrowserWorldTransform()
+
+        // Луч тянется к панели, пока её тащат.
+        showRay(from: ray, hit: SIMD3<Float>(
+            moved.columns.3.x,
+            moved.columns.3.y,
+            moved.columns.3.z
+        ))
+    }
+
+    private func endDrag() {
+        guard isDragging else { return }
+        isDragging = false
+        commitAnchor()
+    }
+
+    private func showRay(from ray: WorldRay, hit: SIMD3<Float>?) {
+        let start = ray.point(at: fingerRayOrigin)
+        let end = hit ?? ray.point(at: fingerRayOrigin + 2.2)
+        let delta = end - start
+        let length = simd_length(delta)
+        guard length > 0.01 else {
+            rayNode.isHidden = true
             return
         }
 
-        cursorNode.simdPosition = worldPoint
-        cursorNode.isHidden = false
-        let cursorColor: UIColor = sample.isPinching
-            ? UIColor(red: 1.0, green: 0.45, blue: 0.35, alpha: 1)
+        rayNode.simdPosition = (start + end) * 0.5
+        rayNode.simdOrientation = simd_quatf(from: SIMD3<Float>(0, 1, 0), to: delta / length)
+        rayNode.scale = SCNVector3(1, Float(length), 1)
+        rayNode.isHidden = false
+    }
+
+    private func showPointerDot(at point: SIMD3<Float>, transform: simd_float4x4, active: Bool) {
+        let rightAxis = simd_normalize(SIMD3<Float>(
+            transform.columns.0.x,
+            transform.columns.0.y,
+            transform.columns.0.z
+        ))
+        let normal = simd_normalize(SIMD3<Float>(
+            transform.columns.2.x,
+            transform.columns.2.y,
+            transform.columns.2.z
+        ))
+
+        // Диск и кольцо строятся вдоль своей локальной Y, поэтому Y кладём
+        // на нормаль панели — иначе точка встанет ребром.
+        var basis = matrix_identity_float4x4
+        basis.columns.0 = SIMD4<Float>(rightAxis, 0)
+        basis.columns.1 = SIMD4<Float>(normal, 0)
+        basis.columns.2 = SIMD4<Float>(simd_cross(rightAxis, normal), 0)
+        basis.columns.3 = SIMD4<Float>(point + normal * 0.006, 1)
+
+        pointerNode.simdTransform = basis
+        pointerNode.isHidden = false
+
+        let color: UIColor = active
+            ? UIColor(red: 1.0, green: 0.48, blue: 0.36, alpha: 1)
             : .white
-        cursorNode.geometry?.firstMaterial?.diffuse.contents = cursorColor
-        cursorNode.geometry?.firstMaterial?.emission.contents = cursorColor
-
-        input.update(
-            normalizedPoint: CGPoint(x: CGFloat(normalizedX), y: CGFloat(normalizedY)),
-            pinch: sample.isPinching,
-            webView: browser
-        )
+        pointerDotNode.geometry?.firstMaterial?.diffuse.contents = color
+        pointerDotNode.geometry?.firstMaterial?.emission.contents = color
+        pointerNode.simdScale = SIMD3<Float>(repeating: active ? 0.82 : 1.0)
     }
 
-    /// ARCamera.unprojectPoint кладёт луч на локальную плоскость XZ,
-    /// где нормалью служит локальная Y. Панель же лежит в XY — переставляем оси.
-    private func browserPlaneForUnprojection(_ transform: simd_float4x4) -> simd_float4x4 {
-        var result = matrix_identity_float4x4
-        result.columns.0 = transform.columns.0                       // right
-        result.columns.1 = transform.columns.2                       // normal → local Y
-        result.columns.2 = transform.columns.1                       // up
-        result.columns.3 = transform.columns.3
-        return result
+    private func highlightToolbar(_ index: Int?) {
+        guard highlightedToolbarIndex != index else { return }
+        highlightedToolbarIndex = index
+        for (position, node) in toolbarButtonNodes.enumerated() {
+            let image = MainViewController.buttonImage(
+                title: toolbarItems[position].title,
+                highlighted: position == index
+            )
+            node.geometry?.firstMaterial?.diffuse.contents = image
+            node.geometry?.firstMaterial?.emission.contents = image
+        }
     }
 
-    private func hideCursor() {
-        cursorNode.isHidden = true
+    private func hidePointerDot() {
+        pointerNode.isHidden = true
+    }
+
+    private func hidePointer() {
+        rayNode.isHidden = true
+        pointerNode.isHidden = true
+        highlightToolbar(nil)
     }
 
     private func releasePointer() {
@@ -1286,6 +1664,46 @@ final class ARStereoTrackingManager: NSObject, ARSessionDelegate {
         frame.camera.viewMatrix(for: interfaceOrientation).inverse
     }
 
+    /// Луч из точки, найденной Vision, в мировые координаты.
+    /// Считаем через интринсики камеры: никакого согласования вьюпортов.
+    func worldRay(visionPoint: CGPoint) -> WorldRay? {
+        guard let frame = latestFrameCopy else { return nil }
+
+        let resolution = frame.camera.imageResolution
+        let intrinsics = frame.camera.intrinsics
+        let fx = intrinsics[0][0]
+        let fy = intrinsics[1][1]
+        let cx = intrinsics[2][0]
+        let cy = intrinsics[2][1]
+        guard fx > 0, fy > 0 else { return nil }
+
+        // Vision отдаёт нормированные координаты ориентированного кадра
+        // (начало — левый низ). Возвращаемся в координаты сырого кадра.
+        let flipped = (interfaceOrientation == .landscapeLeft)
+        let px = Float(flipped ? (1 - visionPoint.x) : visionPoint.x) * Float(resolution.width)
+        let py = Float(flipped ? visionPoint.y : (1 - visionPoint.y)) * Float(resolution.height)
+        guard px.isFinite, py.isFinite else { return nil }
+
+        let directionInCamera = simd_normalize(SIMD3<Float>(
+            (px - cx) / fx,
+            -(py - cy) / fy,
+            -1
+        ))
+
+        let transform = frame.camera.transform
+        let rotation = simd_float3x3(
+            SIMD3<Float>(transform.columns.0.x, transform.columns.0.y, transform.columns.0.z),
+            SIMD3<Float>(transform.columns.1.x, transform.columns.1.y, transform.columns.1.z),
+            SIMD3<Float>(transform.columns.2.x, transform.columns.2.y, transform.columns.2.z)
+        )
+        let origin = SIMD3<Float>(
+            transform.columns.3.x,
+            transform.columns.3.y,
+            transform.columns.3.z
+        )
+        return WorldRay(origin: origin, direction: simd_normalize(rotation * directionInCamera))
+    }
+
     func start() {
         guard ARWorldTrackingConfiguration.isSupported else {
             onFailure?("Этот iPhone не поддерживает ARKit World Tracking.")
@@ -1317,30 +1735,6 @@ final class ARStereoTrackingManager: NSObject, ARSessionDelegate {
 
     func remove(anchor: ARAnchor) {
         session.remove(anchor: anchor)
-    }
-
-    /// Луч из кончика пальца в мир, положенный на плоскость панели.
-    /// Считаем прямо в координатах кадра камеры: так не нужно согласовывать
-    /// вьюпорт глаза с вьюпортом, в котором Vision нашёл руку.
-    func worldPointOnBrowser(
-        visionPoint: CGPoint,
-        planeTransform: simd_float4x4
-    ) -> SIMD3<Float>? {
-        guard let frame = latestFrameCopy else { return nil }
-
-        let resolution = frame.camera.imageResolution
-        let point = CGPoint(
-            x: visionPoint.x * resolution.width,
-            y: (1 - visionPoint.y) * resolution.height
-        )
-        guard point.x.isFinite, point.y.isFinite else { return nil }
-
-        return frame.camera.unprojectPoint(
-            point,
-            ontoPlane: planeTransform,
-            orientation: interfaceOrientation,
-            viewportSize: resolution
-        )
     }
 
     func session(_ session: ARSession, didUpdate frame: ARFrame) {
@@ -1391,12 +1785,25 @@ final class HandTracker {
     private let queue = DispatchQueue(label: "handar.vision", qos: .userInitiated)
     private let gate = DispatchSemaphore(value: 1)
 
-    private var lastIndexLeft: CGPoint?
-    private var lastIndexRight: CGPoint?
-    private var lastThumbLeft: CGPoint?
-    private var lastThumbRight: CGPoint?
-    private var pinchLeft = false
-    private var pinchRight = false
+    /// Сглаженные позиции и состояния щипков по каждой руке.
+    private struct HandState {
+        var index: CGPoint?
+        var middle: CGPoint?
+        var thumb: CGPoint?
+        var clickPinch = false
+        var grabPinch = false
+
+        mutating func reset() {
+            index = nil
+            middle = nil
+            thumb = nil
+            clickPinch = false
+            grabPinch = false
+        }
+    }
+
+    private var leftState = HandState()
+    private var rightState = HandState()
 
     var onUpdate: ((HandSample?, HandSample?) -> Void)?
 
@@ -1427,60 +1834,76 @@ final class HandTracker {
                 for observation in self.request.results ?? [] {
                     guard
                         let index = try? observation.recognizedPoint(.indexTip),
+                        let middle = try? observation.recognizedPoint(.middleTip),
                         let thumb = try? observation.recognizedPoint(.thumbTip),
                         let wrist = try? observation.recognizedPoint(.wrist),
-                        let middle = try? observation.recognizedPoint(.middleMCP),
-                        index.confidence > 0.68,
-                        thumb.confidence > 0.62,
+                        let middleBase = try? observation.recognizedPoint(.middleMCP),
+                        index.confidence > 0.62,
+                        middle.confidence > 0.62,
+                        thumb.confidence > 0.60,
                         wrist.confidence > 0.48,
-                        middle.confidence > 0.48
+                        middleBase.confidence > 0.48
                     else {
                         continue
                     }
 
                     let isLeft = observation.chirality == .left
-                    let oldIndex = isLeft ? self.lastIndexLeft : self.lastIndexRight
-                    let oldThumb = isLeft ? self.lastThumbLeft : self.lastThumbRight
+                    var state = isLeft ? self.leftState : self.rightState
 
-                    let indexAlpha = adaptiveAlpha(previous: oldIndex, current: index.location)
-                    let thumbAlpha = adaptiveAlpha(previous: oldThumb, current: thumb.location)
+                    let filteredIndex = smooth(
+                        state.index,
+                        index.location,
+                        alpha: adaptiveAlpha(previous: state.index, current: index.location)
+                    )
+                    let filteredMiddle = smooth(
+                        state.middle,
+                        middle.location,
+                        alpha: adaptiveAlpha(previous: state.middle, current: middle.location)
+                    )
+                    let filteredThumb = smooth(
+                        state.thumb,
+                        thumb.location,
+                        alpha: adaptiveAlpha(previous: state.thumb, current: thumb.location)
+                    )
 
-                    let filteredIndex = smooth(oldIndex, index.location, alpha: indexAlpha)
-                    let filteredThumb = smooth(oldThumb, thumb.location, alpha: thumbAlpha)
+                    // Нормируем на размер ладони: так порог не зависит от того,
+                    // насколько далеко рука от камеры.
+                    let palmSize = max(distance(wrist.location, middleBase.location), 0.03)
+                    let clickRatio = distance(filteredMiddle, filteredThumb) / palmSize
+                    let grabRatio = distance(filteredIndex, filteredThumb) / palmSize
 
-                    let palmSize = max(distance(wrist.location, middle.location), 0.03)
-                    let ratio = distance(filteredIndex, filteredThumb) / palmSize
-                    let wasPinching = isLeft ? self.pinchLeft : self.pinchRight
-                    let pinching = pinchHysteresis(previous: wasPinching, ratio: ratio)
+                    state.index = filteredIndex
+                    state.middle = filteredMiddle
+                    state.thumb = filteredThumb
+                    state.clickPinch = pinchHysteresis(previous: state.clickPinch, ratio: clickRatio)
+                    state.grabPinch = pinchHysteresis(previous: state.grabPinch, ratio: grabRatio)
+
+                    let sample = HandSample(
+                        indexTip: filteredIndex,
+                        middleTip: filteredMiddle,
+                        thumbTip: filteredThumb,
+                        clickPinch: state.clickPinch,
+                        grabPinch: state.grabPinch
+                    )
 
                     if isLeft {
-                        self.lastIndexLeft = filteredIndex
-                        self.lastThumbLeft = filteredThumb
-                        self.pinchLeft = pinching
+                        self.leftState = state
                         foundLeft = true
-                        left = HandSample(indexTip: filteredIndex, thumbTip: filteredThumb, isPinching: pinching)
+                        left = sample
                     } else {
-                        self.lastIndexRight = filteredIndex
-                        self.lastThumbRight = filteredThumb
-                        self.pinchRight = pinching
+                        self.rightState = state
                         foundRight = true
-                        right = HandSample(indexTip: filteredIndex, thumbTip: filteredThumb, isPinching: pinching)
+                        right = sample
                     }
                 }
 
-                if !foundLeft {
-                    self.lastIndexLeft = nil
-                    self.lastThumbLeft = nil
-                    self.pinchLeft = false
-                }
-                if !foundRight {
-                    self.lastIndexRight = nil
-                    self.lastThumbRight = nil
-                    self.pinchRight = false
-                }
+                if !foundLeft { self.leftState.reset() }
+                if !foundRight { self.rightState.reset() }
 
                 self.onUpdate?(left, right)
             } catch {
+                self.leftState.reset()
+                self.rightState.reset()
                 self.onUpdate?(nil, nil)
             }
         }
@@ -1574,15 +1997,16 @@ final class MainMenuView: UIView {
     private let titleLabel = UILabel()
     private let subtitleLabel = UILabel()
     private let enterButton = UIButton(type: .system)
+    private let scrollView = UIScrollView()
     private let stack = UIStackView()
     private let passthroughSwitch = UISwitch()
     private var profile: VRProfile
 
-    private let ipdRow = SliderRow(title: "Межзрачковое расстояние", unit: "мм", minimum: 52, maximum: 76)
-    private let lensRow = SliderRow(title: "Расстояние между линзами", unit: "мм", minimum: 52, maximum: 76)
-    private let depthRow = SliderRow(title: "Глаз → экран", unit: "мм", minimum: 30, maximum: 70)
-    private let k1Row = SliderRow(title: "Дисторсия k1", unit: "", minimum: 0, maximum: 0.8)
-    private let k2Row = SliderRow(title: "Дисторсия k2", unit: "", minimum: -0.2, maximum: 0.6)
+    private let ipdRow = SliderRow(title: "Межзрачковое расстояние", unit: "мм", minimum: 52, maximum: 76, step: 0.5)
+    private let lensRow = SliderRow(title: "Расстояние между линзами", unit: "мм", minimum: 52, maximum: 76, step: 0.5)
+    private let depthRow = SliderRow(title: "Глаз → экран", unit: "мм", minimum: 30, maximum: 70, step: 0.5)
+    private let k1Row = SliderRow(title: "Дисторсия k1", unit: "", minimum: 0, maximum: 0.8, step: 0.005)
+    private let k2Row = SliderRow(title: "Дисторсия k2", unit: "", minimum: -0.2, maximum: 0.6, step: 0.005)
 
     init(frame: CGRect, profile: VRProfile) {
         self.profile = profile
@@ -1599,12 +2023,12 @@ final class MainMenuView: UIView {
     private func build() {
         titleLabel.text = "HandAR Vision"
         titleLabel.textColor = .white
-        titleLabel.font = .systemFont(ofSize: 30, weight: .medium)
+        titleLabel.font = .systemFont(ofSize: 26, weight: .medium)
         titleLabel.textAlignment = .center
 
         subtitleLabel.text = "Вставь телефон в шлем и подгони линзы под себя"
-        subtitleLabel.textColor = UIColor.white.withAlphaComponent(0.58)
-        subtitleLabel.font = .systemFont(ofSize: 14, weight: .regular)
+        subtitleLabel.textColor = UIColor.white.withAlphaComponent(0.55)
+        subtitleLabel.font = .systemFont(ofSize: 13, weight: .regular)
         subtitleLabel.textAlignment = .center
 
         var config = UIButton.Configuration.filled()
@@ -1614,7 +2038,7 @@ final class MainMenuView: UIView {
         config.cornerStyle = .capsule
         config.contentInsets = NSDirectionalEdgeInsets(top: 0, leading: 34, bottom: 0, trailing: 34)
         enterButton.configuration = config
-        enterButton.titleLabel?.font = .systemFont(ofSize: 18, weight: .semibold)
+        enterButton.titleLabel?.font = .systemFont(ofSize: 17, weight: .semibold)
         enterButton.addAction(UIAction { [weak self] _ in self?.onEnter?() }, for: .touchUpInside)
 
         let passLabel = UILabel()
@@ -1627,22 +2051,40 @@ final class MainMenuView: UIView {
         let passRow = UIStackView(arrangedSubviews: [passLabel, UIView(), passthroughSwitch])
         passRow.axis = .horizontal
         passRow.spacing = 12
+        passRow.alignment = .center
+
+        let resetButton = UIButton(type: .system)
+        resetButton.setTitle("Сбросить калибровку", for: .normal)
+        resetButton.setTitleColor(UIColor(red: 0.45, green: 0.78, blue: 1.0, alpha: 1), for: .normal)
+        resetButton.titleLabel?.font = .systemFont(ofSize: 13, weight: .regular)
+        resetButton.contentHorizontalAlignment = .leading
+        resetButton.addAction(UIAction { [weak self] _ in self?.resetProfile() }, for: .touchUpInside)
 
         stack.axis = .vertical
-        stack.spacing = 8
+        stack.spacing = 14
         for row in [ipdRow, lensRow, depthRow, k1Row, k2Row] {
             row.onChange = { [weak self] in self?.collect() }
             stack.addArrangedSubview(row)
         }
         stack.addArrangedSubview(passRow)
+        stack.addArrangedSubview(resetButton)
 
-        for subview in [titleLabel, subtitleLabel, stack, enterButton] as [UIView] {
+        // Пять ползунков не помещаются в ландшафт по высоте, поэтому
+        // блок калибровки прокручивается, а кнопка входа закреплена внизу.
+        scrollView.alwaysBounceVertical = true
+        scrollView.showsVerticalScrollIndicator = true
+        scrollView.indicatorStyle = .white
+
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        scrollView.addSubview(stack)
+
+        for subview in [titleLabel, subtitleLabel, scrollView, enterButton] as [UIView] {
             subview.translatesAutoresizingMaskIntoConstraints = false
             addSubview(subview)
         }
 
         NSLayoutConstraint.activate([
-            titleLabel.topAnchor.constraint(equalTo: safeAreaLayoutGuide.topAnchor, constant: 10),
+            titleLabel.topAnchor.constraint(equalTo: safeAreaLayoutGuide.topAnchor, constant: 8),
             titleLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 24),
             titleLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -24),
 
@@ -1650,15 +2092,21 @@ final class MainMenuView: UIView {
             subtitleLabel.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
             subtitleLabel.trailingAnchor.constraint(equalTo: titleLabel.trailingAnchor),
 
-            stack.topAnchor.constraint(equalTo: subtitleLabel.bottomAnchor, constant: 10),
-            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 48),
-            stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -48),
+            scrollView.topAnchor.constraint(equalTo: subtitleLabel.bottomAnchor, constant: 10),
+            scrollView.leadingAnchor.constraint(equalTo: safeAreaLayoutGuide.leadingAnchor, constant: 40),
+            scrollView.trailingAnchor.constraint(equalTo: safeAreaLayoutGuide.trailingAnchor, constant: -40),
+            scrollView.bottomAnchor.constraint(equalTo: enterButton.topAnchor, constant: -10),
 
-            enterButton.topAnchor.constraint(greaterThanOrEqualTo: stack.bottomAnchor, constant: 10),
+            stack.topAnchor.constraint(equalTo: scrollView.contentLayoutGuide.topAnchor),
+            stack.bottomAnchor.constraint(equalTo: scrollView.contentLayoutGuide.bottomAnchor),
+            stack.leadingAnchor.constraint(equalTo: scrollView.contentLayoutGuide.leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: scrollView.contentLayoutGuide.trailingAnchor),
+            stack.widthAnchor.constraint(equalTo: scrollView.frameLayoutGuide.widthAnchor),
+
             enterButton.centerXAnchor.constraint(equalTo: centerXAnchor),
-            enterButton.widthAnchor.constraint(equalToConstant: 240),
-            enterButton.heightAnchor.constraint(equalToConstant: 50),
-            enterButton.bottomAnchor.constraint(equalTo: safeAreaLayoutGuide.bottomAnchor, constant: -12)
+            enterButton.widthAnchor.constraint(equalToConstant: 230),
+            enterButton.heightAnchor.constraint(equalToConstant: 46),
+            enterButton.bottomAnchor.constraint(equalTo: safeAreaLayoutGuide.bottomAnchor, constant: -10)
         ])
     }
 
@@ -1681,50 +2129,78 @@ final class MainMenuView: UIView {
         profile.save()
         onProfileChange?(profile)
     }
+
+    private func resetProfile() {
+        var fresh = VRProfile.makeDefault()
+        fresh.passthrough = profile.passthrough
+        profile = fresh
+        applyProfile()
+        profile.save()
+        onProfileChange?(profile)
+    }
 }
 
-/// Подпись, значение и ползунок в одной строке.
+/// Подпись, значение, ползунок и пара кнопок точной подстройки.
 final class SliderRow: UIView {
     var onChange: (() -> Void)?
 
     private let titleLabel = UILabel()
     private let valueLabel = UILabel()
     private let slider = UISlider()
+    private let minusButton = UIButton(type: .system)
+    private let plusButton = UIButton(type: .system)
     private let unit: String
+    private let step: Float
 
     var value: Float {
         get { slider.value }
         set {
-            slider.value = newValue
+            slider.value = min(max(newValue, slider.minimumValue), slider.maximumValue)
             refresh()
         }
     }
 
-    init(title: String, unit: String, minimum: Float, maximum: Float) {
+    init(title: String, unit: String, minimum: Float, maximum: Float, step: Float) {
         self.unit = unit
+        self.step = step
         super.init(frame: .zero)
 
         titleLabel.text = title
         titleLabel.textColor = .white
         titleLabel.font = .systemFont(ofSize: 13)
+        titleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
-        valueLabel.textColor = UIColor.white.withAlphaComponent(0.7)
+        valueLabel.textColor = UIColor.white.withAlphaComponent(0.75)
         valueLabel.font = .monospacedDigitSystemFont(ofSize: 13, weight: .regular)
         valueLabel.textAlignment = .right
+        valueLabel.setContentHuggingPriority(.required, for: .horizontal)
 
         slider.minimumValue = minimum
         slider.maximumValue = maximum
+        slider.minimumTrackTintColor = UIColor(red: 0.38, green: 0.78, blue: 1.0, alpha: 1)
+        slider.isContinuous = true
         slider.addAction(UIAction { [weak self] _ in
             self?.refresh()
             self?.onChange?()
         }, for: .valueChanged)
 
+        // Ползунком в 40 точек шириной точное значение не поймать,
+        // поэтому рядом кнопки на один шаг.
+        configureStepButton(minusButton, title: "−", delta: -step)
+        configureStepButton(plusButton, title: "+", delta: step)
+
         let header = UIStackView(arrangedSubviews: [titleLabel, valueLabel])
         header.axis = .horizontal
+        header.spacing = 8
 
-        let container = UIStackView(arrangedSubviews: [header, slider])
+        let controls = UIStackView(arrangedSubviews: [minusButton, slider, plusButton])
+        controls.axis = .horizontal
+        controls.spacing = 10
+        controls.alignment = .center
+
+        let container = UIStackView(arrangedSubviews: [header, controls])
         container.axis = .vertical
-        container.spacing = 0
+        container.spacing = 2
         container.translatesAutoresizingMaskIntoConstraints = false
         addSubview(container)
 
@@ -1732,12 +2208,29 @@ final class SliderRow: UIView {
             container.topAnchor.constraint(equalTo: topAnchor),
             container.bottomAnchor.constraint(equalTo: bottomAnchor),
             container.leadingAnchor.constraint(equalTo: leadingAnchor),
-            container.trailingAnchor.constraint(equalTo: trailingAnchor)
+            container.trailingAnchor.constraint(equalTo: trailingAnchor),
+            minusButton.widthAnchor.constraint(equalToConstant: 34),
+            minusButton.heightAnchor.constraint(equalToConstant: 30),
+            plusButton.widthAnchor.constraint(equalToConstant: 34),
+            plusButton.heightAnchor.constraint(equalToConstant: 30)
         ])
     }
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
+    }
+
+    private func configureStepButton(_ button: UIButton, title: String, delta: Float) {
+        button.setTitle(title, for: .normal)
+        button.titleLabel?.font = .systemFont(ofSize: 18, weight: .medium)
+        button.setTitleColor(.white, for: .normal)
+        button.backgroundColor = UIColor(white: 0.18, alpha: 1)
+        button.layer.cornerRadius = 8
+        button.addAction(UIAction { [weak self] _ in
+            guard let self else { return }
+            self.value = self.slider.value + delta
+            self.onChange?()
+        }, for: .touchUpInside)
     }
 
     private func refresh() {

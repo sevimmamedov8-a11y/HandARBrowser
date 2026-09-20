@@ -1,14 +1,19 @@
-HANDAR VISION V29 — настоящий VR-режим
+HANDAR VISION V30 — настоящий VR-режим
 
-Что изменилось: split-screen заменён на полный стереоконвейер.
-Асимметричные фрустумы под линзы, barrel-предыскажение в Metal,
-сквозное видео отдельно для каждого глаза, панель браузера одна
-и закреплена в мире. Подробности — в README_RU.md.
+V29: split-screen заменён на полный стереоконвейер — асимметричные
+фрустумы под линзы, barrel-предыскажение в Metal, сквозное видео
+отдельно для каждого глаза, панель браузера одна и закреплена в мире.
+
+V30: указатель стал лучом из пальца с точкой в месте попадания;
+нажатие — средний + большой палец; захват панели — указательный +
+большой в нижней трети кадра; над браузером планка Google / YouTube /
+TikTok / Назад; меню калибровки теперь прокручивается и у ползунков
+есть кнопки точного шага. Подробности — в README_RU.md.
 
 Как собрать:
 1) Содержимое этой папки помести в корень репозитория HandARBrowser
    (файлы перезаписать, папку .git из архива не копировать).
-2) GitHub Desktop: Commit Summary = V29: real VR stereo pipeline
+2) GitHub Desktop: Commit Summary = V30: ray pointer, split gestures, panel drag, site toolbar
 3) Commit to main -> Push origin.
 4) GitHub -> Actions -> Build HandAR Vision IPA.
 5) Скачай artifact HandARBrowser-IPA, внутри HandARBrowser-unsigned.ipa.
@@ -16,7 +21,7 @@ HANDAR VISION V29 — настоящий VR-режим
 
 Файлы, которые изменились:
 - HandARBrowser/MainViewController.swift   (переписан целиком)
-- HandARBrowser/Info.plist                 (версия 1.1 / build 29)
+- HandARBrowser/Info.plist                 (версия 1.2 / build 30)
 - HandARBrowser.xcodeproj/project.pbxproj  (+ Metal, MetalKit в OTHER_LDFLAGS)
 - Scripts/CHECK_PROJECT.command            (проверки под новую архитектуру)
 - .github/workflows/build-ipa.yml          (название сборки)

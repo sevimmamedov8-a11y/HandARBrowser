@@ -2,7 +2,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
-echo "== Hand AR Browser V29 project check =="
+echo "== Hand AR Browser V30 project check =="
 for f in "HandARBrowser.xcodeproj/project.pbxproj" "HandARBrowser/AppDelegate.swift" "HandARBrowser/MainViewController.swift" "HandARBrowser/Info.plist" "HandARBrowser/WebInput.js"; do
   [[ -f "$f" ]] && echo "[OK] $f" || { echo "[FAIL] missing $f"; exit 1; }
 done
@@ -21,7 +21,7 @@ grep -Fq "final class ARStereoTrackingManager" "$SRC"
 grep -Fq "ARSessionDelegate" "$SRC"
 grep -Fq "didUpdate anchors: [ARAnchor]" "$SRC"
 grep -Fq "frame.camera.viewMatrix(for: interfaceOrientation).inverse" "$SRC"
-grep -Fq "frame.camera.unprojectPoint" "$SRC"
+grep -Fq "func worldRay(visionPoint: CGPoint) -> WorldRay?" "$SRC"
 
 # --- real VR: lens geometry, per-eye frustums, distortion ---
 grep -Fq "struct VRProfile" "$SRC"
@@ -44,6 +44,27 @@ grep -Fq "headNode.addChildNode(rightCameraNode)" "$SRC"
 grep -Fq "profile.ipdMM * 0.0005" "$SRC"
 grep -Fq "browserWorldDistance: Float = 1.55" "$SRC"
 
+# --- ray pointer, split gestures, drag, toolbar ---
+grep -Fq "struct WorldRay" "$SRC"
+grep -Fq "let clickPinch: Bool" "$SRC"
+grep -Fq "let grabPinch: Bool" "$SRC"
+grep -Fq "recognizedPoint(.middleTip)" "$SRC"
+grep -Fq "private let rayNode = SCNNode()" "$SRC"
+grep -Fq "private let pointerRingNode = SCNNode()" "$SRC"
+grep -Fq "private func planeHit(" "$SRC"
+grep -Fq "private func updateDrag(with ray: WorldRay)" "$SRC"
+grep -Fq "dragZoneHeight" "$SRC"
+grep -Fq "struct ToolbarItem" "$SRC"
+grep -Fq "youTubeURL" "$SRC"
+grep -Fq "tikTokURL" "$SRC"
+grep -Fq "m.youtube.com" "$SRC"
+grep -Fq "www.tiktok.com" "$SRC"
+
+# --- menu must scroll: five sliders do not fit a landscape screen ---
+grep -Fq "private let scrollView = UIScrollView()" "$SRC"
+grep -Fq "scrollView.contentLayoutGuide" "$SRC"
+grep -Fq "minimum: Float, maximum: Float, step: Float" "$SRC"
+
 # --- browser surface and input ---
 grep -Fq "private let browser: WKWebView = {" "$SRC"
 grep -Fq "input.update(" "$SRC"
@@ -63,8 +84,11 @@ grep -Fq "NSCameraUsageDescription" HandARBrowser/Info.plist
 ! grep -Fq "fillEllipse" "$SRC"
 ! grep -Fq "private let browserLeft" "$SRC"
 ! grep -Fq "private let browserRight" "$SRC"
+! grep -Fq "browserPlaneForUnprojection" "$SRC"
+! grep -Fq "let isPinching: Bool" "$SRC"
+! grep -Fq "cursorNode" "$SRC"
 
-echo "[OK] V29 static project checks"
+echo "[OK] V30 static project checks"
 
 if command -v swiftc >/dev/null 2>&1; then
   # Parser-only validation can fail on Linux because Apple SDK modules are unavailable;

@@ -694,7 +694,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
 
         SCNTransaction.begin()
         SCNTransaction.animationDuration = 0.32
-        SCNTransaction.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        SCNTransaction.animationTimingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
         browserPlaneGeometry.width = CGFloat(width)
         browserPlaneGeometry.height = CGFloat(height)
         browserFrameGeometry.width = CGFloat(width) + 0.018

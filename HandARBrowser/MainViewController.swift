@@ -1097,15 +1097,18 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         config.allowsInlineMediaPlayback = true
         config.mediaTypesRequiringUserActionForPlayback = []
         config.allowsPictureInPictureMediaPlayback = false
-        config.preferences.isElementFullscreenEnabled = false
+        config.allowsAirPlayForMediaPlayback = false
         config.websiteDataStore = browser.configuration.websiteDataStore
-        config.processPool = browser.configuration.processPool
 
         let ucc = WKUserContentController()
-        if let path = Bundle.main.path(forResource: "WebInput", ofType: "js"),
-           let js = try? String(contentsOfFile: path, encoding: .utf8) {
-            ucc.addUserScript(WKUserScript(source: js, injectionTime: .atDocumentStart, forMainFrameOnly: false))
-        }
+        // В прямом видеорежиме не подключаем WebInput.js целиком: тот скрипт
+        // перехватывает Fullscreen API YouTube. Для live video нужен обычный
+        // медиапуть WebKit, поэтому здесь оставляем только pointer/mouse bridge.
+        ucc.addUserScript(WKUserScript(
+            source: Self.directVideoPointerScript,
+            injectionTime: .atDocumentStart,
+            forMainFrameOnly: false
+        ))
         ucc.addUserScript(WKUserScript(
             source: Self.directVideoRoleScript(role: role),
             injectionTime: .atDocumentEnd,
@@ -1116,6 +1119,8 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         let webView = WKWebView(frame: .zero, configuration: config)
         webView.navigationDelegate = self
         webView.uiDelegate = self
+        // Не делаем WKWebView прозрачным/маскированным: аппаратный video layer
+        // WebKit должен иметь обычный прямоугольный слой для композитинга.
         webView.isOpaque = true
         webView.alpha = 1
         webView.isHidden = false
@@ -1124,10 +1129,42 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         webView.backgroundColor = .black
         webView.scrollView.backgroundColor = .black
         webView.scrollView.bounces = false
+        webView.scrollView.contentInsetAdjustmentBehavior = .never
         webView.allowsBackForwardNavigationGestures = false
-        webView.customUserAgent = browser.customUserAgent
         return webView
     }
+
+    private static let directVideoPointerScript = """
+    (function(){
+      const active = new Map();
+      function el(x,y){ return document.elementFromPoint(x,y) || document.body; }
+      window.__handarHover=function(x,y){};
+      window.__handarPointerDown=function(x,y,id){
+        active.set(id,{x:x,y:y});
+        const target=el(x,y);
+        target.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true,cancelable:true,pointerId:id,pointerType:'mouse',clientX:x,clientY:y,buttons:1}));
+        target.dispatchEvent(new MouseEvent('mousedown',{bubbles:true,cancelable:true,clientX:x,clientY:y,buttons:1}));
+      };
+      window.__handarPointerMove=function(x,y,id){
+        const target=el(x,y);
+        target.dispatchEvent(new PointerEvent('pointermove',{bubbles:true,cancelable:true,pointerId:id,pointerType:'mouse',clientX:x,clientY:y,buttons:1}));
+        target.dispatchEvent(new MouseEvent('mousemove',{bubbles:true,cancelable:true,clientX:x,clientY:y,buttons:1}));
+        active.set(id,{x:x,y:y});
+      };
+      window.__handarPointerUp=function(x,y,id){
+        const a=active.get(id)||{x:x,y:y};
+        const target=el(x,y);
+        target.dispatchEvent(new PointerEvent('pointerup',{bubbles:true,cancelable:true,pointerId:id,pointerType:'mouse',clientX:x,clientY:y,buttons:0}));
+        target.dispatchEvent(new MouseEvent('mouseup',{bubbles:true,cancelable:true,clientX:x,clientY:y,buttons:0}));
+        if(Math.hypot(x-a.x,y-a.y)<52){
+          const clickable=target.closest('button,a,input,select,textarea,[role=button]')||target;
+          clickable.dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true,clientX:x,clientY:y}));
+          if(typeof clickable.click==='function'){try{clickable.click();}catch(e){}}
+        }
+        active.delete(id);
+      };
+    })();
+    """
 
     private static func directVideoRoleScript(role: String) -> String {
         let muted = role == "right" ? "true" : "false"
@@ -1137,33 +1174,43 @@ final class MainViewController: UIViewController, MTKViewDelegate {
           window.__handarDirectMuted = \(muted);
           function video(){
             var all=[].slice.call(document.querySelectorAll('video'));
-            all.sort(function(a,b){return (b.clientWidth*b.clientHeight)-(a.clientWidth*a.clientHeight);});
+            all.sort(function(a,b){
+              return (b.getBoundingClientRect().width*b.getBoundingClientRect().height)-
+                     (a.getBoundingClientRect().width*a.getBoundingClientRect().height);
+            });
             return all[0]||null;
           }
           window.__handarTuneDirectVideo=function(){
             var v=video(); if(!v) return;
             try{v.setAttribute('playsinline','');v.setAttribute('webkit-playsinline','');v.playsInline=true;}catch(e){}
             try{v.muted=window.__handarDirectMuted;v.volume=window.__handarDirectMuted?0:1;}catch(e){}
-          };
-          window.__handarDirectPlay=function(){
-            var v=video(); if(!v) return;
-            try{v.muted=false;v.volume=1;}catch(e){}
             try{
               v.style.setProperty('display','block','important');
               v.style.setProperty('visibility','visible','important');
               v.style.setProperty('opacity','1','important');
-              v.style.setProperty('background-color','#000','important');
               v.style.setProperty('object-fit','contain','important');
-              v.style.setProperty('transform','translateZ(0)','important');
+              v.style.setProperty('width','100%','important');
+              v.style.setProperty('height','100%','important');
+              v.style.setProperty('transform','translate3d(0,0,0)','important');
+              v.style.setProperty('background','#000','important');
             }catch(e){}
+          };
+          window.__handarDirectPlay=function(){
+            var v=video(); if(!v) return;
+            window.__handarTuneDirectVideo();
             try{var p=v.play();if(p&&p.catch){p.catch(function(){})}}catch(e){}
           };
           var style=document.createElement('style');
-          style.textContent='html,body{background:#000!important;margin:0!important;} video{display:block!important;visibility:visible!important;opacity:1!important;transform:translateZ(0)!important;}';
+          style.textContent='html,body{background:#000!important;margin:0!important;padding:0!important;width:100%!important;height:100%!important;overflow:hidden!important;} body{min-height:100%!important;} video{display:block!important;visibility:visible!important;opacity:1!important;object-fit:contain!important;width:100%!important;height:100%!important;transform:translate3d(0,0,0)!important;background:#000!important;}';
           (document.head||document.documentElement).appendChild(style);
-          setInterval(window.__handarTuneDirectVideo,800);
-          setTimeout(window.__handarTuneDirectVideo,50);
-          setTimeout(window.__handarDirectPlay,600);
+          document.addEventListener('touchstart', function(){window.__handarDirectPlay();},{passive:true});
+          document.addEventListener('click', function(){window.__handarDirectPlay();}, true);
+          var observer=new MutationObserver(function(){window.__handarTuneDirectVideo();});
+          if(document.documentElement){observer.observe(document.documentElement,{childList:true,subtree:true});}
+          setInterval(window.__handarTuneDirectVideo,500);
+          setTimeout(window.__handarTuneDirectVideo,100);
+          setTimeout(window.__handarDirectPlay,900);
+          setTimeout(window.__handarDirectPlay,1800);
         })();
         """
     }
@@ -1223,14 +1270,42 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         directVideoStage.bringSubviewToFront(directVideoPointer)
         view.bringSubviewToFront(directVideoStage)
 
-        let request = URLRequest(url: url, cachePolicy: .useProtocolCachePolicy, timeoutInterval: 30)
-        directVideoLeft.load(request)
-        directVideoRight.load(request)
+        // YouTube watch/mobile pages contain a large DOM around the player. In
+        // VR we load the dedicated embed player instead, so WebKit presents a
+        // single video surface without the surrounding page compositor.
+        if let id = Self.youtubeVideoID(from: url),
+           let embedURL = URL(string: "https://www.youtube.com/embed/\(id)?playsinline=1&autoplay=1&controls=1&fs=0&rel=0&modestbranding=1&enablejsapi=1&iv_load_policy=1") {
+            directVideoLeft.load(URLRequest(url: embedURL, cachePolicy: .useProtocolCachePolicy, timeoutInterval: 30))
+            directVideoRight.load(URLRequest(url: embedURL, cachePolicy: .useProtocolCachePolicy, timeoutInterval: 30))
+        } else {
+            let request = URLRequest(url: url, cachePolicy: .useProtocolCachePolicy, timeoutInterval: 30)
+            directVideoLeft.load(request)
+            directVideoRight.load(request)
+        }
 
         directVideoSyncTimer?.invalidate()
-        directVideoSyncTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
+        directVideoSyncTimer = Timer.scheduledTimer(withTimeInterval: 0.20, repeats: true) { [weak self] _ in
             self?.syncDirectVideoEyes()
         }
+    }
+
+    private static func youtubeVideoID(from url: URL) -> String? {
+        let host = (url.host ?? "").lowercased()
+        guard host.contains("youtube.com") || host.contains("youtube-nocookie.com") || host == "youtu.be" || host.hasSuffix(".youtu.be") else { return nil }
+        if host == "youtu.be" || host.hasSuffix(".youtu.be") {
+            let value = url.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            return value.isEmpty ? nil : value.components(separatedBy: "/").first
+        }
+        if let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+           let value = components.queryItems?.first(where: { $0.name == "v" })?.value,
+           !value.isEmpty {
+            return value
+        }
+        let parts = url.path.split(separator: "/").map(String.init)
+        if let index = parts.firstIndex(where: { $0 == "shorts" || $0 == "embed" || $0 == "live" }), index + 1 < parts.count {
+            return parts[index + 1]
+        }
+        return nil
     }
 
     private func hideDirectVideoStage() {

@@ -2518,6 +2518,10 @@ final class MainMenuView: UIView {
     private let depthRow = SliderRow(title: "Глаз → экран", unit: "мм", minimum: 30, maximum: 70, step: 0.5)
     private let k1Row = SliderRow(title: "Дисторсия k1", unit: "", minimum: 0, maximum: 0.8, step: 0.005)
     private let k2Row = SliderRow(title: "Дисторсия k2", unit: "", minimum: -0.2, maximum: 0.6, step: 0.005)
+    // Насколько плотно картинка заполняет круглую линзу. 1.0 — без запаса
+    // (может остаться чёрное кольцо перед самым краем круга под линзами
+    // с сильной кривизной), больше — картинка тянется дальше к краю круга.
+    private let fovRow = SliderRow(title: "Заполнение линзы", unit: "×", minimum: 1.0, maximum: 1.8, step: 0.02)
 
     init(frame: CGRect, profile: VRProfile) {
         self.profile = profile
@@ -2573,7 +2577,7 @@ final class MainMenuView: UIView {
 
         stack.axis = .vertical
         stack.spacing = 14
-        for row in [ipdRow, lensRow, depthRow, k1Row, k2Row] {
+        for row in [ipdRow, lensRow, depthRow, k1Row, k2Row, fovRow] {
             row.onChange = { [weak self] in self?.collect() }
             stack.addArrangedSubview(row)
         }
@@ -2627,6 +2631,7 @@ final class MainMenuView: UIView {
         depthRow.value = profile.eyeToScreenMM
         k1Row.value = profile.k1
         k2Row.value = profile.k2
+        fovRow.value = profile.fovScale
         passthroughSwitch.isOn = profile.passthrough
     }
 
@@ -2636,6 +2641,7 @@ final class MainMenuView: UIView {
         profile.eyeToScreenMM = depthRow.value
         profile.k1 = k1Row.value
         profile.k2 = k2Row.value
+        profile.fovScale = fovRow.value
         profile.passthrough = passthroughSwitch.isOn
         profile.save()
         onProfileChange?(profile)

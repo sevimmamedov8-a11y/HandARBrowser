@@ -146,8 +146,8 @@ type` / `property 'toolbarItems' ... cannot override a property with type
 V37: вместо видимого скелета поверх браузера композятся настоящие пиксели рук из камеры по маске Vision.
 
 
-### V38 — исправление неравномерного сведения глаз
+### V39 — исправление неравномерного сведения глаз
 - `VRLensMath.frustum` переведён на симметричный FOV для обеих половин дисплея.
 - `lensCenterUV` закреплён на `0.5` по горизонтали для обоих глаз.
 - `ipdMM` теперь влияет только на физическое разнесение камер.
-- Обновлён `CFBundleVersion` до 38 и `CHECK_PROJECT.command` до V38.
+- Обновлён `CFBundleVersion` до 38 и `CHECK_PROJECT.command` до V39.

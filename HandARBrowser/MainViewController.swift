@@ -1583,7 +1583,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
             context.fillPath()
         }
 
-        let fingerWidth = max(8, min(28, handMaskHeight * 0.055))
+        let fingerWidth = max(CGFloat(8), min(CGFloat(28), CGFloat(handMaskHeight) * 0.055))
         let palmWidth = fingerWidth * 1.35
         for (a, b) in Self.handMaskBonePairs {
             guard let pa = sample.joints[a].map(toRawCameraPoint),

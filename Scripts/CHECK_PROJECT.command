@@ -2,7 +2,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
-echo "== Hand AR Browser V39 project check =="
+echo "== Hand AR Browser V40 project check =="
 for f in "HandARBrowser.xcodeproj/project.pbxproj" "HandARBrowser/AppDelegate.swift" "HandARBrowser/MainViewController.swift" "HandARBrowser/Info.plist" "HandARBrowser/WebInput.js"; do
   [[ -f "$f" ]] && echo "[OK] $f" || { echo "[FAIL] missing $f"; exit 1; }
 done
@@ -61,6 +61,8 @@ grep -Fq "handarVideo" "$JS"
 grep -Fq "fullscreenchange" "$JS"
 grep -Fq "webkitbeginfullscreen" "$JS"
 grep -Fq "findDominantVideo" "$JS"
+grep -Fq "webkitEnterFullscreen" "$JS"
+grep -Fq "handar-inline-video-fullscreen" "$JS"
 
 # --- ray pointer, split gestures, drag, toolbar ---
 grep -Fq "struct WorldRay" "$SRC"
@@ -102,6 +104,9 @@ grep -Fq "minimum: Float, maximum: Float, step: Float" "$SRC"
 # --- browser surface and input ---
 grep -Fq "private let browser: WKWebView = {" "$SRC"
 grep -Fq "input.update(" "$SRC"
+grep -Fq "config.allowsPictureInPictureMediaPlayback = false" "$SRC"
+grep -Fq "config.preferences.isElementFullscreenEnabled = false" "$SRC"
+grep -Fq "let maxLensRadius = min(0.5" "$SRC"
 
 grep -Fq "HandAR Vision" HandARBrowser/Info.plist
 grep -Fq "NSCameraUsageDescription" HandARBrowser/Info.plist
@@ -121,7 +126,7 @@ grep -Fq "NSCameraUsageDescription" HandARBrowser/Info.plist
 ! grep -Fq "let isPinching: Bool" "$SRC"
 ! grep -Fq "cursorNode" "$SRC"
 
-echo "[OK] V39 static project checks"
+echo "[OK] V40 static project checks"
 
 if command -v swiftc >/dev/null 2>&1; then
   # Parser-only validation can fail on Linux because Apple SDK modules are unavailable;

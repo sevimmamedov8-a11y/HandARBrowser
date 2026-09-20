@@ -109,5 +109,165 @@
   }
   startObservingWhenReady();
 
-  window.addEventListener('pagehide', function () { postVideoState(false); });
+  // --- VR inline fullscreen --------------------------------------------------
+  // YouTube/TikTok могут вызвать fullscreen у <video>. На iPhone такой вызов
+  // способен создать отдельный системный видеоплеер, а HandAR должен держать
+  // видео внутри WKWebView, чтобы оно попало в тот же стерео-VR-композитор.
+  const handarPatchedVideos = new WeakSet();
+  let handarFullscreenVideo = null;
+
+  function videoContainer(video) {
+    return video.closest('.html5-video-player, .html5-video-container, .video-js, .video-container, [data-video-player]')
+      || video.parentElement
+      || video;
+  }
+
+  function enterInlineFullscreen(video) {
+    if (!(video instanceof HTMLVideoElement)) return;
+    const container = videoContainer(video);
+    handarFullscreenVideo = video;
+    container.classList.add('handar-inline-video-fullscreen');
+    video.classList.add('handar-inline-video-element');
+    document.documentElement.classList.add('handar-video-fullscreen');
+    if (document.body) document.body.classList.add('handar-video-fullscreen');
+    try { video.play(); } catch (e) {}
+    postVideoState(true);
+  }
+
+  function exitInlineFullscreen() {
+    if (!handarFullscreenVideo) {
+      document.documentElement.classList.remove('handar-video-fullscreen');
+      if (document.body) document.body.classList.remove('handar-video-fullscreen');
+      postVideoState(false);
+      return;
+    }
+    const video = handarFullscreenVideo;
+    const container = videoContainer(video);
+    container.classList.remove('handar-inline-video-fullscreen');
+    video.classList.remove('handar-inline-video-element');
+    document.documentElement.classList.remove('handar-video-fullscreen');
+    if (document.body) document.body.classList.remove('handar-video-fullscreen');
+    handarFullscreenVideo = null;
+    postVideoState(false);
+  }
+
+  function patchVideo(video) {
+    if (!(video instanceof HTMLVideoElement) || handarPatchedVideos.has(video)) return;
+    handarPatchedVideos.add(video);
+    video.setAttribute('playsinline', '');
+    video.setAttribute('webkit-playsinline', '');
+    try { video.playsInline = true; } catch (e) {}
+
+    const enter = function () { enterInlineFullscreen(video); };
+    try {
+      Object.defineProperty(video, 'webkitEnterFullscreen', {
+        configurable: true,
+        value: enter
+      });
+    } catch (e) {
+      try { video.webkitEnterFullscreen = enter; } catch (ignored) {}
+    }
+  }
+
+  function patchVideos(root) {
+    if (!root || !root.querySelectorAll) return;
+    root.querySelectorAll('video').forEach(patchVideo);
+    if (root instanceof HTMLVideoElement) patchVideo(root);
+  }
+
+  const fullscreenStyle = document.createElement('style');
+  fullscreenStyle.textContent = `
+    html.handar-video-fullscreen,
+    body.handar-video-fullscreen {
+      width: 100% !important;
+      height: 100% !important;
+      overflow: hidden !important;
+      background: #000 !important;
+    }
+    .handar-inline-video-fullscreen {
+      position: fixed !important;
+      inset: 0 !important;
+      width: 100vw !important;
+      height: 100vh !important;
+      max-width: none !important;
+      max-height: none !important;
+      z-index: 2147483646 !important;
+      background: #000 !important;
+      overflow: hidden !important;
+      margin: 0 !important;
+    }
+    .handar-inline-video-fullscreen video,
+    .handar-inline-video-element {
+      width: 100% !important;
+      height: 100% !important;
+      max-width: none !important;
+      max-height: none !important;
+      object-fit: contain !important;
+    }
+  `;
+  (document.head || document.documentElement).appendChild(fullscreenStyle);
+
+  if (Element.prototype.requestFullscreen) {
+    const oldRequestFullscreen = Element.prototype.requestFullscreen;
+    Element.prototype.requestFullscreen = function () {
+      const video = this instanceof HTMLVideoElement ? this : (this.querySelector ? this.querySelector('video') : null);
+      if (video) {
+        enterInlineFullscreen(video);
+        return Promise.resolve();
+      }
+      return oldRequestFullscreen.apply(this, arguments);
+    };
+  }
+
+  if (Element.prototype.webkitRequestFullscreen) {
+    const oldWebkitRequestFullscreen = Element.prototype.webkitRequestFullscreen;
+    Element.prototype.webkitRequestFullscreen = function () {
+      const video = this instanceof HTMLVideoElement ? this : (this.querySelector ? this.querySelector('video') : null);
+      if (video) {
+        enterInlineFullscreen(video);
+        return;
+      }
+      return oldWebkitRequestFullscreen.apply(this, arguments);
+    };
+  }
+
+  if (document.exitFullscreen) {
+    const oldExitFullscreen = document.exitFullscreen.bind(document);
+    document.exitFullscreen = function () {
+      if (handarFullscreenVideo) {
+        exitInlineFullscreen();
+        return Promise.resolve();
+      }
+      return oldExitFullscreen();
+    };
+  }
+
+  if (document.webkitExitFullscreen) {
+    const oldWebkitExitFullscreen = document.webkitExitFullscreen.bind(document);
+    document.webkitExitFullscreen = function () {
+      if (handarFullscreenVideo) {
+        exitInlineFullscreen();
+        return;
+      }
+      return oldWebkitExitFullscreen();
+    };
+  }
+
+  const videoObserver = new MutationObserver(function () {
+    patchVideos(document);
+  });
+  function startVideoObserver() {
+    if (!document.documentElement) {
+      requestAnimationFrame(startVideoObserver);
+      return;
+    }
+    videoObserver.observe(document.documentElement, { childList: true, subtree: true });
+    patchVideos(document);
+  }
+  startVideoObserver();
+
+  window.addEventListener('pagehide', function () {
+    exitInlineFullscreen();
+    postVideoState(false);
+  });
 })();

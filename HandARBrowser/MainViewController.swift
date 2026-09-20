@@ -1,6 +1,6 @@
 //
 //  MainViewController.swift
-//  HandAR Vision — V38
+//  HandAR Vision — V40
 //
 //  Стереоконвейер
 //  Передний план: реальные пиксели рук из камеры композятся поверх браузера по маске Vision.
@@ -77,8 +77,9 @@ struct VRProfile: Codable, Equatable {
     var k2: Float = 0.0
     /// Без искусственной хроматики: картинка заполняет весь экран.
     var chroma: Float = 0.0
-    /// Радиус клиппинга больше диагонали — круглая маска отключена.
-    var lensClipRadius: Float = 10.0
+    /// Сохраняется для совместимости профиля; фактический радиус круглой
+    /// линзы вычисляется автоматически по размеру экрана.
+    var lensClipRadius: Float = 0.0
 
     /// Запас поля зрения под предыскажение. Больше — картинка плотнее
     /// заполняет круглую линзу, меньше чёрных полей по краю.
@@ -340,11 +341,12 @@ final class VRCompositor {
             }
         }
 
-        // Для fullscreen-профиля виньетка отключена: каждый глаз
-        // заполняет всю свою половину дисплея без квадратной/круглой маски.
+        // Мягкий край именно круглой линзы: внутри круга 100%, на
+        // последних ~0.008 единицы плавно уходим в чёрный.
         float vignette = 1.0;
         if (u.rClip < 5.0) {
-            vignette = smoothstep(u.rClip, u.rClip * 0.88, r);
+            float softEdge = max(u.rClip - 0.008, 0.0);
+            vignette = 1.0 - smoothstep(softEdge, u.rClip, r);
         }
         return float4(color * vignette, 1.0);
     }
@@ -426,6 +428,11 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         config.defaultWebpagePreferences.allowsContentJavaScript = true
         config.allowsInlineMediaPlayback = true
         config.mediaTypesRequiringUserActionForPlayback = []
+        config.allowsPictureInPictureMediaPlayback = false
+        // Видео не должно уходить из WKWebView в отдельный системный
+        // fullscreen-контроллер: оно остаётся частью страницы и попадает
+        // в тот же стерео-VR-композитор.
+        config.preferences.isElementFullscreenEnabled = false
 
         let controller = WKUserContentController()
         if let path = Bundle.main.path(forResource: "WebInput", ofType: "js"),
@@ -446,7 +453,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         webView.scrollView.backgroundColor = .white
         webView.scrollView.alwaysBounceVertical = true
         webView.allowsBackForwardNavigationGestures = false
-        webView.customUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15"
+        webView.customUserAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 26_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Mobile/15E148 Safari/604.1"
         return webView
     }()
     private var browserTimer: Timer?
@@ -742,15 +749,15 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         browserHandleNode = handleNode
     }
 
-    /// Плавно меняет размер панели между обычным и «кинозальным». Ручка
-    /// и рамка едут вместе с панелью: и то и другое — анимируемые свойства
-    /// геометрии, поэтому достаточно один раз обернуть их в SCNTransaction.
+    /// Переключает браузер между обычным VR-экраном и большим VR-экраном
+    /// для видео. Это всё ещё та же мировая стерео-панель: меняется только
+    /// её размер, поэтому YouTube остаётся внутри VR-композитора.
     private func setCinemaMode(_ active: Bool) {
         guard active != isCinemaMode else { return }
         isCinemaMode = active
 
         let width = active ? Self.cinemaPanelWidth : Self.defaultPanelWidth
-        let height = active ? Self.cinemaPanelHeight : Self.defaultPanelHeight
+        let height = width * Self.defaultPanelAspect
         browserWorldWidth = width
         browserWorldHeight = height
 
@@ -765,13 +772,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         toolbarNode.opacity = active ? 0 : 1
         SCNTransaction.commit()
 
-        // Ссылка над видео только мешает — во время просмотра её прячем,
-        // но саму панель ссылок не пересобираем: её разметка привязана
-        // к обычному размеру и не должна ехать вместе с экраном.
         toolbarNode.isHidden = active
-
-        // У видео своя частота обновления снимка страницы: 12 fps годится
-        // для чтения страниц, но для видео этого маловато.
         startBrowserCapture()
         UIImpactFeedbackGenerator(style: .soft).impactOccurred()
     }
@@ -1953,7 +1954,11 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         uniforms.k1 = profile.k1
         uniforms.k2 = profile.k2
         uniforms.chroma = profile.chroma
-        uniforms.rClip = profile.lensClipRadius
+        // Круглая линза максимально заполняет свою половину дисплея.
+        // Радиус ограничен и по высоте, и по ширине, поэтому окружность
+        // не превращается в овал и одинакова для обоих глаз.
+        let maxLensRadius = min(0.5, 0.5 / max(uniforms.aspect, 0.001))
+        uniforms.rClip = maxLensRadius * 0.985
         uniforms.passthrough = (profile.passthrough && hasCamera) ? 1 : 0
 
         guard let frame, profile.passthrough, hasCamera else { return uniforms }

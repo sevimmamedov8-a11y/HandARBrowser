@@ -463,6 +463,18 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     private var browserTimer: Timer?
     private var snapshotInProgress = false
 
+    // Технологический обход чёрного YouTube-video: аппаратный HTML5 video
+    // не попадает в WKWebView.takeSnapshot, поэтому в кинорежиме используем
+    // два настоящих видимых WKWebView — по одному на каждую VR-линзу.
+    private let directVideoStage = UIView(frame: .zero)
+    private var directVideoLeft: WKWebView!
+    private var directVideoRight: WKWebView!
+    private let directVideoPointer = UIView(frame: .zero)
+    private var directVideoActive = false
+    private var directVideoURL: URL?
+    private var directVideoSyncTimer: Timer?
+    private var mediaAudioSessionActive = false
+
     // Metal
     private var device: MTLDevice!
     private var commandQueue: MTLCommandQueue!
@@ -614,6 +626,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
         layoutViews()
+        layoutDirectVideoStage()
         tracking.setInterfaceOrientation(currentInterfaceOrientation())
     }
 
@@ -631,6 +644,11 @@ final class MainViewController: UIViewController, MTKViewDelegate {
 
     deinit {
         browserTimer?.invalidate()
+        directVideoSyncTimer?.invalidate()
+        removeDirectVideoMessageHandlers()
+        if mediaAudioSessionActive {
+            try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        }
         // WKUserContentController держит обработчик сильной ссылкой —
         // без явного снятия получился бы цикл ретейнов.
         browser.configuration.userContentController.removeScriptMessageHandler(forName: "handarVideo")
@@ -780,28 +798,58 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     /// для видео. Это всё ещё та же мировая стерео-панель: меняется только
     /// её размер, поэтому YouTube остаётся внутри VR-композитора.
     private func setCinemaMode(_ active: Bool) {
-        guard active != isCinemaMode else { return }
-        isCinemaMode = active
+        guard inVR else { return }
 
-        let width = active ? Self.cinemaPanelWidth : Self.defaultPanelWidth
-        let height = width * Self.defaultPanelAspect
-        browserWorldWidth = width
-        browserWorldHeight = height
+        if !active {
+            isCinemaMode = false
+            browserWorldWidth = Self.defaultPanelWidth
+            browserWorldHeight = Self.defaultPanelHeight
+            browserPlaneGeometry.width = CGFloat(browserWorldWidth)
+            browserPlaneGeometry.height = CGFloat(browserWorldHeight)
+            browserFrameGeometry.width = CGFloat(browserWorldWidth) + 0.018
+            browserFrameGeometry.height = CGFloat(browserWorldHeight) + 0.018
+            browserHandleNode.position = SCNVector3(0, -Double(browserWorldHeight) * 0.5 - 0.028, 0)
+            toolbarNode.isHidden = false
+            hideDirectVideoStage()
+            startBrowserCapture()
+            return
+        }
 
-        SCNTransaction.begin()
-        SCNTransaction.animationDuration = 0.32
-        SCNTransaction.animationTimingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-        browserPlaneGeometry.width = CGFloat(width)
-        browserPlaneGeometry.height = CGFloat(height)
-        browserFrameGeometry.width = CGFloat(width) + 0.018
-        browserFrameGeometry.height = CGFloat(height) + 0.018
-        browserHandleNode.position = SCNVector3(0, -Double(height) * 0.5 - 0.028, 0)
-        toolbarNode.opacity = active ? 0 : 1
-        SCNTransaction.commit()
+        guard let url = browser.url, isDirectVideoSite(url) else {
+            // Сохраняем старый fallback для сайтов, где прямой WKWebView слой
+            // не нужен. Для YouTube/TikTok ниже используется реальный video layer.
+            isCinemaMode = true
+            browserWorldWidth = Self.cinemaPanelWidth
+            browserWorldHeight = browserWorldWidth * Self.defaultPanelAspect
+            browserPlaneGeometry.width = CGFloat(browserWorldWidth)
+            browserPlaneGeometry.height = CGFloat(browserWorldHeight)
+            browserFrameGeometry.width = CGFloat(browserWorldWidth) + 0.018
+            browserFrameGeometry.height = CGFloat(browserWorldHeight) + 0.018
+            browserHandleNode.position = SCNVector3(0, -Double(browserWorldHeight) * 0.5 - 0.028, 0)
+            toolbarNode.isHidden = true
+            startBrowserCapture()
+            return
+        }
 
-        toolbarNode.isHidden = active
-        startBrowserCapture()
+        isCinemaMode = true
+        browserWorldWidth = Self.cinemaPanelWidth
+        browserWorldHeight = browserWorldWidth * Self.defaultPanelAspect
+        browserPlaneGeometry.width = CGFloat(browserWorldWidth)
+        browserPlaneGeometry.height = CGFloat(browserWorldHeight)
+        browserFrameGeometry.width = CGFloat(browserWorldWidth) + 0.018
+        browserFrameGeometry.height = CGFloat(browserWorldHeight) + 0.018
+        browserHandleNode.position = SCNVector3(0, -Double(browserWorldHeight) * 0.5 - 0.028, 0)
+        toolbarNode.isHidden = true
+
+        pauseAndMuteBrowserMedia()
+        activateMediaAudioSession()
+        presentDirectVideoStage(url: url)
         UIImpactFeedbackGenerator(style: .soft).impactOccurred()
+    }
+
+    private func isDirectVideoSite(_ url: URL) -> Bool {
+        let host = url.host?.lowercased() ?? ""
+        return host.contains("youtube.com") || host.contains("youtube-nocookie.com") || host.contains("youtu.be") || host.contains("tiktok.com")
     }
 
     private func buildToolbar() {
@@ -1017,6 +1065,226 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         rightCameraNode.camera?.projectionTransform = VRLensMath.projection(right, near: near, far: far)
     }
 
+    private func configureDirectVideoStage() {
+        directVideoStage.backgroundColor = .black
+        directVideoStage.clipsToBounds = true
+
+        directVideoLeft = makeDirectVideoWebView(role: "left")
+        directVideoRight = makeDirectVideoWebView(role: "right")
+        directVideoStage.addSubview(directVideoLeft)
+        directVideoStage.addSubview(directVideoRight)
+
+        directVideoPointer.bounds = CGRect(x: 0, y: 0, width: 18, height: 18)
+        directVideoPointer.layer.cornerRadius = 9
+        directVideoPointer.layer.borderWidth = 2
+        directVideoPointer.layer.borderColor = UIColor(red: 0.35, green: 0.85, blue: 1, alpha: 1).cgColor
+        directVideoPointer.backgroundColor = .white
+        directVideoPointer.layer.shadowColor = UIColor.black.cgColor
+        directVideoPointer.layer.shadowOpacity = 0.7
+        directVideoPointer.layer.shadowRadius = 5
+        directVideoPointer.isHidden = true
+        directVideoStage.addSubview(directVideoPointer)
+    }
+
+    private func makeDirectVideoWebView(role: String) -> WKWebView {
+        let config = WKWebViewConfiguration()
+        config.defaultWebpagePreferences.allowsContentJavaScript = true
+        config.allowsInlineMediaPlayback = true
+        config.mediaTypesRequiringUserActionForPlayback = []
+        config.allowsPictureInPictureMediaPlayback = false
+        config.preferences.isElementFullscreenEnabled = false
+        config.websiteDataStore = browser.configuration.websiteDataStore
+        config.processPool = browser.configuration.processPool
+
+        let ucc = WKUserContentController()
+        if let path = Bundle.main.path(forResource: "WebInput", ofType: "js"),
+           let js = try? String(contentsOfFile: path, encoding: .utf8) {
+            ucc.addUserScript(WKUserScript(source: js, injectionTime: .atDocumentStart, forMainFrameOnly: false))
+        }
+        ucc.addUserScript(WKUserScript(
+            source: Self.directVideoRoleScript(role: role),
+            injectionTime: .atDocumentEnd,
+            forMainFrameOnly: true
+        ))
+        config.userContentController = ucc
+
+        let webView = WKWebView(frame: .zero, configuration: config)
+        webView.navigationDelegate = self
+        webView.uiDelegate = self
+        webView.isOpaque = true
+        webView.backgroundColor = .black
+        webView.scrollView.backgroundColor = .black
+        webView.scrollView.bounces = false
+        webView.allowsBackForwardNavigationGestures = false
+        webView.customUserAgent = browser.customUserAgent
+        return webView
+    }
+
+    private static func directVideoRoleScript(role: String) -> String {
+        let muted = role == "right" ? "true" : "false"
+        return """
+        (function(){
+          window.__handarDirectRole = '\(role)';
+          window.__handarDirectMuted = \(muted);
+          function video(){
+            var all=[].slice.call(document.querySelectorAll('video'));
+            all.sort(function(a,b){return (b.clientWidth*b.clientHeight)-(a.clientWidth*a.clientHeight);});
+            return all[0]||null;
+          }
+          window.__handarTuneDirectVideo=function(){
+            var v=video(); if(!v) return;
+            try{v.setAttribute('playsinline','');v.setAttribute('webkit-playsinline','');v.playsInline=true;}catch(e){}
+            try{v.muted=window.__handarDirectMuted;v.volume=window.__handarDirectMuted?0:1;}catch(e){}
+          };
+          window.__handarDirectPlay=function(){
+            var v=video(); if(!v) return;
+            try{v.muted=false;v.volume=1;}catch(e){}
+            try{var p=v.play();if(p&&p.catch){p.catch(function(){})}}catch(e){}
+          };
+          setInterval(window.__handarTuneDirectVideo,800);
+          setTimeout(window.__handarTuneDirectVideo,50);
+          setTimeout(window.__handarTuneDirectVideo,500);
+        })();
+        """
+    }
+
+    private func layoutDirectVideoStage() {
+        let bounds = view.bounds
+        directVideoStage.frame = bounds
+        let padding: CGFloat = 8
+        let gap: CGFloat = 10
+        let diameter = max(1, min(bounds.height - padding * 2,
+                                  (bounds.width - padding * 2 - gap) * 0.5))
+        let total = diameter * 2 + gap
+        let startX = (bounds.width - total) * 0.5
+        let startY = (bounds.height - diameter) * 0.5
+        let left = CGRect(x: startX, y: startY, width: diameter, height: diameter)
+        let right = CGRect(x: startX + diameter + gap, y: startY, width: diameter, height: diameter)
+        directVideoLeft.frame = left
+        directVideoRight.frame = right
+        for w in [directVideoLeft, directVideoRight] {
+            w?.layer.cornerRadius = diameter * 0.5
+            w?.clipsToBounds = true
+        }
+    }
+
+    private func directVideoTarget(for point: CGPoint) -> (WKWebView, CGPoint)? {
+        let candidates: [(WKWebView, CGRect)] = [
+            (directVideoLeft, directVideoLeft?.frame ?? .null),
+            (directVideoRight, directVideoRight?.frame ?? .null)
+        ]
+        for (w, frame) in candidates {
+            guard frame.contains(point), frame.width > 1, frame.height > 1 else { continue }
+            let local = CGPoint(x: (point.x - frame.minX) / frame.width,
+                                y: (point.y - frame.minY) / frame.height)
+            let dx = local.x - 0.5
+            let dy = local.y - 0.5
+            if dx * dx + dy * dy <= 0.25 { return (w, local) }
+        }
+        return nil
+    }
+
+    private func presentDirectVideoStage(url: URL) {
+        directVideoURL = url
+        directVideoActive = true
+        directVideoStage.isHidden = false
+        layoutDirectVideoStage()
+        directVideoStage.bringSubviewToFront(directVideoPointer)
+        view.bringSubviewToFront(directVideoStage)
+
+        let request = URLRequest(url: url, cachePolicy: .useProtocolCachePolicy, timeoutInterval: 30)
+        directVideoLeft.load(request)
+        directVideoRight.load(request)
+
+        directVideoSyncTimer?.invalidate()
+        directVideoSyncTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
+            self?.syncDirectVideoEyes()
+        }
+    }
+
+    private func hideDirectVideoStage() {
+        directVideoActive = false
+        directVideoSyncTimer?.invalidate()
+        directVideoSyncTimer = nil
+        directVideoPointer.isHidden = true
+        directVideoStage.isHidden = true
+        directVideoURL = nil
+        input.release(webView: directVideoLeft)
+        input.release(webView: directVideoRight)
+        pauseAndMute(directVideoLeft)
+        pauseAndMute(directVideoRight)
+        directVideoLeft?.stopLoading()
+        directVideoRight?.stopLoading()
+    }
+
+    private func activateMediaAudioSession() {
+        do {
+            let session = AVAudioSession.sharedInstance()
+            try session.setCategory(.playback, mode: .moviePlayback, options: [.allowBluetoothA2DP])
+            try session.setActive(true)
+            mediaAudioSessionActive = true
+        } catch {
+            NSLog("HandAR media audio session: %@", error.localizedDescription)
+        }
+    }
+
+    private func deactivateMediaAudioSession() {
+        guard mediaAudioSessionActive else { return }
+        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        mediaAudioSessionActive = false
+    }
+
+    private func pauseAndMuteBrowserMedia() {
+        pauseAndMute(browser)
+    }
+
+    private func pauseAndMute(_ webView: WKWebView?) {
+        webView?.evaluateJavaScript("document.querySelectorAll('video,audio').forEach(function(v){try{v.muted=true;v.pause();}catch(e){}});", completionHandler: nil)
+    }
+
+    private func activateDirectVideoAudio() {
+        activateMediaAudioSession()
+        directVideoLeft?.evaluateJavaScript("window.__handarDirectPlay ? window.__handarDirectPlay() : null;", completionHandler: nil)
+    }
+
+    private func syncDirectVideoEyes() {
+        guard directVideoActive else { return }
+        let stateJS = """
+        (function(){
+          var all=[].slice.call(document.querySelectorAll('video'));
+          all.sort(function(a,b){return (b.clientWidth*b.clientHeight)-(a.clientWidth*a.clientHeight);});
+          var v=all[0];
+          if(!v) return 'null';
+          return JSON.stringify({t:v.currentTime||0,p:v.paused,s:v.playbackRate||1});
+        })();
+        """
+        directVideoLeft.evaluateJavaScript(stateJS) { [weak self] result, _ in
+            guard let self, let raw = result as? String, raw != "null",
+                  let data = raw.data(using: .utf8),
+                  let object = try? JSONSerialization.jsonObject(with: data),
+                  let state = object as? [String: Any],
+                  let t = state["t"] as? Double,
+                  let paused = state["p"] as? Bool else { return }
+            let rate = state["s"] as? Double ?? 1.0
+            let rightJS = """
+            (function(){
+              var all=[].slice.call(document.querySelectorAll('video'));
+              all.sort(function(a,b){return (b.clientWidth*b.clientHeight)-(a.clientWidth*a.clientHeight);});
+              var v=all[0]; if(!v) return;
+              try{if(Math.abs((v.currentTime||0)-\(t))>0.35){v.currentTime=\(t);}}catch(e){}
+              try{v.playbackRate=\(rate);}catch(e){}
+              try{if(\(paused ? "true" : "false")){v.pause();}else{var p=v.play();if(p&&p.catch){p.catch(function(){})}}}catch(e){}
+            })();
+            """
+            self.directVideoRight.evaluateJavaScript(rightJS, completionHandler: nil)
+        }
+    }
+
+    private func removeDirectVideoMessageHandlers() {
+        // Direct video WKWebViews use real screen touches; no message handlers are
+        // registered on them. This method is kept for symmetric lifecycle cleanup.
+    }
+
     private func configureBrowser() {
         browser.navigationDelegate = self
         browser.uiDelegate = self
@@ -1036,6 +1304,10 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         if vrView != nil {
             view.addSubview(vrView)
         }
+        configureDirectVideoStage()
+        view.addSubview(directVideoStage)
+        directVideoStage.isHidden = true
+        directVideoStage.isUserInteractionEnabled = true
 
         menu = MainMenuView(frame: view.bounds, profile: profile)
         menu.onEnter = { [weak self] in
@@ -1206,6 +1478,8 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         controllerPointer = CGPoint(x: 0.5, y: 0.5)
         controllerHandRoot.isHidden = true
         resetPanelToDefaultSizeInstantly()
+        hideDirectVideoStage()
+        activateMediaAudioSession()
 
         applyEyeGeometry()
         requestLandscapeMode()
@@ -1246,6 +1520,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     private func leaveVRToMenu() {
         tracking.pause()
         stopBrowserCapture()
+        hideDirectVideoStage()
         releasePointer()
 
         if let anchor = browserAnchor {
@@ -1260,6 +1535,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         inVR = false
 
         UIApplication.shared.isIdleTimerDisabled = false
+        deactivateMediaAudioSession()
         setVRVisible(false)
         controllerHandRoot.isHidden = true
         requestLandscapeMode()
@@ -1404,7 +1680,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     }
 
     private func updateBrowserSnapshot() {
-        guard inVR, !snapshotInProgress else { return }
+        guard inVR, !directVideoActive, !snapshotInProgress else { return }
         guard browser.bounds.width > 1, browser.bounds.height > 1 else { return }
         snapshotInProgress = true
 
@@ -1462,7 +1738,12 @@ final class MainViewController: UIViewController, MTKViewDelegate {
             updateControllerHand()
         case .b:
             if pressed {
-                if browser.canGoBack { browser.goBack() }
+                if directVideoActive {
+                    hideDirectVideoStage()
+                    setCinemaMode(false)
+                } else if browser.canGoBack {
+                    browser.goBack()
+                }
             }
         case .x:
             if pressed { openVRDesktop() }
@@ -1474,6 +1755,22 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     }
 
     private func updateControllerHand() {
+        if directVideoActive {
+            controllerHandRoot.isHidden = true
+            let screen = CGPoint(x: controllerPointer.x * view.bounds.width, y: controllerPointer.y * view.bounds.height)
+            if let (webView, local) = directVideoTarget(for: screen) {
+                directVideoPointer.isHidden = false
+                directVideoPointer.center = screen
+                directVideoPointer.backgroundColor = controllerButtonDown ? UIColor(red: 0.35, green: 0.85, blue: 1, alpha: 0.9) : .white
+                input.update(normalizedPoint: local, pinch: controllerButtonDown, webView: webView)
+                if controllerButtonDown { activateDirectVideoAudio() }
+            } else {
+                directVideoPointer.isHidden = true
+                input.release(webView: directVideoLeft)
+                input.release(webView: directVideoRight)
+            }
+            return
+        }
         guard inVR, controllerConnected, let transform = browserWorldTransform else {
             controllerHandRoot.isHidden = true
             return
@@ -1500,8 +1797,40 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         input.update(normalizedPoint: CGPoint(x: x, y: y), pinch: controllerButtonDown, webView: browser)
     }
 
+    private func handleDirectVideoHands(left: HandSample?, right: HandSample?) {
+        guard let sample = right ?? left, let frame = tracking.latestFrameCopy else {
+            directVideoPointer.isHidden = true
+            input.release(webView: directVideoLeft)
+            input.release(webView: directVideoRight)
+            return
+        }
+        let oriented = sample.indexTip.applying(
+            frame.displayTransform(for: currentInterfaceOrientation(), viewportSize: view.bounds.size)
+        )
+        let screenPoint = CGPoint(x: oriented.x * view.bounds.width, y: oriented.y * view.bounds.height)
+        guard let (webView, local) = directVideoTarget(for: screenPoint) else {
+            directVideoPointer.isHidden = true
+            if !sample.clickPinch {
+                input.release(webView: directVideoLeft)
+                input.release(webView: directVideoRight)
+            }
+            return
+        }
+        directVideoPointer.isHidden = false
+        directVideoPointer.center = screenPoint
+        directVideoPointer.backgroundColor = sample.clickPinch ? UIColor(red: 0.35, green: 0.85, blue: 1, alpha: 0.9) : .white
+        input.update(normalizedPoint: local, pinch: sample.clickPinch, webView: webView)
+        if sample.clickPinch { activateDirectVideoAudio() }
+        let other = webView === directVideoLeft ? directVideoRight : directVideoLeft
+        if !sample.clickPinch { input.release(webView: other) }
+    }
+
     private func handleHands(left: HandSample?, right: HandSample?) {
         guard inVR else { return }
+        if directVideoActive {
+            handleDirectVideoHands(left: left, right: right)
+            return
+        }
         queueHandForegroundMask(left: left, right: right)
         if left != nil || right != nil {
             lastHandSeenTime = CACurrentMediaTime()
@@ -2294,6 +2623,10 @@ extension MainViewController: WKScriptMessageHandler {
                 let body = message.body as? [String: Any],
                 let active = body["active"] as? Bool
             else { return }
+            // Когда direct video уже активирован, основной WKWebView специально
+            // ставится на паузу. Его pause-событие нельзя трактовать как выход
+            // из кинорежима, иначе прямой видеослой мгновенно закроется.
+            if directVideoActive { return }
             setCinemaMode(active)
 
         case "handarApp":
@@ -2652,6 +2985,13 @@ private extension MainViewController {
 
 extension MainViewController: WKNavigationDelegate, WKUIDelegate {
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        if directVideoActive, webView === directVideoLeft || webView === directVideoRight {
+            webView.evaluateJavaScript("window.__handarTuneDirectVideo ? window.__handarTuneDirectVideo() : null;", completionHandler: nil)
+            if webView === directVideoLeft {
+                activateDirectVideoAudio()
+            }
+            return
+        }
         updateBrowserSnapshot()
         updateVRDesktopStatus()
     }

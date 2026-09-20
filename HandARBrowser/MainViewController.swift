@@ -3525,8 +3525,8 @@ final class VRBoxDiagnosticsView: UIViewController {
                 guard let self else { return }
                 let prefix = hasGyro ? "LIVE GYRO" : "LIVE MOTION"
                 let current = self.motion.text ?? ""
-                self.motion.text = current.components(separatedBy: "\nLIVE").first ?? current
-                self.motion.text += "\n\(prefix): \(sample)"
+                let base = current.components(separatedBy: "\nLIVE").first ?? current
+                self.motion.text = base + "\n\(prefix): \(sample)"
             }
         }
         service.onStick = { [weak self] x, y in

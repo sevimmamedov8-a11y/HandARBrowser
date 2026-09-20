@@ -1,3 +1,11 @@
+V51 — FIX BUILD
+
+Исправлены ошибки сборки Xcode 26.6 в диагностике VR BOX:
+- VRBoxDiagnosticsView теперь создаётся без неверного frame initializer для UIViewController;
+- используются актуальные NSNotification.Name.GCControllerDidConnect / GCControllerDidDisconnect;
+- исправлено обращение к optional UILabel.text;
+- версия сборки повышена до 51.
+
 # HandAR Vision V50 — большой VR Desktop апдейт
 
 V50 — крупное обновление поверх V41/V40. Главная идея: HandAR теперь выглядит не просто как браузер перед камерой, а как отдельная VR-среда с домашним экраном, приложениями, стерео-панелью и контроллером.

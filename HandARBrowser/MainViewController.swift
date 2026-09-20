@@ -1278,7 +1278,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
 
     private func showVRBoxDiagnostics() {
         guard diagnosticsView == nil else { return }
-        let diagnostics = VRBoxDiagnosticsView(frame: view.bounds)
+        let diagnostics = VRBoxDiagnosticsView()
         diagnostics.onClose = { [weak self, weak diagnostics] in
             guard let diagnostics else { return }
             diagnostics.willMove(toParent: nil)
@@ -3314,8 +3314,8 @@ final class VRBoxControllerService: NSObject {
     private var motionTimer: Timer?
 
     func start() {
-        NotificationCenter.default.addObserver(self, selector: #selector(didConnect(_:)), name: GCController.didConnectNotification, object: nil)
-        NotificationCenter.default.addObserver(self, selector: #selector(didDisconnect(_:)), name: GCController.didDisconnectNotification, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(didConnect(_:)), name: NSNotification.Name.GCControllerDidConnect, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(didDisconnect(_:)), name: NSNotification.Name.GCControllerDidDisconnect, object: nil)
         for controller in GCController.controllers() { attach(controller) }
         publishStatus()
         startMotionPolling()
@@ -3524,7 +3524,8 @@ final class VRBoxDiagnosticsView: UIViewController {
             DispatchQueue.main.async {
                 guard let self else { return }
                 let prefix = hasGyro ? "LIVE GYRO" : "LIVE MOTION"
-                self.motion.text = self.motion.text.components(separatedBy: "\nLIVE").first ?? self.motion.text
+                let current = self.motion.text ?? ""
+                self.motion.text = current.components(separatedBy: "\nLIVE").first ?? current
                 self.motion.text += "\n\(prefix): \(sample)"
             }
         }

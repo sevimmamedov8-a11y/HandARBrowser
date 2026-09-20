@@ -76,8 +76,9 @@ struct VRProfile: Codable, Equatable {
     /// Радиус видимой части линзы. Всё за ним — чёрное.
     var lensClipRadius: Float = 1.0
 
-    /// Запас поля зрения под предыскажение.
-    var fovScale: Float = 1.18
+    /// Запас поля зрения под предыскажение. Больше — картинка плотнее
+    /// заполняет круглую линзу, меньше чёрных полей по краю.
+    var fovScale: Float = 1.25
     /// Суперсэмплинг офскрин-буфера.
     var supersample: Float = 1.2
 
@@ -477,10 +478,23 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     private var dragOffset = SIMD3<Float>(repeating: 0)
     private var wasClickPinching = false
 
-    // Панель браузера в мире.
-    private let browserWorldWidth: Float = 0.82
-    private let browserWorldHeight: Float = 0.47
-    private let browserWorldDistance: Float = 1.55
+    // Панель браузера в мире. Размер большой намеренно: панель размером
+    // с почтовый конверт на расстоянии вытянутой руки занимает жалкую часть
+    // поля зрения и выглядит как маленький квадрат посреди черноты. Здесь
+    // панель по умолчанию — это уже «большой монитор», а не окошко.
+    private static let defaultPanelWidth: Float = 1.60
+    private static let defaultPanelHeight: Float = 1.00
+    /// Видео на YouTube/TikTok разворачивается в «кинозал»: экран занимает
+    /// большую часть поля зрения шлема, почти как в настоящем VR-кинотеатре.
+    private static let cinemaPanelWidth: Float = 2.85
+    private static let cinemaPanelHeight: Float = 1.62
+    private var browserWorldWidth: Float = MainViewController.defaultPanelWidth
+    private var browserWorldHeight: Float = MainViewController.defaultPanelHeight
+    private let browserWorldDistance: Float = 1.65
+    private var isCinemaMode = false
+    private var browserPlaneGeometry: SCNPlane!
+    private var browserFrameGeometry: SCNBox!
+    private var browserHandleNode: SCNNode!
     /// Ниже этой доли кадра щипок указательным считается захватом панели.
     private let dragZoneHeight: CGFloat = 0.34
     /// На таком расстоянии от камеры рисуется начало луча — примерно там кисть.
@@ -537,6 +551,9 @@ final class MainViewController: UIViewController, MTKViewDelegate {
 
     deinit {
         browserTimer?.invalidate()
+        // WKUserContentController держит обработчик сильной ссылкой —
+        // без явного снятия получился бы цикл ретейнов.
+        browser.configuration.userContentController.removeScriptMessageHandler(forName: "handarVideo")
     }
 
     private func currentInterfaceOrientation() -> UIInterfaceOrientation {
@@ -622,6 +639,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         browserMaterial.diffuse.wrapT = .clamp
         browserMaterial.shininess = 0
         geometry.firstMaterial = browserMaterial
+        browserPlaneGeometry = geometry
 
         browserPlaneNode.geometry = geometry
         browserPlaneNode.isHidden = true
@@ -639,6 +657,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         frameMaterial.diffuse.contents = UIColor(white: 0.10, alpha: 1)
         frameMaterial.emission.contents = UIColor(white: 0.10, alpha: 1)
         frameGeometry.firstMaterial = frameMaterial
+        browserFrameGeometry = frameGeometry
         let frameNode = SCNNode(geometry: frameGeometry)
         frameNode.position = SCNVector3(0, 0, -0.005)
         browserPlaneNode.addChildNode(frameNode)
@@ -658,6 +677,41 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         let handleNode = SCNNode(geometry: handleGeometry)
         handleNode.position = SCNVector3(0, -Double(browserWorldHeight) * 0.5 - 0.028, 0)
         browserPlaneNode.addChildNode(handleNode)
+        browserHandleNode = handleNode
+    }
+
+    /// Плавно меняет размер панели между обычным и «кинозальным». Ручка
+    /// и рамка едут вместе с панелью: и то и другое — анимируемые свойства
+    /// геометрии, поэтому достаточно один раз обернуть их в SCNTransaction.
+    private func setCinemaMode(_ active: Bool) {
+        guard active != isCinemaMode else { return }
+        isCinemaMode = active
+
+        let width = active ? Self.cinemaPanelWidth : Self.defaultPanelWidth
+        let height = active ? Self.cinemaPanelHeight : Self.defaultPanelHeight
+        browserWorldWidth = width
+        browserWorldHeight = height
+
+        SCNTransaction.begin()
+        SCNTransaction.animationDuration = 0.32
+        SCNTransaction.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        browserPlaneGeometry.width = CGFloat(width)
+        browserPlaneGeometry.height = CGFloat(height)
+        browserFrameGeometry.width = CGFloat(width) + 0.018
+        browserFrameGeometry.height = CGFloat(height) + 0.018
+        browserHandleNode.position = SCNVector3(0, -Double(height) * 0.5 - 0.028, 0)
+        toolbarNode.opacity = active ? 0 : 1
+        SCNTransaction.commit()
+
+        // Ссылка над видео только мешает — во время просмотра её прячем,
+        // но саму панель ссылок не пересобираем: её разметка привязана
+        // к обычному размеру и не должна ехать вместе с экраном.
+        toolbarNode.isHidden = active
+
+        // У видео своя частота обновления снимка страницы: 12 fps годится
+        // для чтения страниц, но для видео этого маловато.
+        startBrowserCapture()
+        UIImpactFeedbackGenerator(style: .soft).impactOccurred()
     }
 
     private func buildToolbar() {
@@ -809,6 +863,10 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     private func configureBrowser() {
         browser.navigationDelegate = self
         browser.uiDelegate = self
+        // WebInput.js следит за плеером страницы и шлёт сюда true/false,
+        // когда видео на YouTube/TikTok разворачивается на весь экран —
+        // это и включает кинорежим.
+        browser.configuration.userContentController.add(self, name: "handarVideo")
         browser.load(URLRequest(url: Self.homeURL))
     }
 
@@ -941,6 +999,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         browserWorldTransform = nil
         isDragging = false
         wasClickPinching = false
+        resetPanelToDefaultSizeInstantly()
 
         applyEyeGeometry()
         requestLandscapeMode()
@@ -952,6 +1011,25 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         UIApplication.shared.isIdleTimerDisabled = true
         startBrowserCapture()
         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+    }
+
+    /// Каждый заход в VR начинается с обычного размера панели, без анимации —
+    /// панель в этот момент ещё скрыта, доигрывать переход не для кого.
+    private func resetPanelToDefaultSizeInstantly() {
+        isCinemaMode = false
+        browserWorldWidth = Self.defaultPanelWidth
+        browserWorldHeight = Self.defaultPanelHeight
+
+        SCNTransaction.begin()
+        SCNTransaction.disableActions = true
+        browserPlaneGeometry.width = CGFloat(browserWorldWidth)
+        browserPlaneGeometry.height = CGFloat(browserWorldHeight)
+        browserFrameGeometry.width = CGFloat(browserWorldWidth) + 0.018
+        browserFrameGeometry.height = CGFloat(browserWorldHeight) + 0.018
+        browserHandleNode.position = SCNVector3(0, -Double(browserWorldHeight) * 0.5 - 0.028, 0)
+        toolbarNode.opacity = 1
+        SCNTransaction.commit()
+        toolbarNode.isHidden = false
     }
 
     private func setVRVisible(_ visible: Bool) {
@@ -1085,7 +1163,10 @@ final class MainViewController: UIViewController, MTKViewDelegate {
 
     private func startBrowserCapture() {
         browserTimer?.invalidate()
-        browserTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 12.0, repeats: true) { [weak self] _ in
+        // Чтение страницы сносно смотрится на 12 fps. Видео на 12 fps
+        // дёргается заметно, поэтому в кинорежиме поднимаем частоту.
+        let interval = isCinemaMode ? (1.0 / 24.0) : (1.0 / 12.0)
+        browserTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
             self?.updateBrowserSnapshot()
         }
     }
@@ -1101,7 +1182,9 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         snapshotInProgress = true
 
         let configuration = WKSnapshotConfiguration()
-        configuration.snapshotWidth = NSNumber(value: 1024)
+        // Кинопанель почти вдвое шире обычной — тот же снимок на ней
+        // размылился бы, поэтому берём его крупнее.
+        configuration.snapshotWidth = NSNumber(value: isCinemaMode ? 1536 : 1024)
         browser.takeSnapshot(with: configuration) { [weak self] image, _ in
             DispatchQueue.main.async {
                 guard let self else { return }
@@ -1176,8 +1259,9 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         showRay(from: ray, hit: hit.point)
         showPointerDot(at: hit.point, transform: transform, active: sample.clickPinch)
 
-        // Планка ссылок над браузером.
-        if abs(hit.localY - toolbarCenterY) <= toolbarButtonHeight * 0.5 {
+        // Планка ссылок над браузером. Во время видео она скрыта —
+        // пропускаем и зону попадания, иначе палец «щёлкал» бы по невидимке.
+        if !isCinemaMode, abs(hit.localY - toolbarCenterY) <= toolbarButtonHeight * 0.5 {
             let index = linkItems.firstIndex { hit.localX >= $0.minX && hit.localX <= $0.maxX }
             highlightToolbar(index)
             releasePointer()
@@ -1616,6 +1700,22 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         eyeTexture = device.makeTexture(descriptor: colorDescriptor)
         eyeDepthTexture = device.makeTexture(descriptor: depthDescriptor)
         eyeTextureSize = target
+    }
+}
+
+extension MainViewController: WKScriptMessageHandler {
+    func userContentController(
+        _ userContentController: WKUserContentController,
+        didReceive message: WKScriptMessage
+    ) {
+        guard
+            message.name == "handarVideo",
+            let body = message.body as? [String: Any],
+            let active = body["active"] as? Bool
+        else {
+            return
+        }
+        setCinemaMode(active)
     }
 }
 

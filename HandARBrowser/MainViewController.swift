@@ -1169,9 +1169,10 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     }
 
     private func directVideoTarget(for point: CGPoint) -> (WKWebView, CGPoint)? {
+        guard let left = directVideoLeft, let right = directVideoRight else { return nil }
         let candidates: [(WKWebView, CGRect)] = [
-            (directVideoLeft, directVideoLeft?.frame ?? .null),
-            (directVideoRight, directVideoRight?.frame ?? .null)
+            (left, left.frame),
+            (right, right.frame)
         ]
         for (w, frame) in candidates {
             guard frame.contains(point), frame.width > 1, frame.height > 1 else { continue }
@@ -1821,8 +1822,10 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         directVideoPointer.backgroundColor = sample.clickPinch ? UIColor(red: 0.35, green: 0.85, blue: 1, alpha: 0.9) : .white
         input.update(normalizedPoint: local, pinch: sample.clickPinch, webView: webView)
         if sample.clickPinch { activateDirectVideoAudio() }
-        let other = webView === directVideoLeft ? directVideoRight : directVideoLeft
-        if !sample.clickPinch { input.release(webView: other) }
+        if let left = directVideoLeft, let right = directVideoRight {
+            let other: WKWebView = webView === left ? right : left
+            if !sample.clickPinch { input.release(webView: other) }
+        }
     }
 
     private func handleHands(left: HandSample?, right: HandSample?) {

@@ -4,7 +4,11 @@
     const e=document.elementFromPoint(x,y);
     return e || document.body;
   }
-  window.__handarHover=function(x,y){};
+  window.__handarHover=function(x,y){
+    const target=el(x,y);
+    target.dispatchEvent(new PointerEvent('pointermove',{bubbles:true,cancelable:true,pointerId:1,pointerType:'mouse',clientX:x,clientY:y,buttons:0}));
+    target.dispatchEvent(new MouseEvent('mousemove',{bubbles:true,cancelable:true,clientX:x,clientY:y,buttons:0}));
+  };
   window.__handarPointerDown=function(x,y,id){
     active.set(id,{x,y});
     const target=el(x,y);

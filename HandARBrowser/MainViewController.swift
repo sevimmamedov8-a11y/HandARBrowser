@@ -1097,18 +1097,15 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         config.allowsInlineMediaPlayback = true
         config.mediaTypesRequiringUserActionForPlayback = []
         config.allowsPictureInPictureMediaPlayback = false
-        config.allowsAirPlayForMediaPlayback = false
+        config.preferences.isElementFullscreenEnabled = false
         config.websiteDataStore = browser.configuration.websiteDataStore
+        config.processPool = browser.configuration.processPool
 
         let ucc = WKUserContentController()
-        // В прямом видеорежиме не подключаем WebInput.js целиком: тот скрипт
-        // перехватывает Fullscreen API YouTube. Для live video нужен обычный
-        // медиапуть WebKit, поэтому здесь оставляем только pointer/mouse bridge.
-        ucc.addUserScript(WKUserScript(
-            source: Self.directVideoPointerScript,
-            injectionTime: .atDocumentStart,
-            forMainFrameOnly: false
-        ))
+        if let path = Bundle.main.path(forResource: "WebInput", ofType: "js"),
+           let js = try? String(contentsOfFile: path, encoding: .utf8) {
+            ucc.addUserScript(WKUserScript(source: js, injectionTime: .atDocumentStart, forMainFrameOnly: false))
+        }
         ucc.addUserScript(WKUserScript(
             source: Self.directVideoRoleScript(role: role),
             injectionTime: .atDocumentEnd,
@@ -1119,8 +1116,6 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         let webView = WKWebView(frame: .zero, configuration: config)
         webView.navigationDelegate = self
         webView.uiDelegate = self
-        // Не делаем WKWebView прозрачным/маскированным: аппаратный video layer
-        // WebKit должен иметь обычный прямоугольный слой для композитинга.
         webView.isOpaque = true
         webView.alpha = 1
         webView.isHidden = false
@@ -1129,42 +1124,10 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         webView.backgroundColor = .black
         webView.scrollView.backgroundColor = .black
         webView.scrollView.bounces = false
-        webView.scrollView.contentInsetAdjustmentBehavior = .never
         webView.allowsBackForwardNavigationGestures = false
+        webView.customUserAgent = browser.customUserAgent
         return webView
     }
-
-    private static let directVideoPointerScript = """
-    (function(){
-      const active = new Map();
-      function el(x,y){ return document.elementFromPoint(x,y) || document.body; }
-      window.__handarHover=function(x,y){};
-      window.__handarPointerDown=function(x,y,id){
-        active.set(id,{x:x,y:y});
-        const target=el(x,y);
-        target.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true,cancelable:true,pointerId:id,pointerType:'mouse',clientX:x,clientY:y,buttons:1}));
-        target.dispatchEvent(new MouseEvent('mousedown',{bubbles:true,cancelable:true,clientX:x,clientY:y,buttons:1}));
-      };
-      window.__handarPointerMove=function(x,y,id){
-        const target=el(x,y);
-        target.dispatchEvent(new PointerEvent('pointermove',{bubbles:true,cancelable:true,pointerId:id,pointerType:'mouse',clientX:x,clientY:y,buttons:1}));
-        target.dispatchEvent(new MouseEvent('mousemove',{bubbles:true,cancelable:true,clientX:x,clientY:y,buttons:1}));
-        active.set(id,{x:x,y:y});
-      };
-      window.__handarPointerUp=function(x,y,id){
-        const a=active.get(id)||{x:x,y:y};
-        const target=el(x,y);
-        target.dispatchEvent(new PointerEvent('pointerup',{bubbles:true,cancelable:true,pointerId:id,pointerType:'mouse',clientX:x,clientY:y,buttons:0}));
-        target.dispatchEvent(new MouseEvent('mouseup',{bubbles:true,cancelable:true,clientX:x,clientY:y,buttons:0}));
-        if(Math.hypot(x-a.x,y-a.y)<52){
-          const clickable=target.closest('button,a,input,select,textarea,[role=button]')||target;
-          clickable.dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true,clientX:x,clientY:y}));
-          if(typeof clickable.click==='function'){try{clickable.click();}catch(e){}}
-        }
-        active.delete(id);
-      };
-    })();
-    """
 
     private static func directVideoRoleScript(role: String) -> String {
         let muted = role == "right" ? "true" : "false"
@@ -1174,43 +1137,33 @@ final class MainViewController: UIViewController, MTKViewDelegate {
           window.__handarDirectMuted = \(muted);
           function video(){
             var all=[].slice.call(document.querySelectorAll('video'));
-            all.sort(function(a,b){
-              return (b.getBoundingClientRect().width*b.getBoundingClientRect().height)-
-                     (a.getBoundingClientRect().width*a.getBoundingClientRect().height);
-            });
+            all.sort(function(a,b){return (b.clientWidth*b.clientHeight)-(a.clientWidth*a.clientHeight);});
             return all[0]||null;
           }
           window.__handarTuneDirectVideo=function(){
             var v=video(); if(!v) return;
             try{v.setAttribute('playsinline','');v.setAttribute('webkit-playsinline','');v.playsInline=true;}catch(e){}
             try{v.muted=window.__handarDirectMuted;v.volume=window.__handarDirectMuted?0:1;}catch(e){}
+          };
+          window.__handarDirectPlay=function(){
+            var v=video(); if(!v) return;
+            try{v.muted=false;v.volume=1;}catch(e){}
             try{
               v.style.setProperty('display','block','important');
               v.style.setProperty('visibility','visible','important');
               v.style.setProperty('opacity','1','important');
+              v.style.setProperty('background-color','#000','important');
               v.style.setProperty('object-fit','contain','important');
-              v.style.setProperty('width','100%','important');
-              v.style.setProperty('height','100%','important');
-              v.style.setProperty('transform','translate3d(0,0,0)','important');
-              v.style.setProperty('background','#000','important');
+              v.style.setProperty('transform','translateZ(0)','important');
             }catch(e){}
-          };
-          window.__handarDirectPlay=function(){
-            var v=video(); if(!v) return;
-            window.__handarTuneDirectVideo();
             try{var p=v.play();if(p&&p.catch){p.catch(function(){})}}catch(e){}
           };
           var style=document.createElement('style');
-          style.textContent='html,body{background:#000!important;margin:0!important;padding:0!important;width:100%!important;height:100%!important;overflow:hidden!important;} body{min-height:100%!important;} video{display:block!important;visibility:visible!important;opacity:1!important;object-fit:contain!important;width:100%!important;height:100%!important;transform:translate3d(0,0,0)!important;background:#000!important;}';
+          style.textContent='html,body{background:#000!important;margin:0!important;} video{display:block!important;visibility:visible!important;opacity:1!important;transform:translateZ(0)!important;}';
           (document.head||document.documentElement).appendChild(style);
-          document.addEventListener('touchstart', function(){window.__handarDirectPlay();},{passive:true});
-          document.addEventListener('click', function(){window.__handarDirectPlay();}, true);
-          var observer=new MutationObserver(function(){window.__handarTuneDirectVideo();});
-          if(document.documentElement){observer.observe(document.documentElement,{childList:true,subtree:true});}
-          setInterval(window.__handarTuneDirectVideo,500);
-          setTimeout(window.__handarTuneDirectVideo,100);
-          setTimeout(window.__handarDirectPlay,900);
-          setTimeout(window.__handarDirectPlay,1800);
+          setInterval(window.__handarTuneDirectVideo,800);
+          setTimeout(window.__handarTuneDirectVideo,50);
+          setTimeout(window.__handarDirectPlay,600);
         })();
         """
     }
@@ -1270,42 +1223,14 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         directVideoStage.bringSubviewToFront(directVideoPointer)
         view.bringSubviewToFront(directVideoStage)
 
-        // YouTube watch/mobile pages contain a large DOM around the player. In
-        // VR we load the dedicated embed player instead, so WebKit presents a
-        // single video surface without the surrounding page compositor.
-        if let id = Self.youtubeVideoID(from: url),
-           let embedURL = URL(string: "https://www.youtube.com/embed/\(id)?playsinline=1&autoplay=1&controls=1&fs=0&rel=0&modestbranding=1&enablejsapi=1&iv_load_policy=1") {
-            directVideoLeft.load(URLRequest(url: embedURL, cachePolicy: .useProtocolCachePolicy, timeoutInterval: 30))
-            directVideoRight.load(URLRequest(url: embedURL, cachePolicy: .useProtocolCachePolicy, timeoutInterval: 30))
-        } else {
-            let request = URLRequest(url: url, cachePolicy: .useProtocolCachePolicy, timeoutInterval: 30)
-            directVideoLeft.load(request)
-            directVideoRight.load(request)
-        }
+        let request = URLRequest(url: url, cachePolicy: .useProtocolCachePolicy, timeoutInterval: 30)
+        directVideoLeft.load(request)
+        directVideoRight.load(request)
 
         directVideoSyncTimer?.invalidate()
-        directVideoSyncTimer = Timer.scheduledTimer(withTimeInterval: 0.20, repeats: true) { [weak self] _ in
+        directVideoSyncTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
             self?.syncDirectVideoEyes()
         }
-    }
-
-    private static func youtubeVideoID(from url: URL) -> String? {
-        let host = (url.host ?? "").lowercased()
-        guard host.contains("youtube.com") || host.contains("youtube-nocookie.com") || host == "youtu.be" || host.hasSuffix(".youtu.be") else { return nil }
-        if host == "youtu.be" || host.hasSuffix(".youtu.be") {
-            let value = url.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-            return value.isEmpty ? nil : value.components(separatedBy: "/").first
-        }
-        if let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
-           let value = components.queryItems?.first(where: { $0.name == "v" })?.value,
-           !value.isEmpty {
-            return value
-        }
-        let parts = url.path.split(separator: "/").map(String.init)
-        if let index = parts.firstIndex(where: { $0 == "shorts" || $0 == "embed" || $0 == "live" }), index + 1 < parts.count {
-            return parts[index + 1]
-        }
-        return nil
     }
 
     private func hideDirectVideoStage() {
@@ -2777,7 +2702,7 @@ body:before{content:"";position:fixed;inset:-20%;background:radial-gradient(circ
 .app{min-width:0;text-align:center;cursor:pointer;user-select:none}.app:active{transform:scale(.93)}
 .icon{width:64px;height:64px;margin:0 auto 6px;border-radius:20px;display:flex;align-items:center;justify-content:center;box-shadow:inset 0 1px 1px rgba(255,255,255,.24),0 9px 18px rgba(0,0,0,.20);border:1px solid rgba(255,255,255,.16);overflow:hidden}.icon svg{width:34px;height:34px;fill:none;stroke:#fff;stroke-width:2.2;stroke-linecap:round;stroke-linejoin:round}.icon .solid{fill:#fff;stroke:none}
 .app span{display:block;font-size:13px;line-height:16px;font-weight:560;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-shadow:0 1px 6px rgba(0,0,0,.35)}
-.blue{background:linear-gradient(135deg,#54a9ff,#1866e8)}.red{background:linear-gradient(135deg,#ff4d55,#cf111c)}.pink{background:linear-gradient(135deg,#ff5bb8,#7d26ff)}.teal{background:linear-gradient(135deg,#42d9ca,#007d87)}.indigo{background:linear-gradient(135deg,#7e82ff,#4647b9)}.green{background:linear-gradient(135deg,#55df76,#159447)}.cyan{background:linear-gradient(135deg,#55d8ff,#1a74db)}.orange{background:linear-gradient(135deg,#ffb657,#e46710)}.gray{background:linear-gradient(135deg,#737b88,#343943)}.dark{background:rgba(13,18,28,.82)}
+.blue{background:linear-gradient(135deg,#54a9ff,#1866e8)}.red{background:linear-gradient(135deg,#ff4d55,#cf111c)}.pink{background:linear-gradient(135deg,#ff5bb8,#7d26ff)}.teal{background:linear-gradient(135deg,#42d9ca,#007d87)}.indigo{background:linear-gradient(135deg,#7e82ff,#4647b9)}.green{background:linear-gradient(135deg,#55df76,#159447)}.cyan{background:linear-gradient(135deg,#55d8ff,#1a74db)}.orange{background:linear-gradient(135deg,#ffb657,#e46710)}.gray{background:linear-gradient(135deg,#737b88,#343943)}.dark{background:rgba(13,18,28,.82)}.purple{background:linear-gradient(135deg,#a855f7,#5b21b6)}
 .dock{height:82px;border-radius:28px;background:rgba(235,240,255,.18);border:1px solid rgba(255,255,255,.22);backdrop-filter:blur(28px);display:flex;align-items:center;justify-content:space-around;padding:9px 22px;box-shadow:0 12px 30px rgba(0,0,0,.2)}
 .dock .icon{width:54px;height:54px;border-radius:17px;margin:0}.dock .app span{display:none}.dock .app{width:56px}
 .note{text-align:center;font-size:11px;color:rgba(255,255,255,.48);margin-top:-4px}.launch{animation:launch .22s ease-out}.launch .icon{box-shadow:0 0 0 5px rgba(255,255,255,.28),0 0 30px rgba(255,255,255,.25)}
@@ -2806,6 +2731,7 @@ body:before{content:"";position:fixed;inset:-20%;background:radial-gradient(circ
     <div class="app" data-id="files"><div class="icon blue"><svg viewBox="0 0 24 24"><path d="M4 7h6l2 2h8v9H4z"/><path d="M4 10h16"/></svg></div><span>Файлы</span></div>
     <div class="app" data-id="messages"><div class="icon green"><svg viewBox="0 0 24 24"><path d="M4 5h16v11H9l-5 4z"/></svg></div><span>Сообщения</span></div>
     <div class="app" data-id="phone"><div class="icon green"><svg viewBox="0 0 24 24"><path d="M7 4c1.1 0 2 .9 2 2 0 1-.2 1.8-.6 2.6-.2.4-.1.8.2 1.1l2.1 2.1c.3.3.7.4 1.1.2.8-.4 1.6-.6 2.6-.6 1.1 0 2 .9 2 2v3c0 1.1-.9 2-2 2C9.8 18.4 5.6 14.2 4.6 9.1 4.4 8.1 5.2 7 6.3 6.7z"/></svg></div><span>Телефон</span></div>
+    <div class="app" data-id="games"><div class="icon purple"><svg viewBox="0 0 24 24"><rect x="4" y="7" width="16" height="11" rx="3"/><path d="M8 12h4M10 10v4"/><circle cx="16" cy="11.5" r="1" fill="#fff" stroke="none"/><circle cx="18" cy="14.5" r="1" fill="#fff" stroke="none"/></svg></div><span>Игры</span></div>
     <div class="app" data-id="settings"><div class="icon gray"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 0 0-.1-1.2l2-1.5-2-3.4-2.3.9a7 7 0 0 0-2-1.1L14.3 3h-4.6l-.4 2.7a7 7 0 0 0-2 1.1L5 5.9 3 9.3l2 1.5A7 7 0 0 0 5 12c0 .4 0 .8.1 1.2l-2 1.5 2 3.4 2.3-.9a7 7 0 0 0 2 1.1l.4 2.7h4.6l.4-2.7a7 7 0 0 0 2-1.1l2.3.9 2-3.4-2-1.5c.1-.4.1-.8.1-1.2Z"/></svg></div><span>Настройки</span></div>
   </div>
   <div class="dock">
@@ -2945,6 +2871,73 @@ let number='';const pd=document.getElementById('phone-display');document.querySe
 """
     )
 
+    private static let vrGamesHTML = htmlPage(
+        title: "Игры",
+        icon: "🎮",
+        accent: "#7c3aed",
+        body: """
+<style>
+body{background:#05060b}
+#arcade{position:relative;height:calc(100vh - 106px);min-height:430px;border-radius:28px;overflow:hidden;border:1px solid rgba(255,255,255,.13);background:radial-gradient(circle at 50% 20%,rgba(124,58,237,.18),transparent 36%),linear-gradient(180deg,#0c1019,#04050a)}
+.screen{position:absolute;inset:0;display:none;padding:22px}.screen.active{display:block}
+.gamebar{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:16px}.gamebar h2{margin:0;font-size:26px}.gamebar .score{font-size:18px;font-weight:800}.gamecardgrid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;height:calc(100% - 62px)}
+.gamecard{border:1px solid rgba(255,255,255,.13);border-radius:25px;background:linear-gradient(160deg,rgba(255,255,255,.10),rgba(255,255,255,.035));color:#fff;text-align:left;padding:22px;cursor:pointer;box-shadow:0 18px 45px rgba(0,0,0,.2);display:flex;flex-direction:column;justify-content:space-between}.gamecard:active{transform:scale(.985)}
+.gameemoji{font-size:55px}.gamecard h3{font-size:23px;margin:12px 0 6px}.gamecard p{font-size:14px;line-height:1.4;color:rgba(255,255,255,.68);margin:0}.tag{display:inline-flex;margin-top:14px;padding:7px 10px;border-radius:999px;background:rgba(255,255,255,.09);font-size:12px;color:rgba(255,255,255,.72)}
+#fruitCanvas,#neonCanvas,#stackCanvas{position:absolute;inset:0;width:100%;height:100%;touch-action:none}.arena{position:absolute;inset:82px 0 0;border-radius:18px;overflow:hidden}.hud{position:absolute;left:22px;right:22px;top:18px;display:flex;justify-content:space-between;z-index:3;font-size:19px;font-weight:800;pointer-events:none;text-shadow:0 3px 16px #000}.help{position:absolute;left:0;right:0;bottom:14px;text-align:center;color:rgba(255,255,255,.56);font-size:12px;z-index:3;pointer-events:none}.gamebtn{border:1px solid rgba(255,255,255,.16);background:rgba(255,255,255,.09);color:#fff;border-radius:14px;padding:10px 14px}.gamebtn.primary{background:#7c3aed;border-color:#7c3aed}
+#gameOverlay{position:absolute;inset:0;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,.58);z-index:8;text-align:center}.overlayBox{padding:30px 38px;border-radius:24px;background:rgba(15,18,27,.93);border:1px solid rgba(255,255,255,.14)}.overlayBox h2{margin:0 0 8px;font-size:32px}.overlayBox p{margin:0 0 18px}
+@media(max-width:900px){.gamecardgrid{grid-template-columns:1fr}.gamecard{min-height:135px}.gamecardgrid{overflow:auto}}
+</style>
+<div id="arcade">
+  <section id="homeScreen" class="screen active">
+    <div class="gamebar"><h2>VR Arcade</h2><button class="gamebtn" onclick="post('home')">Рабочий стол</button></div>
+    <div class="gamecardgrid">
+      <div class="gamecard" onclick="startFruit()"><div><div class="gameemoji">🍉🍓</div><h3>Fruit Slice VR</h3><p>Твоя версия игры с нарезкой фруктов. Двигай рукой и режь летящие фрукты, избегая бомб.</p><span class="tag">Рука + pinch</span></div><div>▶ Играть</div></div>
+      <div class="gamecard" onclick="startNeon()"><div><div class="gameemoji">☄️✨</div><h3>Neon Dodge</h3><p>Держи указатель подальше от метеоров и продержись 30 секунд, собирая очки.</p><span class="tag">Рука + движение</span></div><div>▶ Играть</div></div>
+      <div class="gamecard" onclick="startStack()"><div><div class="gameemoji">🧱🏗️</div><h3>Stack Rush</h3><p>Точно ставь движущиеся блоки друг на друга и строй башню как можно выше.</p><span class="tag">Рука + pinch</span></div><div>▶ Играть</div></div>
+    </div>
+  </section>
+  <section id="fruitScreen" class="screen"><div class="gamebar"><h2>Fruit Slice VR</h2><div class="score">🍉 <span id="fruitScore">0</span> &nbsp; ❤️ <span id="fruitLives">3</span></div><button class="gamebtn" onclick="showHome()">← Игры</button></div><div class="arena"><canvas id="fruitCanvas"></canvas><div class="help">Сожми большой палец с указательным и проведи через фрукт. Бомбы режь нельзя.</div></div></section>
+  <section id="neonScreen" class="screen"><div class="gamebar"><h2>Neon Dodge</h2><div class="score">⚡ <span id="neonScore">0</span> &nbsp; ⏱ <span id="neonTime">30</span></div><button class="gamebtn" onclick="showHome()">← Игры</button></div><div class="arena"><canvas id="neonCanvas"></canvas><div class="help">Двигай указателем рукой. Не сталкивайся с голубыми метеорами.</div></div></section>
+  <section id="stackScreen" class="screen"><div class="gamebar"><h2>Stack Rush</h2><div class="score">🏗️ <span id="stackHeight">0</span></div><button class="gamebtn" onclick="showHome()">← Игры</button></div><div class="arena"><canvas id="stackCanvas"></canvas><div class="help">Следи за блоком и сделай pinch, когда он совпадёт с предыдущим.</div></div></section>
+  <div id="gameOverlay"><div class="overlayBox"><h2 id="overTitle">Готово</h2><p id="overText"></p><button class="gamebtn primary" onclick="resetCurrent()">Заново</button></div></div>
+</div>
+<div class="row" style="margin-top:14px"><button class="btn primary" onclick="post('home')">На рабочий стол</button></div>
+""",
+        scripts: """
+window.post=function(id){try{window.webkit.messageHandlers.handarApp.postMessage({id:id});}catch(e){}};
+const screens={home:document.getElementById('homeScreen'),fruit:document.getElementById('fruitScreen'),neon:document.getElementById('neonScreen'),stack:document.getElementById('stackScreen')};let current='home',pressed=false;
+function show(k){Object.keys(screens).forEach(x=>screens[x].classList.toggle('active',x===k));current=k;document.getElementById('gameOverlay').style.display='none';}
+function showHome(){show('home');stopLoops();}
+function overlay(t,m){document.getElementById('overTitle').textContent=t;document.getElementById('overText').textContent=m;document.getElementById('gameOverlay').style.display='flex';stopLoops();}
+function resetCurrent(){document.getElementById('gameOverlay').style.display='none';if(current==='fruit')startFruit();else if(current==='neon')startNeon();else if(current==='stack')startStack();}
+function stopLoops(){fruitRunning=false;neonRunning=false;stackRunning=false;}
+function pointerPos(canvas,e){const r=canvas.getBoundingClientRect();return{x:Math.max(0,Math.min(r.width,e.clientX-r.left)),y:Math.max(0,Math.min(r.height,e.clientY-r.top))}}
+// Fruit Slice VR
+const fc=document.getElementById('fruitCanvas'),fx=fc.getContext('2d');let fruitRunning=false,fruitItems=[],fruitTrail=[],fruitScore=0,fruitLives=3,fruitLast=0,fruitSpawn=0;
+function fitCanvas(canvas){const r=canvas.parentElement.getBoundingClientRect(),d=devicePixelRatio||1;canvas.width=r.width*d;canvas.height=r.height*d;canvas.style.width=r.width+'px';canvas.style.height=r.height+'px';return [r.width,r.height]}
+function startFruit(){show('fruit');[fruitW,fruitH]=fitCanvas(fc);fruitScore=0;fruitLives=3;fruitItems=[];fruitTrail=[];fruitRunning=true;fruitLast=performance.now();fruitSpawn=0;document.getElementById('fruitScore').textContent='0';document.getElementById('fruitLives').textContent='3';requestAnimationFrame(fruitLoop)}let fruitW=1,fruitH=1;
+const fruitSet=[['🍉',30],['🍊',25],['🍓',20],['🍎',22],['🍍',35],['🥝',24],['🍋',18]];
+function fruitAdd(){const d=devicePixelRatio||1;const [e,p]=fruitSet[(Math.random()*fruitSet.length)|0];fruitItems.push({x:55+Math.random()*(fruitW-110),y:fruitH+40,vx:(Math.random()-.5)*3.2,vy:-11-Math.random()*5,r:28+Math.random()*9,e,p,b:Math.random()<.10});}
+function fruitMove(e){const p=pointerPos(fc,e),q=fruitTrail.length?fruitTrail[fruitTrail.length-1]:p;fruitTrail.push(p);if(fruitTrail.length>12)fruitTrail.shift();if(pressed)fruitSlice(q,p)}
+function fruitSlice(a,b){for(let i=fruitItems.length-1;i>=0;i--){const o=fruitItems[i],abx=b.x-a.x,aby=b.y-a.y,t=Math.max(0,Math.min(1,((o.x-a.x)*abx+(o.y-a.y)*aby)/(abx*abx+aby*aby||1))),px=a.x+t*abx,py=a.y+t*aby;if(Math.hypot(o.x-px,o.y-py)<o.r+10){if(o.b){fruitLives--;document.getElementById('fruitLives').textContent=fruitLives;if(fruitLives<=0){fruitRunning=false;overlay('Фрукты закончились','Счёт: '+fruitScore);}}else fruitScore+=o.p;document.getElementById('fruitScore').textContent=fruitScore;fruitItems.splice(i,1);}}}
+function fruitLoop(t){if(!fruitRunning)return;const d=devicePixelRatio||1;fx.setTransform(d,0,0,d,0,0);fx.clearRect(0,0,fruitW,fruitH);fruitSpawn-=t-fruitLast;fruitLast=t;if(fruitSpawn<=0){fruitAdd();if(Math.random()<.35)fruitAdd();fruitSpawn=580+Math.random()*430}for(let i=fruitItems.length-1;i>=0;i--){const o=fruitItems[i];o.x+=o.vx;o.vy+=.42;o.y+=o.vy;fx.save();fx.translate(o.x,o.y);fx.font=(o.r*2)+'px system-ui';fx.textAlign='center';fx.textBaseline='middle';fx.shadowBlur=18;fx.shadowColor=o.b?'#ef4444':'#ffd34d';fx.fillText(o.b?'💣':o.e,0,0);fx.restore();if(o.y>fruitH+70){if(!o.b)fruitLives--;fruitItems.splice(i,1);document.getElementById('fruitLives').textContent=fruitLives;if(fruitLives<=0){fruitRunning=false;overlay('Фрукты закончились','Счёт: '+fruitScore);}}}fruitTrail.forEach((p,i)=>{if(i===0)return;const q=fruitTrail[i-1];fx.strokeStyle='rgba(255,255,255,'+(i/fruitTrail.length*.75)+')';fx.lineWidth=3+i*.35;fx.lineCap='round';fx.beginPath();fx.moveTo(q.x,q.y);fx.lineTo(p.x,p.y);fx.stroke()});requestAnimationFrame(fruitLoop)}
+fc.addEventListener('pointermove',fruitMove);fc.addEventListener('pointerdown',e=>{pressed=true;fruitMove(e)});window.addEventListener('pointerup',()=>pressed=false);
+// Neon Dodge
+const nc=document.getElementById('neonCanvas'),nx=nc.getContext('2d');let neonRunning=false,neonObs=[],neonScore=0,neonStart=0,neonW=1,neonH=1,neonP={x:.5,y:.5};
+function startNeon(){show('neon');[neonW,neonH]=fitCanvas(nc);neonRunning=true;neonObs=[];neonScore=0;neonStart=performance.now();document.getElementById('neonScore').textContent='0';requestAnimationFrame(neonLoop)}
+function neonMove(e){const p=pointerPos(nc,e);neonP={x:p.x/neonW,y:p.y/neonH}}
+function neonLoop(t){if(!neonRunning)return;const d=devicePixelRatio||1;nx.setTransform(d,0,0,d,0,0);nx.clearRect(0,0,neonW,neonH);const elapsed=t-neonStart,left=Math.max(0,30000-elapsed);document.getElementById('neonTime').textContent=Math.ceil(left/1000);if(left<=0){neonRunning=false;overlay('Раунд окончен','Счёт: '+neonScore);return}if(Math.random()<.045)neonObs.push({x:Math.random()*neonW,y:-25,r:11+Math.random()*15,v:2.8+Math.random()*4});const px=neonP.x*neonW,py=neonP.y*neonH;for(let i=neonObs.length-1;i>=0;i--){const o=neonObs[i];o.y+=o.v;if(Math.hypot(o.x-px,o.y-py)<o.r+23){neonRunning=false;overlay('Попадание!','Счёт: '+neonScore);return}if(o.y>neonH+40){neonObs.splice(i,1);neonScore++;document.getElementById('neonScore').textContent=neonScore}}nx.strokeStyle='rgba(34,211,238,.16)';for(let i=0;i<16;i++){const a=i*Math.PI/8;nx.beginPath();nx.moveTo(px,py);nx.lineTo(px+Math.cos(a)*Math.max(neonW,neonH),py+Math.sin(a)*Math.max(neonW,neonH));nx.stroke()}neonObs.forEach(o=>{nx.beginPath();nx.fillStyle='#38bdf8';nx.shadowBlur=24;nx.shadowColor='#22d3ee';nx.arc(o.x,o.y,o.r,0,Math.PI*2);nx.fill()});nx.shadowBlur=0;nx.beginPath();nx.fillStyle='#fff';nx.arc(px,py,17,0,Math.PI*2);nx.fill();nx.strokeStyle='#67e8f9';nx.lineWidth=4;nx.stroke();requestAnimationFrame(neonLoop)}
+nc.addEventListener('pointermove',neonMove);nc.addEventListener('pointerdown',neonMove);
+// Stack Rush
+const sc=document.getElementById('stackCanvas'),sx=sc.getContext('2d');let stackRunning=false,stackBlocks=[],stackMoving=null,stackDir=1,stackW=1,stackH=1,stackHeight=0,stackPhase=0;
+function startStack(){show('stack');[stackW,stackH]=fitCanvas(sc);stackRunning=true;stackHeight=0;document.getElementById('stackHeight').textContent='0';stackBlocks=[{x:stackW/2-110,y:stackH-50,w:220,h:32}];stackMoving={x:0,y:stackH-86,w:220,h:32};stackPhase=0;requestAnimationFrame(stackLoop)}
+function stackMove(e){const p=pointerPos(sc,e);stackPhase=p.x/stackW;if(stackMoving&&stackRunning)stackMoving.x=Math.max(0,Math.min(stackW-stackMoving.w,p.x-stackMoving.w/2))}
+function stackCut(){if(!stackRunning||!stackMoving)return;const top=stackBlocks[stackBlocks.length-1],l=Math.max(top.x,stackMoving.x),r=Math.min(top.x+top.w,stackMoving.x+stackMoving.w);if(r-l<26){stackRunning=false;overlay('Башня упала','Высота: '+stackHeight);return}const nw=r-l;stackBlocks.push({x:l,y:top.y-36,w:nw,h:32});stackMoving={x:0,y:top.y-72,w:nw,h:32};stackHeight++;document.getElementById('stackHeight').textContent=stackHeight}
+function stackLoop(){if(!stackRunning)return;const d=devicePixelRatio||1;sx.setTransform(d,0,0,d,0,0);sx.clearRect(0,0,stackW,stackH);if(stackMoving){stackMoving.x+=stackDir*(3.5+Math.min(6,stackHeight*.12));if(stackMoving.x<=0){stackMoving.x=0;stackDir=1}if(stackMoving.x+stackMoving.w>=stackW){stackMoving.x=stackW-stackMoving.w;stackDir=-1}}stackBlocks.forEach((b,i)=>{sx.fillStyle=i%2?'#fbbf24':'#fb923c';sx.shadowBlur=16;sx.shadowColor='#f59e0b';sx.fillRect(b.x,b.y,b.w,b.h);sx.shadowBlur=0;sx.fillStyle='rgba(255,255,255,.25)';sx.fillRect(b.x,b.y,b.w,3)});if(stackMoving){sx.fillStyle='#fde68a';sx.fillRect(stackMoving.x,stackMoving.y,stackMoving.w,stackMoving.h)}requestAnimationFrame(stackLoop)}
+sc.addEventListener('pointermove',stackMove);sc.addEventListener('pointerdown',e=>{stackMove(e);stackCut()});
+addEventListener('resize',()=>{if(current==='fruit')[fruitW,fruitH]=fitCanvas(fc);if(current==='neon')[neonW,neonH]=fitCanvas(nc);if(current==='stack')[stackW,stackH]=fitCanvas(sc)});
+"""
+    )
     private static let vrSettingsHTML = htmlPage(
         title: "Настройки",
         icon: "⚙",
@@ -3006,6 +2999,8 @@ let number='';const pd=document.getElementById('phone-display');document.querySe
             browser.loadHTMLString(Self.vrMessagesHTML, baseURL: URL(string: "https://handar.vision/"))
         case "phone":
             browser.loadHTMLString(Self.vrPhoneHTML, baseURL: URL(string: "https://handar.vision/"))
+        case "games":
+            browser.loadHTMLString(Self.vrGamesHTML, baseURL: URL(string: "https://handar.vision/"))
         case "settings":
             browser.loadHTMLString(Self.vrSettingsHTML, baseURL: URL(string: "https://handar.vision/"))
         default:

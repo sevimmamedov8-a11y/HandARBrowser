@@ -1083,7 +1083,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         directVideoPointer.layer.cornerRadius = 9
         directVideoPointer.layer.borderWidth = 2
         directVideoPointer.layer.borderColor = UIColor(red: 0.35, green: 0.85, blue: 1, alpha: 1).cgColor
-        directVideoPointer.backgroundColor = .white
+        directVideoPointer.backgroundColor = UIColor(red: 0.85, green: 0.98, blue: 1, alpha: 1)
         directVideoPointer.layer.shadowColor = UIColor.black.cgColor
         directVideoPointer.layer.shadowOpacity = 0.7
         directVideoPointer.layer.shadowRadius = 5
@@ -2689,23 +2689,23 @@ extension MainViewController {
 <meta charset="utf-8">
 <title>HandAR VR Desktop</title>
 <style>
-:root{--glass:rgba(20,24,34,.54);--glass2:rgba(255,255,255,.12);--text:#fff;--muted:rgba(255,255,255,.7)}
+:root{--glass:rgba(10,16,30,.55);--glass2:rgba(120,220,255,.14);--text:#f2f8ff;--muted:rgba(210,235,255,.72);--accent:#22d3ee;--accent2:#a78bfa}
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
-html,body{margin:0;width:100%;height:100%;overflow:hidden;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","Helvetica Neue",Arial,sans-serif;color:var(--text);background:linear-gradient(145deg,#0e1732 0%,#43276d 50%,#0a132b 100%);}
-body:before{content:"";position:fixed;inset:-20%;background:radial-gradient(circle at 28% 30%,rgba(95,170,255,.32),transparent 34%),radial-gradient(circle at 72% 64%,rgba(226,92,255,.28),transparent 32%);filter:blur(28px);}
-.wall{position:relative;height:100%;padding:18px 34px 20px;display:flex;flex-direction:column;gap:14px;}
-.status{height:30px;display:flex;align-items:center;justify-content:space-between;font-size:16px;font-weight:650;text-shadow:0 2px 10px rgba(0,0,0,.35)}
-.status .right{display:flex;gap:10px;align-items:center;font-size:13px;font-weight:550}.status .right span{white-space:nowrap}.pill{padding:6px 10px;border-radius:999px;background:rgba(0,0,0,.22);backdrop-filter:blur(18px)}
-.search{height:50px;border-radius:22px;background:rgba(255,255,255,.16);border:1px solid rgba(255,255,255,.25);backdrop-filter:blur(22px);display:flex;align-items:center;gap:12px;padding:0 17px;font-size:17px;color:#fff;box-shadow:0 8px 24px rgba(0,0,0,.14)}
-.searchIcon{font-size:19px;opacity:.9}.searchText{opacity:.78}.searchHint{margin-left:auto;font-size:12px;opacity:.52;padding:5px 8px;border-radius:9px;background:rgba(0,0,0,.16)}
-.grid{flex:1;display:grid;grid-template-columns:repeat(6,1fr);grid-auto-rows:minmax(88px,1fr);gap:12px 16px;align-items:start;padding:2px 2px 0}
-.app{min-width:0;text-align:center;cursor:pointer;user-select:none}.app:active{transform:scale(.93)}
-.icon{width:64px;height:64px;margin:0 auto 6px;border-radius:20px;display:flex;align-items:center;justify-content:center;box-shadow:inset 0 1px 1px rgba(255,255,255,.24),0 9px 18px rgba(0,0,0,.20);border:1px solid rgba(255,255,255,.16);overflow:hidden}.icon svg{width:34px;height:34px;fill:none;stroke:#fff;stroke-width:2.2;stroke-linecap:round;stroke-linejoin:round}.icon .solid{fill:#fff;stroke:none}
-.app span{display:block;font-size:13px;line-height:16px;font-weight:560;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-shadow:0 1px 6px rgba(0,0,0,.35)}
-.blue{background:linear-gradient(135deg,#54a9ff,#1866e8)}.red{background:linear-gradient(135deg,#ff4d55,#cf111c)}.pink{background:linear-gradient(135deg,#ff5bb8,#7d26ff)}.teal{background:linear-gradient(135deg,#42d9ca,#007d87)}.indigo{background:linear-gradient(135deg,#7e82ff,#4647b9)}.green{background:linear-gradient(135deg,#55df76,#159447)}.cyan{background:linear-gradient(135deg,#55d8ff,#1a74db)}.orange{background:linear-gradient(135deg,#ffb657,#e46710)}.gray{background:linear-gradient(135deg,#737b88,#343943)}.dark{background:rgba(13,18,28,.82)}.purple{background:linear-gradient(135deg,#a855f7,#5b21b6)}
-.dock{height:82px;border-radius:28px;background:rgba(235,240,255,.18);border:1px solid rgba(255,255,255,.22);backdrop-filter:blur(28px);display:flex;align-items:center;justify-content:space-around;padding:9px 22px;box-shadow:0 12px 30px rgba(0,0,0,.2)}
-.dock .icon{width:54px;height:54px;border-radius:17px;margin:0}.dock .app span{display:none}.dock .app{width:56px}
-.note{text-align:center;font-size:11px;color:rgba(255,255,255,.48);margin-top:-4px}.launch{animation:launch .22s ease-out}.launch .icon{box-shadow:0 0 0 5px rgba(255,255,255,.28),0 0 30px rgba(255,255,255,.25)}
+html,body{margin:0;width:100%;height:100%;overflow:hidden;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","Helvetica Neue",Arial,sans-serif;color:var(--text);background:radial-gradient(1200px 700px at 18% -10%,#123,transparent 60%),radial-gradient(1000px 620px at 85% 110%,#102a43,transparent 55%),linear-gradient(160deg,#04070f 0%,#0b1630 55%,#030509 100%);}
+body:before{content:"";position:fixed;inset:-22%;background:radial-gradient(circle at 22% 26%,rgba(34,211,238,.34),transparent 30%),radial-gradient(circle at 78% 68%,rgba(167,139,250,.30),transparent 32%),radial-gradient(circle at 55% 12%,rgba(16,185,129,.18),transparent 30%);filter:blur(32px);}
+.wall{position:relative;height:100%;padding:20px 38px 22px;display:flex;flex-direction:column;gap:16px;}
+.status{height:34px;display:flex;align-items:center;justify-content:space-between;font-size:17px;font-weight:700;text-shadow:0 2px 12px rgba(0,0,0,.4)}
+.status .right{display:flex;gap:10px;align-items:center;font-size:13px;font-weight:600}.status .right span{white-space:nowrap}.pill{padding:7px 12px;border-radius:999px;background:rgba(34,211,238,.16);border:1px solid rgba(34,211,238,.4);backdrop-filter:blur(18px);color:#aeefff}
+.search{height:54px;border-radius:18px;background:rgba(6,14,26,.5);border:1px solid rgba(34,211,238,.35);backdrop-filter:blur(24px);display:flex;align-items:center;gap:12px;padding:0 18px;font-size:17px;color:#fff;box-shadow:0 10px 30px rgba(0,0,0,.35),0 0 18px rgba(34,211,238,.12) inset}
+.searchIcon{font-size:19px;opacity:.9;color:var(--accent)}.searchText{opacity:.85}.searchHint{margin-left:auto;font-size:12px;opacity:.72;padding:6px 9px;border-radius:10px;background:rgba(34,211,238,.12);border:1px solid rgba(34,211,238,.25)}
+.grid{flex:1;display:grid;grid-template-columns:repeat(6,1fr);grid-auto-rows:minmax(92px,1fr);gap:14px 18px;align-items:start;padding:2px 2px 0}
+.app{min-width:0;text-align:center;cursor:pointer;user-select:none;transition:transform .15s ease}.app:active{transform:scale(.9)}
+.icon{width:68px;height:68px;margin:0 auto 7px;border-radius:24px;display:flex;align-items:center;justify-content:center;box-shadow:inset 0 1px 1px rgba(255,255,255,.28),0 12px 24px rgba(0,0,0,.28);border:1px solid rgba(255,255,255,.18);overflow:hidden}.icon svg{width:36px;height:36px;fill:none;stroke:#fff;stroke-width:2.1;stroke-linecap:round;stroke-linejoin:round}.icon .solid{fill:#fff;stroke:none}
+.app span{display:block;font-size:13px;line-height:16px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-shadow:0 1px 8px rgba(0,0,0,.4)}
+.blue{background:linear-gradient(135deg,#38bdf8,#2563eb)}.red{background:linear-gradient(135deg,#fb7185,#be123c)}.pink{background:linear-gradient(135deg,#f472b6,#8b5cf6)}.teal{background:linear-gradient(135deg,#2dd4bf,#0f766e)}.indigo{background:linear-gradient(135deg,#818cf8,#4338ca)}.green{background:linear-gradient(135deg,#4ade80,#15803d)}.cyan{background:linear-gradient(135deg,#22d3ee,#0369a1)}.orange{background:linear-gradient(135deg,#fbbf24,#c2410c)}.gray{background:linear-gradient(135deg,#94a3b8,#334155)}.dark{background:rgba(15,23,42,.85)}.purple{background:linear-gradient(135deg,#c084fc,#6d28d9)}
+.dock{height:88px;border-radius:30px;background:rgba(8,15,28,.62);border:1px solid rgba(34,211,238,.25);backdrop-filter:blur(30px);display:flex;align-items:center;justify-content:space-around;padding:10px 24px;box-shadow:0 16px 40px rgba(0,0,0,.35),0 0 24px rgba(34,211,238,.08) inset}
+.dock .icon{width:56px;height:56px;border-radius:19px;margin:0}.dock .app span{display:none}.dock .app{width:58px}
+.note{text-align:center;font-size:11px;color:rgba(190,225,255,.5);margin-top:-4px}.launch{animation:launch .22s ease-out}.launch .icon{box-shadow:0 0 0 5px rgba(34,211,238,.4),0 0 34px rgba(34,211,238,.45)}
 @keyframes launch{from{transform:scale(.96)}to{transform:scale(1)}}
 </style>
 </head>
@@ -2760,7 +2760,7 @@ document.querySelectorAll('.app').forEach(function(a){a.addEventListener('click'
 <meta charset="utf-8"><title>HandAR VR App</title>
 <style>
 :root{--accent:%ACCENT%}
-*{box-sizing:border-box}html,body{margin:0;width:100%%;height:100%%;overflow:hidden;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","Helvetica Neue",Arial,sans-serif;background:linear-gradient(135deg,#0d1118,#1a2030);color:#fff}body:before{content:"";position:fixed;inset:0;background:radial-gradient(circle at 70%% 20%%,var(--accent),transparent 42%%);opacity:.28}.wrap{position:relative;height:100%%;padding:22px 34px;display:flex;flex-direction:column;gap:18px}.top{height:44px;display:flex;align-items:center;justify-content:space-between}.brand{display:flex;align-items:center;gap:12px}.back{border:1px solid rgba(255,255,255,.2);background:rgba(255,255,255,.1);color:#fff;border-radius:15px;padding:10px 15px;font-size:15px}.title{font-size:22px;font-weight:700}.card{flex:1;border:1px solid rgba(255,255,255,.15);background:rgba(255,255,255,.07);backdrop-filter:blur(25px);border-radius:28px;padding:26px;overflow:auto}.hero{display:flex;align-items:center;gap:18px}.bigicon{width:74px;height:74px;border-radius:22px;background:var(--accent);display:flex;align-items:center;justify-content:center;font-size:34px;box-shadow:0 10px 30px rgba(0,0,0,.24)}h1{margin:0;font-size:32px}p{color:rgba(255,255,255,.7);line-height:1.45}.row{display:flex;gap:12px;flex-wrap:wrap}.btn{border:1px solid rgba(255,255,255,.2);background:rgba(255,255,255,.12);color:#fff;border-radius:17px;padding:13px 18px;font-size:15px}.btn.primary{background:var(--accent);border-color:transparent}.small{font-size:12px;color:rgba(255,255,255,.48)}textarea{width:100%%;height:58%%;resize:none;border:1px solid rgba(255,255,255,.18);background:rgba(0,0,0,.2);color:#fff;border-radius:18px;padding:16px;font:inherit;outline:none}.display{font-size:48px;text-align:right;padding:18px;background:rgba(0,0,0,.25);border-radius:20px;margin-bottom:14px}.keys{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}.key{padding:20px 10px;border:0;border-radius:16px;background:rgba(255,255,255,.1);color:#fff;font-size:22px}.key.op{background:var(--accent)}.photo-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-top:22px}.photo{aspect-ratio:1.25;border-radius:22px;display:flex;align-items:flex-end;padding:14px;font-weight:700;background:linear-gradient(145deg,var(--accent),rgba(255,255,255,.1)),radial-gradient(circle at 70% 25%,#fff5,transparent 35%);border:1px solid rgba(255,255,255,.14)}.p2{filter:saturate(.75)}.p3{filter:hue-rotate(28deg)}.p4{filter:hue-rotate(90deg)}.p5{filter:hue-rotate(145deg)}.p6{filter:hue-rotate(220deg)}.file-list,.chat-list{display:flex;flex-direction:column;gap:10px;margin-top:24px}.file-row,.chat{border:1px solid rgba(255,255,255,.13);background:rgba(255,255,255,.06);color:#fff;border-radius:18px;padding:15px 17px;text-align:left}.file-row{display:grid;grid-template-columns:34px 1fr;gap:3px 10px}.file-row span{grid-row:1/3;font-size:22px}.file-row small{color:rgba(255,255,255,.48)}.chat{display:grid;grid-template-columns:1fr auto;gap:4px 12px}.chat span{color:rgba(255,255,255,.68)}.chat time{grid-column:2;grid-row:1/3;color:rgba(255,255,255,.38);font-size:12px}.phone-display{font-size:36px;letter-spacing:2px;text-align:center;padding:18px;border-radius:18px;background:rgba(0,0,0,.22);margin:22px 0 14px}.phone-keys{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
+*{box-sizing:border-box}html,body{margin:0;width:100%%;height:100%%;overflow:hidden;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","Helvetica Neue",Arial,sans-serif;background:linear-gradient(150deg,#04070f 0%%,#0b1630 55%%,#030509 100%%);color:#eef6ff}body:before{content:"";position:fixed;inset:-10%%;background:radial-gradient(circle at 72%% 16%%,var(--accent),transparent 38%%),radial-gradient(circle at 12%% 88%%,rgba(34,211,238,.35),transparent 34%%);opacity:.4;filter:blur(18px)}.wrap{position:relative;height:100%%;padding:22px 34px;display:flex;flex-direction:column;gap:18px}.top{height:44px;display:flex;align-items:center;justify-content:space-between}.brand{display:flex;align-items:center;gap:12px}.back{border:1px solid rgba(34,211,238,.35);background:rgba(8,18,32,.5);color:#c9f3ff;border-radius:14px;padding:10px 16px;font-size:15px;font-weight:600}.title{font-size:22px;font-weight:800;letter-spacing:.3px}.card{flex:1;border:1px solid rgba(120,200,255,.18);background:rgba(10,18,32,.55);backdrop-filter:blur(28px);border-radius:26px;padding:26px;overflow:auto;box-shadow:0 18px 50px rgba(0,0,0,.3)}.hero{display:flex;align-items:center;gap:18px}.bigicon{width:76px;height:76px;border-radius:24px;background:var(--accent);display:flex;align-items:center;justify-content:center;font-size:34px;box-shadow:0 12px 34px rgba(0,0,0,.3),0 0 24px rgba(120,220,255,.2)}h1{margin:0;font-size:32px;font-weight:800}p{color:rgba(220,240,255,.72);line-height:1.45}.row{display:flex;gap:12px;flex-wrap:wrap}.btn{border:1px solid rgba(120,200,255,.25);background:rgba(120,200,255,.1);color:#eaf7ff;border-radius:16px;padding:13px 18px;font-size:15px;font-weight:600}.btn.primary{background:var(--accent);color:#04121a;border-color:transparent;box-shadow:0 8px 22px rgba(0,0,0,.28)}.small{font-size:12px;color:rgba(190,225,255,.5)}textarea{width:100%%;height:58%%;resize:none;border:1px solid rgba(120,200,255,.25);background:rgba(4,10,20,.5);color:#eaf7ff;border-radius:18px;padding:16px;font:inherit;outline:none}.display{font-size:48px;text-align:right;padding:18px;background:rgba(4,10,20,.55);border:1px solid rgba(120,200,255,.15);border-radius:20px;margin-bottom:14px}.keys{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}.key{padding:20px 10px;border:0;border-radius:16px;background:rgba(120,200,255,.1);color:#eaf7ff;font-size:22px;font-weight:600}.key.op{background:var(--accent);color:#04121a}.photo-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-top:22px}.photo{aspect-ratio:1.25;border-radius:22px;display:flex;align-items:flex-end;padding:14px;font-weight:700;background:linear-gradient(145deg,var(--accent),rgba(255,255,255,.1)),radial-gradient(circle at 70%% 25%%,#fff5,transparent 35%%);border:1px solid rgba(255,255,255,.14)}.p2{filter:saturate(.75)}.p3{filter:hue-rotate(28deg)}.p4{filter:hue-rotate(90deg)}.p5{filter:hue-rotate(145deg)}.p6{filter:hue-rotate(220deg)}.file-list,.chat-list{display:flex;flex-direction:column;gap:10px;margin-top:24px}.file-row,.chat{border:1px solid rgba(120,200,255,.16);background:rgba(120,200,255,.06);color:#eaf7ff;border-radius:18px;padding:15px 17px;text-align:left}.file-row{display:grid;grid-template-columns:34px 1fr;gap:3px 10px}.file-row span{grid-row:1/3;font-size:22px}.file-row small{color:rgba(190,225,255,.5)}.chat{display:grid;grid-template-columns:1fr auto;gap:4px 12px}.chat span{color:rgba(210,235,255,.7)}.chat time{grid-column:2;grid-row:1/3;color:rgba(190,225,255,.4);font-size:12px}.phone-display{font-size:36px;letter-spacing:2px;text-align:center;padding:18px;border-radius:18px;background:rgba(4,10,20,.55);border:1px solid rgba(120,200,255,.15);margin:22px 0 14px}.phone-keys{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
 </style></head><body><div class="wrap">
 <div class="top"><div class="brand"><button class="back" onclick="post('home')">‹ Домой</button><div class="title">%TITLE%</div></div><div class="small">HandAR VR</div></div>
 <div class="card">%BODY%</div></div>
@@ -2874,17 +2874,17 @@ let number='';const pd=document.getElementById('phone-display');document.querySe
     private static let vrGamesHTML = htmlPage(
         title: "Игры",
         icon: "🎮",
-        accent: "#7c3aed",
+        accent: "#22d3ee",
         body: """
 <style>
-body{background:#05060b}
-#arcade{position:relative;height:calc(100vh - 106px);min-height:430px;border-radius:28px;overflow:hidden;border:1px solid rgba(255,255,255,.13);background:radial-gradient(circle at 50% 20%,rgba(124,58,237,.18),transparent 36%),linear-gradient(180deg,#0c1019,#04050a)}
+body{background:#030509}
+#arcade{position:relative;height:calc(100vh - 106px);min-height:430px;border-radius:26px;overflow:hidden;border:1px solid rgba(120,200,255,.2);background:radial-gradient(circle at 50% 18%,rgba(34,211,238,.16),transparent 36%),linear-gradient(180deg,#0b1630,#04070f)}
 .screen{position:absolute;inset:0;display:none;padding:22px}.screen.active{display:block}
-.gamebar{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:16px}.gamebar h2{margin:0;font-size:26px}.gamebar .score{font-size:18px;font-weight:800}.gamecardgrid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;height:calc(100% - 62px)}
-.gamecard{border:1px solid rgba(255,255,255,.13);border-radius:25px;background:linear-gradient(160deg,rgba(255,255,255,.10),rgba(255,255,255,.035));color:#fff;text-align:left;padding:22px;cursor:pointer;box-shadow:0 18px 45px rgba(0,0,0,.2);display:flex;flex-direction:column;justify-content:space-between}.gamecard:active{transform:scale(.985)}
-.gameemoji{font-size:55px}.gamecard h3{font-size:23px;margin:12px 0 6px}.gamecard p{font-size:14px;line-height:1.4;color:rgba(255,255,255,.68);margin:0}.tag{display:inline-flex;margin-top:14px;padding:7px 10px;border-radius:999px;background:rgba(255,255,255,.09);font-size:12px;color:rgba(255,255,255,.72)}
-#fruitCanvas,#neonCanvas,#stackCanvas{position:absolute;inset:0;width:100%;height:100%;touch-action:none}.arena{position:absolute;inset:82px 0 0;border-radius:18px;overflow:hidden}.hud{position:absolute;left:22px;right:22px;top:18px;display:flex;justify-content:space-between;z-index:3;font-size:19px;font-weight:800;pointer-events:none;text-shadow:0 3px 16px #000}.help{position:absolute;left:0;right:0;bottom:14px;text-align:center;color:rgba(255,255,255,.56);font-size:12px;z-index:3;pointer-events:none}.gamebtn{border:1px solid rgba(255,255,255,.16);background:rgba(255,255,255,.09);color:#fff;border-radius:14px;padding:10px 14px}.gamebtn.primary{background:#7c3aed;border-color:#7c3aed}
-#gameOverlay{position:absolute;inset:0;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,.58);z-index:8;text-align:center}.overlayBox{padding:30px 38px;border-radius:24px;background:rgba(15,18,27,.93);border:1px solid rgba(255,255,255,.14)}.overlayBox h2{margin:0 0 8px;font-size:32px}.overlayBox p{margin:0 0 18px}
+.gamebar{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:16px}.gamebar h2{margin:0;font-size:26px;font-weight:800}.gamebar .score{font-size:18px;font-weight:800;color:#aeefff}.gamecardgrid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;height:calc(100% - 62px)}
+.gamecard{border:1px solid rgba(120,200,255,.18);border-radius:24px;background:linear-gradient(160deg,rgba(120,200,255,.1),rgba(255,255,255,.03));color:#fff;text-align:left;padding:22px;cursor:pointer;box-shadow:0 18px 45px rgba(0,0,0,.28);display:flex;flex-direction:column;justify-content:space-between}.gamecard:active{transform:scale(.985)}
+.gameemoji{font-size:55px}.gamecard h3{font-size:23px;margin:12px 0 6px;font-weight:800}.gamecard p{font-size:14px;line-height:1.4;color:rgba(220,240,255,.7);margin:0}.tag{display:inline-flex;margin-top:14px;padding:7px 12px;border-radius:999px;background:rgba(34,211,238,.14);border:1px solid rgba(34,211,238,.3);font-size:12px;color:#aeefff}
+#fruitCanvas,#neonCanvas,#stackCanvas{position:absolute;inset:0;width:100%;height:100%;touch-action:none}.arena{position:absolute;inset:82px 0 0;border-radius:18px;overflow:hidden}.hud{position:absolute;left:22px;right:22px;top:18px;display:flex;justify-content:space-between;z-index:3;font-size:19px;font-weight:800;pointer-events:none;text-shadow:0 3px 16px #000}.help{position:absolute;left:0;right:0;bottom:14px;text-align:center;color:rgba(220,240,255,.55);font-size:12px;z-index:3;pointer-events:none}.gamebtn{border:1px solid rgba(120,200,255,.3);background:rgba(120,200,255,.1);color:#eaf7ff;border-radius:14px;padding:10px 15px;font-weight:600}.gamebtn.primary{background:#22d3ee;border-color:#22d3ee;color:#04121a}
+#gameOverlay{position:absolute;inset:0;display:none;align-items:center;justify-content:center;background:rgba(2,6,12,.62);z-index:8;text-align:center}.overlayBox{padding:30px 38px;border-radius:24px;background:rgba(10,18,32,.95);border:1px solid rgba(120,200,255,.25)}.overlayBox h2{margin:0 0 8px;font-size:32px}.overlayBox p{margin:0 0 18px}
 @media(max-width:900px){.gamecardgrid{grid-template-columns:1fr}.gamecard{min-height:135px}.gamecardgrid{overflow:auto}}
 </style>
 <div id="arcade">
@@ -3521,7 +3521,18 @@ final class MainMenuView: UIView {
     init(frame: CGRect, profile: VRProfile) {
         self.profile = profile
         super.init(frame: frame)
-        backgroundColor = .black
+        backgroundColor = UIColor(red: 0.02, green: 0.04, blue: 0.09, alpha: 1)
+        let aurora = CAGradientLayer()
+        aurora.colors = [
+            UIColor(red: 0.03, green: 0.07, blue: 0.16, alpha: 1).cgColor,
+            UIColor(red: 0.06, green: 0.16, blue: 0.28, alpha: 1).cgColor,
+            UIColor(red: 0.02, green: 0.04, blue: 0.09, alpha: 1).cgColor
+        ]
+        aurora.startPoint = CGPoint(x: 0.1, y: 0.0)
+        aurora.endPoint = CGPoint(x: 0.9, y: 1.0)
+        aurora.frame = bounds
+        aurora.autoresizingMask = [.layerWidthSizable, .layerHeightSizable]
+        layer.insertSublayer(aurora, at: 0)
         build()
         applyProfile()
     }
@@ -3533,7 +3544,7 @@ final class MainMenuView: UIView {
     private func build() {
         titleLabel.text = "HandAR Vision"
         titleLabel.textColor = .white
-        titleLabel.font = .systemFont(ofSize: 26, weight: .medium)
+        titleLabel.font = .systemFont(ofSize: 30, weight: .bold)
         titleLabel.textAlignment = .center
 
         subtitleLabel.text = "Вставь телефон в шлем и подгони линзы под себя"
@@ -3543,8 +3554,8 @@ final class MainMenuView: UIView {
 
         var config = UIButton.Configuration.filled()
         config.title = "ВОЙТИ В VR"
-        config.baseForegroundColor = .white
-        config.baseBackgroundColor = UIColor(white: 0.16, alpha: 1)
+        config.baseBackgroundColor = UIColor(red: 0.13, green: 0.83, blue: 0.93, alpha: 1)
+        config.baseForegroundColor = UIColor(red: 0.02, green: 0.07, blue: 0.10, alpha: 1)
         config.cornerStyle = .capsule
         config.contentInsets = NSDirectionalEdgeInsets(top: 0, leading: 34, bottom: 0, trailing: 34)
         enterButton.configuration = config
@@ -3553,7 +3564,7 @@ final class MainMenuView: UIView {
 
         let diagnosticsButton = UIButton(type: .system)
         diagnosticsButton.setTitle("ПРОВЕРИТЬ VR BOX 3.0", for: .normal)
-        diagnosticsButton.setTitleColor(UIColor(white: 0.78, alpha: 1), for: .normal)
+        diagnosticsButton.setTitleColor(UIColor(red: 0.55, green: 0.9, blue: 1.0, alpha: 1), for: .normal)
         diagnosticsButton.titleLabel?.font = .systemFont(ofSize: 14, weight: .medium)
         diagnosticsButton.addAction(UIAction { [weak self] _ in self?.onDiagnostics?() }, for: .touchUpInside)
 
@@ -3571,7 +3582,7 @@ final class MainMenuView: UIView {
 
         let resetButton = UIButton(type: .system)
         resetButton.setTitle("Сбросить калибровку", for: .normal)
-        resetButton.setTitleColor(UIColor(red: 0.45, green: 0.78, blue: 1.0, alpha: 1), for: .normal)
+        resetButton.setTitleColor(UIColor(red: 0.45, green: 0.85, blue: 1.0, alpha: 1), for: .normal)
         resetButton.titleLabel?.font = .systemFont(ofSize: 13, weight: .regular)
         resetButton.contentHorizontalAlignment = .leading
         resetButton.addAction(UIAction { [weak self] _ in self?.resetProfile() }, for: .touchUpInside)
@@ -3697,7 +3708,7 @@ final class SliderRow: UIView {
 
         slider.minimumValue = minimum
         slider.maximumValue = maximum
-        slider.minimumTrackTintColor = UIColor(red: 0.38, green: 0.78, blue: 1.0, alpha: 1)
+        slider.minimumTrackTintColor = UIColor(red: 0.13, green: 0.83, blue: 0.93, alpha: 1)
         slider.isContinuous = true
         slider.addAction(UIAction { [weak self] _ in
             self?.refresh()
@@ -3744,8 +3755,8 @@ final class SliderRow: UIView {
         button.setTitle(title, for: .normal)
         button.titleLabel?.font = .systemFont(ofSize: 18, weight: .medium)
         button.setTitleColor(.white, for: .normal)
-        button.backgroundColor = UIColor(white: 0.18, alpha: 1)
-        button.layer.cornerRadius = 8
+        button.backgroundColor = UIColor(red: 0.1, green: 0.2, blue: 0.32, alpha: 1)
+        button.layer.cornerRadius = 12
         button.addAction(UIAction { [weak self] _ in
             guard let self else { return }
             self.value = self.slider.value + delta
@@ -3908,7 +3919,7 @@ final class VRBoxDiagnosticsView: UIViewController {
 
     override func loadView() {
         view = UIView()
-        view.backgroundColor = UIColor(white: 0.04, alpha: 1)
+        view.backgroundColor = UIColor(red: 0.02, green: 0.04, blue: 0.09, alpha: 1)
     }
 
     override func viewDidLoad() {
@@ -3944,15 +3955,16 @@ final class VRBoxDiagnosticsView: UIViewController {
         let close = UIButton(type: .system)
         close.setTitle("Закрыть", for: .normal)
         close.setTitleColor(.white, for: .normal)
-        close.backgroundColor = UIColor(white: 0.16, alpha: 1)
+        close.backgroundColor = UIColor(red: 0.13, green: 0.83, blue: 0.93, alpha: 1)
+        close.setTitleColor(UIColor(red: 0.02, green: 0.07, blue: 0.10, alpha: 1), for: .normal)
         close.layer.cornerRadius = 14
         close.addAction(UIAction { [weak self] _ in self?.service.stop(); self?.onClose?() }, for: .touchUpInside)
 
-        stickPad.backgroundColor = UIColor(white: 0.12, alpha: 1)
+        stickPad.backgroundColor = UIColor(red: 0.06, green: 0.12, blue: 0.2, alpha: 1)
         stickPad.layer.cornerRadius = 90
         stickPad.layer.borderWidth = 1
-        stickPad.layer.borderColor = UIColor.white.withAlphaComponent(0.18).cgColor
-        stickDot.backgroundColor = UIColor(red: 0.38, green: 0.86, blue: 1, alpha: 1)
+        stickPad.layer.borderColor = UIColor(red: 0.13, green: 0.83, blue: 0.93, alpha: 0.35).cgColor
+        stickDot.backgroundColor = UIColor(red: 0.13, green: 0.83, blue: 0.93, alpha: 1)
         stickDot.layer.cornerRadius = 12
         stickPad.addSubview(stickDot)
 

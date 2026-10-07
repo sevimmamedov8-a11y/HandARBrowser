@@ -1021,8 +1021,8 @@ final class MainViewController: UIViewController, MTKViewDelegate {
             _ b: VNHumanHandPoseObservation.JointName
         ) -> CGFloat {
             if a == .wrist { return 0.0055 }
-            let distal: Set = [.indexTip, .middleTip, .ringTip, .littleTip, .thumbTip]
-            let mid: Set = [.indexDIP, .middleDIP, .ringDIP, .littleDIP, .thumbIP]
+            let distal: Set<VNHumanHandPoseObservation.JointName> = [.indexTip, .middleTip, .ringTip, .littleTip, .thumbTip]
+            let mid: Set<VNHumanHandPoseObservation.JointName> = [.indexDIP, .middleDIP, .ringDIP, .littleDIP, .thumbIP]
             if distal.contains(b) { return 0.0040 }
             if mid.contains(b) { return 0.0050 }
             return 0.0062

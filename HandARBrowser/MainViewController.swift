@@ -478,6 +478,9 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     private var directVideoSyncTimer: Timer?
     private var mediaAudioSessionActive = false
 
+    /// Поверх реальных рук рисует виртуальные — прямо по распознанным суставам.
+    private let virtualHandOverlay = VirtualHandOverlayView(frame: .zero)
+
     // Metal
     private var device: MTLDevice!
     private var commandQueue: MTLCommandQueue!
@@ -621,6 +624,11 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         buildInterface()
         wireServices()
         controller.start()
+
+        virtualHandOverlay.frame = view.bounds
+        virtualHandOverlay.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        virtualHandOverlay.isUserInteractionEnabled = false
+        view.addSubview(virtualHandOverlay)
     }
 
     override func viewDidAppear(_ animated: Bool) {
@@ -1870,12 +1878,14 @@ final class MainViewController: UIViewController, MTKViewDelegate {
             directVideoPointer.isHidden = true
             input.release(webView: directVideoLeft)
             input.release(webView: directVideoRight)
+            updateVirtualHandOverlay(left: nil, right: nil)
             return
         }
         let oriented = sample.indexTip.applying(
             frame.displayTransform(for: currentInterfaceOrientation(), viewportSize: view.bounds.size)
         )
         let screenPoint = CGPoint(x: oriented.x * view.bounds.width, y: oriented.y * view.bounds.height)
+        updateVirtualHandOverlay(left: left, right: right)
         guard let (webView, local) = directVideoTarget(for: screenPoint) else {
             directVideoPointer.isHidden = true
             if !sample.clickPinch {
@@ -1903,6 +1913,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         }
         queueHandForegroundMask(left: left, right: right)
         updateHandSkeleton(left: left, right: right)
+        updateVirtualHandOverlay(left: left, right: right)
         if left != nil || right != nil {
             lastHandSeenTime = CACurrentMediaTime()
             controllerHandRoot.isHidden = true
@@ -2100,6 +2111,33 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     /// Создаёт маску кисти в координатах сырого кадра камеры. В ней нет
     /// графики скелета — она только определяет, какие настоящие пиксели камеры
     /// нужно показать поверх браузера.
+    private func updateVirtualHandOverlay(left: HandSample?, right: HandSample?) {
+        guard let frame = tracking.latestFrameCopy else {
+            virtualHandOverlay.leftJoints = [:]
+            virtualHandOverlay.rightJoints = [:]
+            return
+        }
+        let transform = frame.displayTransform(
+            for: currentInterfaceOrientation(),
+            viewportSize: view.bounds.size
+        )
+        func map(_ sample: HandSample?) -> [VNHumanHandPoseObservation.JointName: CGPoint] {
+            guard let sample else { return [:] }
+            var result: [VNHumanHandPoseObservation.JointName: CGPoint] = [:]
+            result.reserveCapacity(sample.joints.count)
+            for (name, point) in sample.joints {
+                let oriented = point.applying(transform)
+                result[name] = CGPoint(
+                    x: oriented.x * view.bounds.width,
+                    y: oriented.y * view.bounds.height
+                )
+            }
+            return result
+        }
+        virtualHandOverlay.leftJoints = map(left)
+        virtualHandOverlay.rightJoints = map(right)
+    }
+
     private func queueHandForegroundMask(left: HandSample?, right: HandSample?) {
         var bytes = [UInt8](repeating: 0, count: handMaskWidth * handMaskHeight)
         let activeSamples = [left, right].compactMap { $0 }
@@ -3147,6 +3185,108 @@ addEventListener('resize',()=>{if(current==='fruit')[fruitW,fruitH]=fitCanvas(fc
 /// Black overlay with two transparent circular holes. It creates the VR-lens
 /// silhouette without applying a Core Animation mask to the WKWebView layers,
 /// which can interfere with hardware-decoded HTML5 video presentation.
+/// Виртуальная рука поверх настоящей: рисуем ладонь плюс батарею пальцев
+/// с сужением к кончикам, используя те же суставы, что и трекер.
+final class VirtualHandOverlayView: UIView {
+    var leftJoints: [VNHumanHandPoseObservation.JointName: CGPoint] = [:] { didSet { setNeedsDisplay() } }
+    var rightJoints: [VNHumanHandPoseObservation.JointName: CGPoint] = [:] { didSet { setNeedsDisplay() } }
+
+    private static let bonePairs: [(VNHumanHandPoseObservation.JointName, VNHumanHandPoseObservation.JointName)] = [
+        (.wrist, .thumbCMC), (.thumbCMC, .thumbMP), (.thumbMP, .thumbIP), (.thumbIP, .thumbTip),
+        (.wrist, .indexMCP), (.indexMCP, .indexPIP), (.indexPIP, .indexDIP), (.indexDIP, .indexTip),
+        (.wrist, .middleMCP), (.middleMCP, .middlePIP), (.middlePIP, .middleDIP), (.middleDIP, .middleTip),
+        (.wrist, .ringMCP), (.ringMCP, .ringPIP), (.ringPIP, .ringDIP), (.ringDIP, .ringTip),
+        (.wrist, .littleMCP), (.littleMCP, .littlePIP), (.littlePIP, .littleDIP), (.littleDIP, .littleTip),
+        (.indexMCP, .middleMCP), (.middleMCP, .ringMCP), (.ringMCP, .littleMCP)
+    ]
+
+    private let skin = UIColor(red: 1.0, green: 0.83, blue: 0.70, alpha: 0.80)
+    private let outline = UIColor(red: 0.45, green: 0.27, blue: 0.18, alpha: 0.55)
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        backgroundColor = .clear
+        isOpaque = false
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        backgroundColor = .clear
+        isOpaque = false
+    }
+
+    override func draw(_ rect: CGRect) {
+        if !leftJoints.isEmpty { drawHand(joints: leftJoints) }
+        if !rightJoints.isEmpty { drawHand(joints: rightJoints) }
+    }
+
+    private func drawHand(joints: [VNHumanHandPoseObservation.JointName: CGPoint]) {
+        guard let context = UIGraphicsGetCurrentContext(),
+              let wrist = joints[.wrist],
+              let middleMCP = joints[.middleMCP] else { return }
+
+        let palmSize = max(hypot(middleMCP.x - wrist.x, middleMCP.y - wrist.y), 12)
+
+        // Ладонь — заполненный многоугольник по основаниям пальцев.
+        let palmNames: [VNHumanHandPoseObservation.JointName] = [.wrist, .littleMCP, .ringMCP, .middleMCP, .indexMCP]
+        let palmPoints = palmNames.compactMap { joints[$0] }
+        if palmPoints.count >= 3 {
+            let path = CGMutablePath()
+            path.move(to: palmPoints[0])
+            for point in palmPoints.dropFirst() { path.addLine(to: point) }
+            path.closeSubpath()
+            context.setFillColor(outline.withAlphaComponent(0.35).cgColor)
+            context.addPath(path)
+            context.fillPath()
+            context.setFillColor(skin.withAlphaComponent(0.55).cgColor)
+            context.addPath(path)
+            context.fillPath()
+        }
+
+        // Пальцы: округлые капсулы с сужением к кончикам.
+        func segmentWidth(_ b: VNHumanHandPoseObservation.JointName) -> CGFloat {
+            switch b {
+            case .indexTip, .middleTip, .ringTip, .littleTip, .thumbTip:
+                return palmSize * 0.14
+            case .indexDIP, .middleDIP, .ringDIP, .littleDIP, .thumbIP:
+                return palmSize * 0.17
+            case .indexPIP, .middlePIP, .ringPIP, .littlePIP, .thumbMP, .thumbCMC:
+                return palmSize * 0.21
+            default:
+                return palmSize * 0.17
+            }
+        }
+
+        context.setLineCap(.round)
+        context.setLineJoin(.round)
+        for (a, b) in Self.bonePairs {
+            guard let pa = joints[a], let pb = joints[b] else { continue }
+            let width = segmentWidth(b)
+            context.setStrokeColor(outline.cgColor)
+            context.setLineWidth(width * 1.28)
+            context.move(to: pa)
+            context.addLine(to: pb)
+            context.strokePath()
+            context.setStrokeColor(skin.cgColor)
+            context.setLineWidth(width)
+            context.move(to: pa)
+            context.addLine(to: pb)
+            context.strokePath()
+        }
+
+        // Суставы — шарики поверх.
+        for point in joints.values {
+            let radius = palmSize * 0.10
+            let rect = CGRect(x: point.x - radius, y: point.y - radius, width: radius * 2, height: radius * 2)
+            context.setFillColor(skin.cgColor)
+            context.fillEllipse(in: rect)
+            context.setStrokeColor(outline.cgColor)
+            context.setLineWidth(1.5)
+            context.strokeEllipse(in: rect)
+        }
+    }
+}
+
 final class DirectVideoLensMaskView: UIView {
     var leftCircle: CGRect = .zero { didSet { setNeedsDisplay() } }
     var rightCircle: CGRect = .zero { didSet { setNeedsDisplay() } }

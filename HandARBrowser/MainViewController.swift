@@ -1902,6 +1902,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
             return
         }
         queueHandForegroundMask(left: left, right: right)
+        updateHandSkeleton(left: left, right: right)
         if left != nil || right != nil {
             lastHandSeenTime = CACurrentMediaTime()
             controllerHandRoot.isHidden = true

@@ -106,6 +106,7 @@ grep -Fq "private let browser: WKWebView = {" "$SRC"
 grep -Fq "input.update(" "$SRC"
 grep -Fq "config.allowsPictureInPictureMediaPlayback = false" "$SRC"
 grep -Fq "config.preferences.isElementFullscreenEnabled = false" "$SRC"
+grep -Fq "let maxLensRadius = min(0.5" "$SRC"
 
 # --- V50 VR desktop + internal VR apps ---
 grep -Fq "private static let vrDesktopHTML" "$SRC"
@@ -140,7 +141,7 @@ grep -Fq "NSCameraUsageDescription" HandARBrowser/Info.plist
 ! grep -Fq "private let rightScene = SCNScene()" "$SRC"
 ! grep -Fq "frame.camera.projectionMatrix(" "$SRC"
 ! grep -Fq "EyeDisplayView" "$SRC"
-! grep -Fq "class LensMaskView" "$SRC"
+! grep -Fq "LensMaskView" "$SRC"
 ! grep -Fq "private let browserLeft" "$SRC"
 ! grep -Fq "private let browserRight" "$SRC"
 ! grep -Fq "browserPlaneForUnprojection" "$SRC"

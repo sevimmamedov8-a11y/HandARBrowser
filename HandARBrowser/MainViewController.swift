@@ -2125,12 +2125,16 @@ final class MainViewController: UIViewController, MTKViewDelegate {
             guard let sample else { return [:] }
             var result: [VNHumanHandPoseObservation.JointName: CGPoint] = [:]
             result.reserveCapacity(sample.joints.count)
+            let isLeft = currentInterfaceOrientation() == .landscapeLeft
             for (name, point) in sample.joints {
-                let oriented = point.applying(transform)
-                result[name] = CGPoint(
-                    x: oriented.x * view.bounds.width,
-                    y: oriented.y * view.bounds.height
+                // Vision: нормированные координаты ориентированного кадра (0..1).
+                // Переводим в raw-пиксели (как в worldRay), затем displayTransform —
+                // он ВАЖНО выдаёт уже экранные точки, дополнительное умножение не нужно.
+                let rawPixel = CGPoint(
+                    x: (isLeft ? (1 - point.x) : point.x) * CGFloat(frame.camera.imageResolution.width),
+                    y: (isLeft ? point.y : (1 - point.y)) * CGFloat(frame.camera.imageResolution.height)
                 )
+                result[name] = rawPixel.applying(transform)
             }
             return result
         }
@@ -3223,61 +3227,58 @@ final class VirtualHandOverlayView: UIView {
     private func drawHand(joints: [VNHumanHandPoseObservation.JointName: CGPoint]) {
         guard let context = UIGraphicsGetCurrentContext(),
               let wrist = joints[.wrist],
-              let middleMCP = joints[.middleMCP] else { return }
+              let middleMCP = joints[.middleMCP],
+              let indexMCP = joints[.indexMCP],
+              let littleMCP = joints[.littleMCP] else { return }
 
-        let palmSize = max(hypot(middleMCP.x - wrist.x, middleMCP.y - wrist.y), 12)
+        let axis = CGPoint(x: middleMCP.x - wrist.x, y: middleMCP.y - wrist.y)
+        let palmSize = max(hypot(axis.x, axis.y), 12)
+        let palmWidth = max(hypot(indexMCP.x - littleMCP.x, indexMCP.y - littleMCP.y), palmSize * 0.9)
+        let center = CGPoint(x: (wrist.x + middleMCP.x) * 0.5, y: (wrist.y + middleMCP.y) * 0.5)
 
-        // Ладонь — заполненный многоугольник по основаниям пальцев.
-        let palmNames: [VNHumanHandPoseObservation.JointName] = [.wrist, .littleMCP, .ringMCP, .middleMCP, .indexMCP]
-        let palmPoints = palmNames.compactMap { joints[$0] }
-        if palmPoints.count >= 3 {
-            let path = CGMutablePath()
-            path.move(to: palmPoints[0])
-            for point in palmPoints.dropFirst() { path.addLine(to: point) }
-            path.closeSubpath()
-            context.setFillColor(skin.withAlphaComponent(0.62).cgColor)
-            context.addPath(path)
-            context.fillPath()
-        }
+        // Ладонь — скруглённая «перчатка», ориентированная вдоль оси руки.
+        let angle = atan2(axis.y, axis.x) - .pi / 2
+        context.saveGState()
+        context.translateBy(x: center.x, y: center.y)
+        context.rotate(by: angle)
+        let palmRect = CGRect(
+            x: -palmWidth * 0.60,
+            y: -palmSize * 0.58,
+            width: palmWidth * 1.20,
+            height: palmSize * 1.30
+        )
+        let palmPath = UIBezierPath(roundedRect: palmRect, cornerRadius: palmWidth * 0.32)
+        context.setFillColor(skin.cgColor)
+        context.addPath(palmPath.cgPath)
+        context.fillPath()
+        context.restoreGState()
 
-        // Пальцы: округлые капсулы с сужением к кончикам.
-        func segmentWidth(_ b: VNHumanHandPoseObservation.JointName) -> CGFloat {
-            switch b {
-            case .indexTip, .middleTip, .ringTip, .littleTip, .thumbTip:
-                return palmSize * 0.20
-            case .indexDIP, .middleDIP, .ringDIP, .littleDIP, .thumbIP:
-                return palmSize * 0.23
-            case .indexPIP, .middlePIP, .ringPIP, .littlePIP, .thumbMP, .thumbCMC:
-                return palmSize * 0.27
-            default:
-                return palmSize * 0.23
-            }
-        }
-
+        // Пальцы — цельные мягкие «сосиски» от основания до кончика.
         context.setLineCap(.round)
         context.setLineJoin(.round)
-        for (a, b) in Self.bonePairs {
-            guard let pa = joints[a], let pb = joints[b] else { continue }
-            let width = segmentWidth(b)
-            context.setStrokeColor(outline.withAlphaComponent(0.10).cgColor)
-            context.setLineWidth(width * 1.45)
-            context.move(to: pa)
-            context.addLine(to: pb)
-            context.strokePath()
-            context.setStrokeColor(skin.cgColor)
+        context.setStrokeColor(skin.cgColor)
+
+        func finger(_ startJoint: VNHumanHandPoseObservation.JointName,
+                    _ tipJoint: VNHumanHandPoseObservation.JointName,
+                    _ width: CGFloat) {
+            guard let start = joints[startJoint], let tip = joints[tipJoint] else { return }
             context.setLineWidth(width)
-            context.move(to: pa)
-            context.addLine(to: pb)
+            context.move(to: start)
+            context.addLine(to: tip)
             context.strokePath()
         }
 
-        // Суставы — шарики поверх.
-        for point in joints.values {
-            let radius = palmSize * 0.14
-            let rect = CGRect(x: point.x - radius, y: point.y - radius, width: radius * 2, height: radius * 2)
-            context.setFillColor(skin.cgColor)
-            context.fillEllipse(in: rect)
-        }
+        finger(.indexMCP, .indexTip, palmWidth * 0.24)
+        finger(.middleMCP, .middleTip, palmWidth * 0.25)
+        finger(.ringMCP, .ringTip, palmWidth * 0.23)
+        finger(.littleMCP, .littleTip, palmWidth * 0.19)
+        finger(.thumbCMC, .thumbTip, palmWidth * 0.26)
+
+        // Манжета: плавное соединение ладони с запястьем (без костей и суставов).
+        context.setLineWidth(palmWidth * 0.95)
+        context.move(to: center)
+        context.addLine(to: wrist)
+        context.strokePath()
     }
 }
 

@@ -3200,8 +3200,8 @@ final class VirtualHandOverlayView: UIView {
         (.indexMCP, .middleMCP), (.middleMCP, .ringMCP), (.ringMCP, .littleMCP)
     ]
 
-    private let skin = UIColor(red: 1.0, green: 0.83, blue: 0.70, alpha: 0.80)
-    private let outline = UIColor(red: 0.45, green: 0.27, blue: 0.18, alpha: 0.55)
+    private let skin = UIColor(red: 0.16, green: 0.17, blue: 0.19, alpha: 0.62)
+    private let outline = UIColor(red: 0.85, green: 0.86, blue: 0.9, alpha: 0.18)
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -3235,10 +3235,7 @@ final class VirtualHandOverlayView: UIView {
             path.move(to: palmPoints[0])
             for point in palmPoints.dropFirst() { path.addLine(to: point) }
             path.closeSubpath()
-            context.setFillColor(outline.withAlphaComponent(0.35).cgColor)
-            context.addPath(path)
-            context.fillPath()
-            context.setFillColor(skin.withAlphaComponent(0.55).cgColor)
+            context.setFillColor(skin.withAlphaComponent(0.62).cgColor)
             context.addPath(path)
             context.fillPath()
         }
@@ -3247,13 +3244,13 @@ final class VirtualHandOverlayView: UIView {
         func segmentWidth(_ b: VNHumanHandPoseObservation.JointName) -> CGFloat {
             switch b {
             case .indexTip, .middleTip, .ringTip, .littleTip, .thumbTip:
-                return palmSize * 0.14
+                return palmSize * 0.20
             case .indexDIP, .middleDIP, .ringDIP, .littleDIP, .thumbIP:
-                return palmSize * 0.17
+                return palmSize * 0.23
             case .indexPIP, .middlePIP, .ringPIP, .littlePIP, .thumbMP, .thumbCMC:
-                return palmSize * 0.21
+                return palmSize * 0.27
             default:
-                return palmSize * 0.17
+                return palmSize * 0.23
             }
         }
 
@@ -3262,8 +3259,8 @@ final class VirtualHandOverlayView: UIView {
         for (a, b) in Self.bonePairs {
             guard let pa = joints[a], let pb = joints[b] else { continue }
             let width = segmentWidth(b)
-            context.setStrokeColor(outline.cgColor)
-            context.setLineWidth(width * 1.28)
+            context.setStrokeColor(outline.withAlphaComponent(0.10).cgColor)
+            context.setLineWidth(width * 1.45)
             context.move(to: pa)
             context.addLine(to: pb)
             context.strokePath()
@@ -3276,13 +3273,10 @@ final class VirtualHandOverlayView: UIView {
 
         // Суставы — шарики поверх.
         for point in joints.values {
-            let radius = palmSize * 0.10
+            let radius = palmSize * 0.14
             let rect = CGRect(x: point.x - radius, y: point.y - radius, width: radius * 2, height: radius * 2)
             context.setFillColor(skin.cgColor)
             context.fillEllipse(in: rect)
-            context.setStrokeColor(outline.cgColor)
-            context.setLineWidth(1.5)
-            context.strokeEllipse(in: rect)
         }
     }
 }

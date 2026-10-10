@@ -192,7 +192,7 @@ private final class MyHand {
         for (index, x) in fingerXs.enumerated() {
             let length: Float = index == 1 ? 0.09 : 0.078
             let geometry = SCNBox(
-                width: 0.028, height: length, length: 0.028, chamferRadius: 0.012
+                width: 0.028, height: CGFloat(length), length: 0.028, chamferRadius: 0.012
             )
             geometry.materials = [skin]
             let pivot = SCNNode()
@@ -1603,7 +1603,7 @@ final class SecurityVRGame {
             }
 
             // Кисть к его кисти + щипок — хват «рука к руке».
-            if heldItem == nil, heldGuest == nil, let ray, let guest,
+            if heldItem == nil, heldGuest == nil, let guest,
                guest.phase != .leaving, guest.phase != .held, guest.phase != .dropping {
                 let myHandPoint = ray.origin + ray.direction * handDistance
                 if let handNode = guest.handTipNodes().first(where: {

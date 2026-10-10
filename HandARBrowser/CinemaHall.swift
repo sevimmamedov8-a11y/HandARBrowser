@@ -299,7 +299,7 @@ final class CinemaHall {
             let curtain = SCNBox(width: 0.55, height: 3.2, length: 0.18, chamferRadius: 0.03)
             curtain.materials = [curtainMat]
             let node = SCNNode(geometry: curtain)
-            node.position = SCNVector3(2.75 * Float(side), 1.6, -Double(Self.screenDistance) - 0.15)
+            node.position = SCNVector3(2.75 * side, 1.6, -Double(Self.screenDistance) - 0.15)
             root.addChildNode(node)
         }
 
@@ -350,7 +350,7 @@ final class CinemaHall {
                     let arm = SCNBox(width: 0.07, height: 0.1, length: 0.46, chamferRadius: 0.03)
                     arm.materials = [frameMat]
                     let armNode = SCNNode(geometry: arm)
-                    armNode.position = SCNVector3(0.315 * Float(side), 0.62, 0)
+                    armNode.position = SCNVector3(0.315 * side, 0.62, 0)
                     seat.addChildNode(armNode)
                 }
 

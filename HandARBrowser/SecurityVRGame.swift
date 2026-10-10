@@ -310,10 +310,10 @@ private final class SecurityGuest {
     private func swingLimbs(factor: Float) {
         let swing = sin(walkClock * 2.6) * 0.9 * factor
         for (index, pivot) in legPivots.enumerated() {
-            pivot.eulerAngles.x = CGFloat(index == 0 ? swing : -swing)
+            pivot.eulerAngles.x = index == 0 ? swing : -swing
         }
         for (index, pivot) in armPivots.enumerated() {
-            pivot.eulerAngles.x = CGFloat(index == 0 ? -swing * 0.8 : swing * 0.8)
+            pivot.eulerAngles.x = index == 0 ? -swing * 0.8 : swing * 0.8
         }
         torso.position.y = Float(1.07) + abs(sin(walkClock * 2.6)) * 0.02 * factor
     }

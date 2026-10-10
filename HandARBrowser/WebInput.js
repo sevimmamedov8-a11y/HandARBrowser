@@ -274,4 +274,24 @@
     exitInlineFullscreen();
     postVideoState(false);
   });
+
+  // --- Управление воспроизведением (панель 3D-кинотеатра) ---------------
+  window.__handarTogglePlay = function () {
+    var v = document.querySelector('video');
+    if (!v) return 'none';
+    try {
+      if (v.paused) { v.play(); return 'play'; }
+      v.pause(); return 'pause';
+    } catch (e) { return 'none'; }
+  };
+  window.__handarVideoState = function () {
+    var v = document.querySelector('video');
+    if (!v) return 'none';
+    return v.paused ? 'paused' : 'playing';
+  };
+  window.__handarSetVolume = function (delta) {
+    var v = document.querySelector('video');
+    if (!v) return;
+    try { v.volume = Math.max(0, Math.min(1, v.volume + delta)); } catch (e) {}
+  };
 })();

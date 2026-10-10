@@ -542,6 +542,8 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     private var inVR = false
     private var securityGameActive = false
     private let securityGame = SecurityVRGame()
+    private var cinemaActive = false
+    private let cinemaHall = CinemaHall()
     private var browserAnchor: ARAnchor?
     private var browserWorldTransform: simd_float4x4?
     private var didCreateInitialAnchor = false
@@ -1391,6 +1393,10 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         menu.onDiagnostics = { [weak self] in
             self?.showVRBoxDiagnostics()
         }
+        menu.onCinema = { [weak self] text in
+            guard let self else { return }
+            self.enterCinema(url: self.cinemaURL(from: text))
+        }
         view.addSubview(menu)
 
         // Внутри VR экран не для пальцев, поэтому жестов ровно два.
@@ -1640,6 +1646,111 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         hidePointerDot()
     }
 
+    // MARK: Кинотеатр
+
+    /// Вход в 3D-кинозал. Браузерная панель становится экраном, вокруг неё
+    /// строится зал с креслами и панелью управления за спиной.
+    private func enterCinema(url: URL?) {
+        if !inVR {
+            inVR = true
+            didCreateInitialAnchor = false
+            browserAnchor = nil
+            browserWorldTransform = nil
+            applyEyeGeometry()
+            requestLandscapeMode()
+            setVRVisible(true)
+            tracking.setInterfaceOrientation(currentInterfaceOrientation())
+            tracking.start()
+            UIApplication.shared.isIdleTimerDisabled = true
+            activateMediaAudioSession()
+        }
+        cinemaActive = true
+
+        stopBrowserCapture()
+        hideDirectVideoStage()
+        releasePointer()
+        hidePointer()
+        hidePointerDot()
+        toolbarNode.isHidden = true
+        browserHandleNode.isHidden = true
+
+        let forward = simd_normalize(SIMD3<Float>(
+            -headNode.simdWorldTransform.columns.2.x,
+            0,
+            -headNode.simdWorldTransform.columns.2.z
+        ))
+
+        cinemaHall.onExitRequested = { [weak self] in self?.exitCinema() }
+        cinemaHall.onPlayPause = { [weak self] in self?.toggleCinemaPlayPause() }
+        cinemaHall.onVolume = { [weak self] delta in self?.adjustCinemaVolume(delta) }
+        cinemaHall.start(in: worldScene, cameraOrigin: headNode.simdWorldPosition, cameraForward: forward)
+
+        // Браузерная панель становится экраном зала.
+        browserWorldWidth = CinemaHall.screenWidth
+        browserWorldHeight = CinemaHall.screenHeight
+        SCNTransaction.begin()
+        SCNTransaction.disableActions = true
+        browserPlaneGeometry.width = CGFloat(browserWorldWidth)
+        browserPlaneGeometry.height = CGFloat(browserWorldHeight)
+        browserFrameGeometry.width = CGFloat(browserWorldWidth) + 0.018
+        browserFrameGeometry.height = CGFloat(browserWorldHeight) + 0.018
+        SCNTransaction.commit()
+        browserPlaneNode.simdWorldTransform = cinemaHall.screenWorldTransform
+        browserPlaneNode.isHidden = false
+
+        browser.load(URLRequest(url: url ?? Self.youTubeURL))
+        startBrowserCapture()
+        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+    }
+
+    private func exitCinema() {
+        cinemaHall.stop()
+        cinemaActive = false
+        browserHandleNode.isHidden = false
+        toolbarNode.isHidden = false
+        hideDirectVideoStage()
+        resetPanelToDefaultSizeInstantly()
+        openVRDesktop()
+        startBrowserCapture()
+        hidePointer()
+        hidePointerDot()
+    }
+
+    private func toggleCinemaPlayPause() {
+        let js = "window.__handarTogglePlay ? window.__handarTogglePlay() : null;"
+        if directVideoActive {
+            directVideoLeft?.evaluateJavaScript(js) { [weak self] result, _ in
+                if let state = result as? String {
+                    self?.cinemaHall.setPlayingState(state != "pause")
+                }
+                self?.syncDirectVideoEyes()
+            }
+        } else {
+            browser.evaluateJavaScript(js) { [weak self] result, _ in
+                if let state = result as? String {
+                    self?.cinemaHall.setPlayingState(state != "pause")
+                }
+            }
+        }
+    }
+
+    private func adjustCinemaVolume(_ delta: Float) {
+        let js = "window.__handarSetVolume ? window.__handarSetVolume(\(delta)) : null;"
+        if directVideoActive {
+            directVideoLeft?.evaluateJavaScript(js, completionHandler: nil)
+        } else {
+            browser.evaluateJavaScript(js, completionHandler: nil)
+        }
+    }
+
+    private func cinemaURL(from text: String) -> URL? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let value = trimmed.hasPrefix("http://") || trimmed.hasPrefix("https://")
+            ? trimmed : "https://" + trimmed
+        return URL(string: value)
+    }
+
     private func leaveVRToMenu() {
         tracking.pause()
         stopBrowserCapture()
@@ -1649,6 +1760,11 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         if securityGameActive {
             securityGame.stop()
             securityGameActive = false
+        }
+
+        if cinemaActive {
+            cinemaHall.stop()
+            cinemaActive = false
         }
 
         if let anchor = browserAnchor {
@@ -1716,6 +1832,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
 
     private func ensureBrowserAnchor(using cameraTransform: simd_float4x4) {
         guard inVR, !didCreateInitialAnchor else { return }
+        guard !cinemaActive else { return }
         guard view.bounds.width > view.bounds.height, view.bounds.width > 100 else { return }
 
         let position = SIMD3<Float>(
@@ -1777,6 +1894,8 @@ final class MainViewController: UIViewController, MTKViewDelegate {
 
     private func applyBrowserWorldTransform() {
         guard let transform = browserWorldTransform else { return }
+        // В кинотеатре экран позиционируется самим залом, а не AR-якорем.
+        guard !cinemaActive else { return }
         browserPlaneNode.simdWorldTransform = transform
         // Во время Security VR браузерный слой должен оставаться скрытым:
         // иначе меню просвечивает сквозь игровую комнату.
@@ -1975,6 +2094,26 @@ final class MainViewController: UIViewController, MTKViewDelegate {
             lastHandSeenTime = CACurrentMediaTime()
             controllerHandRoot.isHidden = true
             return
+        }
+
+        if cinemaActive {
+            // Кинотеатр: панель управления за спиной + браузерный экран спереди.
+            // Клик «съедается», только если попал в кнопку панели; иначе
+            // проваливаемся дальше — экран (браузер) продолжает принимать ввод.
+            if let sample = right ?? left,
+               let ray = tracking.worldRay(visionPoint: sample.indexTip) {
+                let consumed = cinemaHall.update(ray: ray, pinch: sample.clickPinch)
+                lastHandSeenTime = CACurrentMediaTime()
+                controllerHandRoot.isHidden = true
+                if consumed {
+                    releasePointer()
+                    hidePointer()
+                    hidePointerDot()
+                    return
+                }
+            } else {
+                cinemaHall.update(ray: nil, pinch: false)
+            }
         }
 
         if left != nil || right != nil {
@@ -2976,6 +3115,7 @@ body{user-select:none;-webkit-user-select:none}
     <div class="app" data-id="messages"><div class="icon green"><svg viewBox="0 0 24 24"><path d="M4 5h16v11H9l-5 4z"/></svg></div><span>Сообщения</span></div>
     <div class="app" data-id="phone"><div class="icon green"><svg viewBox="0 0 24 24"><path d="M7 4c1.1 0 2 .9 2 2 0 1-.2 1.8-.6 2.6-.2.4-.1.8.2 1.1l2.1 2.1c.3.3.7.4 1.1.2.8-.4 1.6-.6 2.6-.6 1.1 0 2 .9 2 2v3c0 1.1-.9 2-2 2C9.8 18.4 5.6 14.2 4.6 9.1 4.4 8.1 5.2 7 6.3 6.7z"/></svg></div><span>Телефон</span></div>
     <div class="app" data-id="games"><div class="icon purple"><svg viewBox="0 0 24 24"><rect x="4" y="7" width="16" height="11" rx="3"/><path d="M8 12h4M10 10v4"/><circle cx="16" cy="11.5" r="1" fill="#fff" stroke="none"/><circle cx="18" cy="14.5" r="1" fill="#fff" stroke="none"/></svg></div><span>Игры</span></div>
+    <div class="app" data-id="cinema"><div class="icon teal"><svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M7 5v14M17 5v14M3 9h4M3 15h4M17 9h4M17 15h4"/></svg></div><span>Кино</span></div>
     <div class="app" data-id="settings"><div class="icon gray"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 0 0-.1-1.2l2-1.5-2-3.4-2.3.9a7 7 0 0 0-2-1.1L14.3 3h-4.6l-.4 2.7a7 7 0 0 0-2 1.1L5 5.9 3 9.3l2 1.5A7 7 0 0 0 5 12c0 .4 0 .8.1 1.2l-2 1.5 2 3.4 2.3-.9a7 7 0 0 0 2 1.1l.4 2.7h4.6l.4-2.7a7 7 0 0 0 2-1.1l2.3.9 2-3.4-2-1.5c.1-.4.1-.8.1-1.2Z"/></svg></div><span>Настройки</span></div>
   </div>
 
@@ -3254,6 +3394,8 @@ addEventListener('resize',()=>{if(current==='fruit')[fruitW,fruitH]=fitCanvas(fc
             browser.loadHTMLString(Self.vrGamesHTML, baseURL: URL(string: "https://handar.vision/"))
         case "security-game":
             startSecurityVR()
+        case "cinema":
+            enterCinema(url: nil)
         case "settings":
             browser.loadHTMLString(Self.vrSettingsHTML, baseURL: URL(string: "https://handar.vision/"))
         default:
@@ -3825,6 +3967,7 @@ final class MainMenuView: UIView {
     var onEnter: (() -> Void)?
     var onProfileChange: ((VRProfile) -> Void)?
     var onDiagnostics: (() -> Void)?
+    var onCinema: ((String) -> Void)?
 
     private let titleLabel = UILabel()
     private let subtitleLabel = UILabel()
@@ -3832,6 +3975,8 @@ final class MainMenuView: UIView {
     private let scrollView = UIScrollView()
     private let stack = UIStackView()
     private let passthroughSwitch = UISwitch()
+    private let cinemaField = UITextField()
+    private let cinemaButton = UIButton(type: .system)
     private var profile: VRProfile
 
     private let ipdRow = SliderRow(title: "Межзрачковое расстояние", unit: "мм", minimum: 52, maximum: 76, step: 0.5)
@@ -3900,6 +4045,48 @@ final class MainMenuView: UIView {
 
         stack.axis = .vertical
         stack.spacing = 14
+
+        // 3D-кинотеатр: поле для ссылки на YouTube + кнопка входа.
+        let cinemaTitle = UILabel()
+        cinemaTitle.text = "🎬 3D-КИНОТЕАТР"
+        cinemaTitle.textColor = UIColor(red: 0.55, green: 0.82, blue: 1.0, alpha: 1)
+        cinemaTitle.font = .systemFont(ofSize: 14, weight: .semibold)
+
+        cinemaField.placeholder = "Вставь ссылку на YouTube видео…"
+        cinemaField.textColor = .white
+        cinemaField.tintColor = .white
+        cinemaField.backgroundColor = UIColor(white: 0.13, alpha: 1)
+        cinemaField.layer.cornerRadius = 12
+        cinemaField.borderStyle = .none
+        cinemaField.keyboardType = .URL
+        cinemaField.returnKeyType = .go
+        cinemaField.autocapitalizationType = .none
+        cinemaField.autocorrectionType = .no
+        cinemaField.font = .systemFont(ofSize: 15)
+        cinemaField.leftView = UIView(frame: CGRect(x: 0, y: 0, width: 12, height: 0))
+        cinemaField.leftViewMode = .always
+
+        var cinemaConfig = UIButton.Configuration.filled()
+        cinemaConfig.title = "ВОЙТИ В КИНОЗАЛ"
+        cinemaConfig.baseForegroundColor = .white
+        cinemaConfig.baseBackgroundColor = UIColor(red: 0.42, green: 0.30, blue: 0.92, alpha: 1)
+        cinemaConfig.cornerStyle = .large
+        cinemaButton.configuration = cinemaConfig
+        cinemaButton.titleLabel?.font = .systemFont(ofSize: 16, weight: .semibold)
+        cinemaButton.addAction(UIAction { [weak self] _ in
+            self?.onCinema?(self?.cinemaField.text ?? "")
+        }, for: .touchUpInside)
+        cinemaField.addAction(UIAction { [weak self] _ in
+            self?.onCinema?(self?.cinemaField.text ?? "")
+        }, for: .editingDidEndOnExit)
+
+        let cinemaSection = UIStackView(arrangedSubviews: [cinemaTitle, cinemaField, cinemaButton])
+        cinemaSection.axis = .vertical
+        cinemaSection.spacing = 8
+        cinemaField.heightAnchor.constraint(equalToConstant: 44).isActive = true
+        cinemaButton.heightAnchor.constraint(equalToConstant: 46).isActive = true
+        stack.addArrangedSubview(cinemaSection)
+
         for row in [ipdRow, lensRow, depthRow, k1Row, k2Row] {
             row.onChange = { [weak self] in self?.collect() }
             stack.addArrangedSubview(row)

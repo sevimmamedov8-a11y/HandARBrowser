@@ -2831,34 +2831,132 @@ extension MainViewController {
 <!doctype html>
 <html lang="ru">
 <head>
-<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <title>HandAR VR Desktop</title>
 <style>
-:root{--glass:rgba(20,24,34,.54);--glass2:rgba(255,255,255,.12);--text:#fff;--muted:rgba(255,255,255,.7)}
+:root{
+  --text:#ffffff;
+  --muted:rgba(255,255,255,.62);
+  --faint:rgba(255,255,255,.38);
+  --glass:rgba(255,255,255,.07);
+  --stroke:rgba(255,255,255,.15);
+}
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
-html,body{margin:0;width:100%;height:100%;overflow:hidden;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","Helvetica Neue",Arial,sans-serif;color:var(--text);background:linear-gradient(145deg,#0e1732 0%,#43276d 50%,#0a132b 100%);}
-body:before{content:"";position:fixed;inset:-20%;background:radial-gradient(circle at 28% 30%,rgba(95,170,255,.32),transparent 34%),radial-gradient(circle at 72% 64%,rgba(226,92,255,.28),transparent 32%);filter:blur(28px);}
-.wall{position:relative;height:100%;padding:18px 34px 20px;display:flex;flex-direction:column;gap:14px;}
-.status{height:30px;display:flex;align-items:center;justify-content:space-between;font-size:16px;font-weight:650;text-shadow:0 2px 10px rgba(0,0,0,.35)}
-.status .right{display:flex;gap:10px;align-items:center;font-size:13px;font-weight:550}.status .right span{white-space:nowrap}.pill{padding:6px 10px;border-radius:999px;background:rgba(0,0,0,.22);backdrop-filter:blur(18px)}
-.search{height:50px;border-radius:22px;background:rgba(255,255,255,.16);border:1px solid rgba(255,255,255,.25);backdrop-filter:blur(22px);display:flex;align-items:center;gap:12px;padding:0 17px;font-size:17px;color:#fff;box-shadow:0 8px 24px rgba(0,0,0,.14)}
-.searchIcon{font-size:19px;opacity:.9}.searchText{opacity:.78}.searchHint{margin-left:auto;font-size:12px;opacity:.52;padding:5px 8px;border-radius:9px;background:rgba(0,0,0,.16)}
-.grid{flex:1;display:grid;grid-template-columns:repeat(6,1fr);grid-auto-rows:minmax(88px,1fr);gap:12px 16px;align-items:start;padding:2px 2px 0}
-.app{min-width:0;text-align:center;cursor:pointer;user-select:none}.app:active{transform:scale(.93)}
-.icon{width:64px;height:64px;margin:0 auto 6px;border-radius:20px;display:flex;align-items:center;justify-content:center;box-shadow:inset 0 1px 1px rgba(255,255,255,.24),0 9px 18px rgba(0,0,0,.20);border:1px solid rgba(255,255,255,.16);overflow:hidden}.icon svg{width:34px;height:34px;fill:none;stroke:#fff;stroke-width:2.2;stroke-linecap:round;stroke-linejoin:round}.icon .solid{fill:#fff;stroke:none}
-.app span{display:block;font-size:13px;line-height:16px;font-weight:560;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-shadow:0 1px 6px rgba(0,0,0,.35)}
-.blue{background:linear-gradient(135deg,#54a9ff,#1866e8)}.red{background:linear-gradient(135deg,#ff4d55,#cf111c)}.pink{background:linear-gradient(135deg,#ff5bb8,#7d26ff)}.teal{background:linear-gradient(135deg,#42d9ca,#007d87)}.indigo{background:linear-gradient(135deg,#7e82ff,#4647b9)}.green{background:linear-gradient(135deg,#55df76,#159447)}.cyan{background:linear-gradient(135deg,#55d8ff,#1a74db)}.orange{background:linear-gradient(135deg,#ffb657,#e46710)}.gray{background:linear-gradient(135deg,#737b88,#343943)}.dark{background:rgba(13,18,28,.82)}.purple{background:linear-gradient(135deg,#a855f7,#5b21b6)}
-.dock{height:82px;border-radius:28px;background:rgba(235,240,255,.18);border:1px solid rgba(255,255,255,.22);backdrop-filter:blur(28px);display:flex;align-items:center;justify-content:space-around;padding:9px 22px;box-shadow:0 12px 30px rgba(0,0,0,.2)}
-.dock .icon{width:54px;height:54px;border-radius:17px;margin:0}.dock .app span{display:none}.dock .app{width:56px}
-.note{text-align:center;font-size:11px;color:rgba(255,255,255,.48);margin-top:-4px}.launch{animation:launch .22s ease-out}.launch .icon{box-shadow:0 0 0 5px rgba(255,255,255,.28),0 0 30px rgba(255,255,255,.25)}
+html,body{margin:0;width:100%;height:100%;overflow:hidden;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","SF Pro Text","Helvetica Neue",Arial,sans-serif;color:var(--text);
+  background:
+    radial-gradient(120% 90% at 18% 0%, #1b2a5e 0%, transparent 55%),
+    radial-gradient(120% 100% at 85% 15%, #3a1c5e 0%, transparent 55%),
+    linear-gradient(160deg,#070a18 0%,#0d1024 45%,#070918 100%);}
+body{user-select:none;-webkit-user-select:none}
+
+/* ---- Фон: аврора + звёзды + виньетка ---- */
+.scene{position:fixed;inset:0;overflow:hidden}
+.aurora{position:absolute;border-radius:50%;filter:blur(70px);opacity:.55;will-change:transform}
+.aurora.a1{width:52vmax;height:52vmax;left:-12vmax;top:-18vmax;background:radial-gradient(circle,#2f6bff 0%,transparent 62%);animation:drift1 26s ease-in-out infinite alternate}
+.aurora.a2{width:46vmax;height:46vmax;right:-14vmax;top:-10vmax;background:radial-gradient(circle,#b14bff 0%,transparent 62%);animation:drift2 32s ease-in-out infinite alternate}
+.aurora.a3{width:44vmax;height:44vmax;left:26vw;bottom:-24vmax;background:radial-gradient(circle,#18c8d8 0%,transparent 62%);opacity:.34;animation:drift3 38s ease-in-out infinite alternate}
+.stars{position:absolute;inset:0;opacity:.5;background-image:radial-gradient(1.3px 1.3px at 12% 24%,rgba(255,255,255,.5),transparent 55%),radial-gradient(1px 1px at 34% 12%,rgba(255,255,255,.4),transparent 55%),radial-gradient(1.4px 1.4px at 58% 30%,rgba(255,255,255,.35),transparent 55%),radial-gradient(1px 1px at 76% 16%,rgba(255,255,255,.45),transparent 55%),radial-gradient(1.3px 1.3px at 88% 44%,rgba(255,255,255,.3),transparent 55%),radial-gradient(1px 1px at 44% 58%,rgba(255,255,255,.3),transparent 55%),radial-gradient(1.2px 1.2px at 18% 72%,rgba(255,255,255,.3),transparent 55%),radial-gradient(1px 1px at 66% 78%,rgba(255,255,255,.28),transparent 55%)}
+.vignette{position:absolute;inset:0;background:radial-gradient(120% 120% at 50% 50%,transparent 55%,rgba(0,0,0,.55) 100%)}
+@keyframes drift1{from{transform:translate(0,0) scale(1)}to{transform:translate(9vw,6vh) scale(1.15)}}
+@keyframes drift2{from{transform:translate(0,0) scale(1.1)}to{transform:translate(-8vw,8vh) scale(.95)}}
+@keyframes drift3{from{transform:translate(0,0) scale(1)}to{transform:translate(-6vw,-5vh) scale(1.2)}}
+
+/* ---- Каркас ---- */
+.wall{position:relative;height:100%;padding:22px 34px 18px;display:flex;flex-direction:column;gap:15px}
+
+/* ---- Статусная строка ---- */
+.statusbar{display:flex;align-items:center;justify-content:space-between;height:44px}
+.clockwrap{display:flex;flex-direction:column;line-height:1}
+.clock{font-size:26px;font-weight:750;letter-spacing:.5px;font-variant-numeric:tabular-nums;text-shadow:0 2px 14px rgba(0,0,0,.4)}
+.date{font-size:12px;color:var(--muted);font-weight:550;margin-top:3px}
+.brand{font-size:12px;letter-spacing:3px;font-weight:700;color:var(--faint)}
+.brand b{color:var(--text)}
+.chips{display:flex;gap:8px;align-items:center}
+.chip{display:inline-flex;align-items:center;gap:6px;padding:7px 12px;border-radius:999px;background:var(--glass);border:1px solid var(--stroke);backdrop-filter:blur(18px) saturate(140%);font-size:12px;font-weight:600;color:var(--muted);white-space:nowrap}
+.chip.vr{color:#fff;background:linear-gradient(135deg,rgba(84,169,255,.35),rgba(180,75,255,.35));border-color:rgba(255,255,255,.28);text-shadow:0 1px 8px rgba(0,0,0,.3)}
+
+/* ---- Приветствие ---- */
+.greeting{display:flex;align-items:flex-end;justify-content:space-between;gap:16px}
+.greeting h1{margin:0;font-size:38px;font-weight:760;letter-spacing:-.5px;text-shadow:0 4px 24px rgba(0,0,0,.4)}
+.greeting p{margin:4px 0 0;font-size:14px;color:var(--muted);font-weight:500}
+
+/* ---- Поиск ---- */
+.search{position:relative;height:56px;border-radius:20px;background:var(--glass);border:1px solid var(--stroke);backdrop-filter:blur(26px) saturate(150%);display:flex;align-items:center;gap:13px;padding:0 19px;font-size:16px;color:#fff;box-shadow:inset 0 1px 0 rgba(255,255,255,.12),0 14px 34px rgba(0,0,0,.28);overflow:hidden;cursor:pointer}
+.searchIcon{font-size:21px;opacity:.95}
+.searchText{opacity:.82;font-weight:560}
+.searchHint{margin-left:auto;font-size:12px;opacity:.62;font-weight:650;padding:6px 11px;border-radius:10px;background:rgba(0,0,0,.2);border:1px solid rgba(255,255,255,.1)}
+.search .shine{position:absolute;top:0;bottom:0;width:120px;left:-160px;background:linear-gradient(105deg,transparent,rgba(255,255,255,.16),transparent);transform:skewX(-18deg);animation:shine 6.5s ease-in-out infinite}
+@keyframes shine{0%,55%{left:-160px}90%,100%{left:110%}}
+
+/* ---- Сетка приложений ---- */
+.grid{flex:1;display:grid;grid-template-columns:repeat(6,1fr);grid-auto-rows:minmax(86px,1fr);gap:10px 12px;align-items:start;padding:2px 4px 0;min-height:0}
+.app{min-width:0;display:flex;flex-direction:column;align-items:center;gap:7px;text-align:center;cursor:pointer;opacity:0;animation:rise .5s cubic-bezier(.2,.7,.3,1) both}
+@keyframes rise{from{opacity:0;transform:translateY(16px)}to{opacity:1;transform:translateY(0)}}
+.app:nth-child(1){animation-delay:.02s}.app:nth-child(2){animation-delay:.05s}.app:nth-child(3){animation-delay:.08s}.app:nth-child(4){animation-delay:.11s}.app:nth-child(5){animation-delay:.14s}.app:nth-child(6){animation-delay:.17s}.app:nth-child(7){animation-delay:.20s}.app:nth-child(8){animation-delay:.23s}.app:nth-child(9){animation-delay:.26s}.app:nth-child(10){animation-delay:.29s}.app:nth-child(11){animation-delay:.32s}.app:nth-child(12){animation-delay:.35s}.app:nth-child(13){animation-delay:.38s}.app:nth-child(14){animation-delay:.41s}.app:nth-child(15){animation-delay:.44s}.app:nth-child(16){animation-delay:.47s}.app:nth-child(17){animation-delay:.50s}.app:nth-child(18){animation-delay:.53s}.app:nth-child(19){animation-delay:.56s}
+
+/* ---- Иконки ---- */
+.icon{position:relative;width:62px;height:62px;border-radius:19px;display:flex;align-items:center;justify-content:center;overflow:hidden;background:linear-gradient(145deg,var(--a),var(--b));
+  box-shadow:inset 0 1px 1px rgba(255,255,255,.4),inset 0 -10px 16px rgba(0,0,0,.22),0 10px 22px -4px var(--glow);
+  border:1px solid rgba(255,255,255,.22);transition:transform .22s cubic-bezier(.2,.7,.3,1.4),box-shadow .22s ease}
+.icon:after{content:"";position:absolute;inset:0;border-radius:inherit;background:radial-gradient(120% 60% at 50% 0%,rgba(255,255,255,.4),transparent 55%)}
+.icon svg{width:33px;height:33px;fill:none;stroke:#fff;stroke-width:2.1;stroke-linecap:round;stroke-linejoin:round;filter:drop-shadow(0 1px 2px rgba(0,0,0,.35))}
+.icon .solid{fill:#fff;stroke:none}
+.app span{display:block;font-size:12.5px;line-height:15px;font-weight:600;max-width:96px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-shadow:0 1px 6px rgba(0,0,0,.5)}
+.app:hover .icon{transform:translateY(-4px) scale(1.07);box-shadow:inset 0 1px 1px rgba(255,255,255,.4),inset 0 -10px 16px rgba(0,0,0,.22),0 16px 34px -4px var(--glow),0 0 0 5px rgba(255,255,255,.07)}
+.app:hover span{color:#fff}
+.app:active .icon{transform:scale(.94)}
+
+/* Палитра приложений */
+.blue{--a:#54a9ff;--b:#1866e8;--glow:rgba(84,169,255,.5)}
+.red{--a:#ff5f6d;--b:#c8102e;--glow:rgba(255,95,109,.5)}
+.pink{--a:#ff5bb8;--b:#7d26ff;--glow:rgba(255,91,184,.5)}
+.teal{--a:#42d9ca;--b:#007d87;--glow:rgba(66,217,202,.5)}
+.indigo{--a:#7e82ff;--b:#4647b9;--glow:rgba(126,130,255,.5)}
+.green{--a:#55df76;--b:#159447;--glow:rgba(85,223,118,.5)}
+.cyan{--a:#55d8ff;--b:#1a74db;--glow:rgba(85,216,255,.5)}
+.orange{--a:#ffb657;--b:#e46710;--glow:rgba(255,182,87,.5)}
+.purple{--a:#a855f7;--b:#5b21b6;--glow:rgba(168,85,247,.5)}
+.gray{--a:#8b93a3;--b:#3c4350;--glow:rgba(139,147,163,.4)}
+.dark{--a:#2b3340;--b:#11151d;--glow:rgba(20,24,32,.6)}
+
+/* ---- Док ---- */
+.dockwrap{position:relative;display:flex;flex-direction:column;align-items:center}
+.dock{height:80px;border-radius:26px;background:rgba(235,240,255,.13);border:1px solid rgba(255,255,255,.24);backdrop-filter:blur(30px) saturate(160%);display:flex;align-items:center;justify-content:space-around;gap:10px;padding:9px 20px;box-shadow:inset 0 1px 0 rgba(255,255,255,.25),0 18px 40px rgba(0,0,0,.35)}
+.dock .app{flex-direction:row;gap:0;opacity:1;animation:none}
+.dock .app span{display:none}
+.dock .icon{width:56px;height:56px;border-radius:17px}
+.dock .icon svg{width:30px;height:30px}
+.dockglow{width:56%;height:26px;margin-top:-8px;border-radius:50%;background:radial-gradient(50% 50% at 50% 50%,rgba(140,170,255,.22),transparent 70%);filter:blur(10px)}
+
+.note{text-align:center;font-size:11px;color:var(--faint);margin-top:-2px;letter-spacing:.4px}
+
+.launch{animation:launch .22s ease-out}.launch .icon{box-shadow:0 0 0 6px rgba(255,255,255,.32),0 0 36px rgba(255,255,255,.3)}
 @keyframes launch{from{transform:scale(.96)}to{transform:scale(1)}}
 </style>
 </head>
 <body>
+<div class="scene">
+  <div class="aurora a1"></div><div class="aurora a2"></div><div class="aurora a3"></div>
+  <div class="stars"></div><div class="vignette"></div>
+</div>
 <div class="wall">
-  <div class="status"><div id="time">--:--</div><div class="right"><span>⌁</span><span>Wi‑Fi</span><span id="controllerState">VR BOX — нет</span><span id="battery">🔋 --%</span><span class="pill">VR</span></div></div>
-  <div class="search" onclick="post('google')"><span class="searchIcon">⌕</span><span class="searchText">Поиск в VR</span><span class="searchHint">Google</span></div>
+  <header class="statusbar">
+    <div class="clockwrap"><div class="clock" id="time">--:--</div><div class="date" id="date">—</div></div>
+    <div class="brand">HANDAR <b>VISION</b></div>
+    <div class="chips">
+      <span class="chip" id="controllerState">VR BOX — нет</span>
+      <span class="chip" id="battery">🔋 —</span>
+      <span class="chip vr">VR</span>
+    </div>
+  </header>
+
+  <div class="greeting">
+    <div><h1>Добро пожаловать</h1><p>Твоё рабочее пространство в стерео‑VR</p></div>
+  </div>
+
+  <div class="search" onclick="post('google')"><span class="searchIcon">⌕</span><span class="searchText">Поиск в VR</span><span class="searchHint">Google</span><span class="shine"></span></div>
+
   <div class="grid">
     <div class="app" data-id="safari"><div class="icon blue"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M15.5 8.5 13 13l-4.5 2.5L11 11z"/></svg></div><span>Safari</span></div>
     <div class="app" data-id="youtube"><div class="icon red"><svg viewBox="0 0 24 24"><path class="solid" d="M21 7.4a2.8 2.8 0 0 0-2-2C17.2 5 12 5 12 5s-5.2 0-7 .4a2.8 2.8 0 0 0-2 2A29 29 0 0 0 2.6 12 29 29 0 0 0 3 16.6a2.8 2.8 0 0 0 2 2c1.8.4 7 .4 7 .4s5.2 0 7-.4a2.8 2.8 0 0 0 2-2 29 29 0 0 0 .4-4.6A29 29 0 0 0 21 7.4Z"/><path d="m10 9 5 3-5 3z" fill="#e21c2a" stroke="none"/></svg></div><span>YouTube</span></div>
@@ -2880,23 +2978,29 @@ body:before{content:"";position:fixed;inset:-20%;background:radial-gradient(circ
     <div class="app" data-id="games"><div class="icon purple"><svg viewBox="0 0 24 24"><rect x="4" y="7" width="16" height="11" rx="3"/><path d="M8 12h4M10 10v4"/><circle cx="16" cy="11.5" r="1" fill="#fff" stroke="none"/><circle cx="18" cy="14.5" r="1" fill="#fff" stroke="none"/></svg></div><span>Игры</span></div>
     <div class="app" data-id="settings"><div class="icon gray"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 0 0-.1-1.2l2-1.5-2-3.4-2.3.9a7 7 0 0 0-2-1.1L14.3 3h-4.6l-.4 2.7a7 7 0 0 0-2 1.1L5 5.9 3 9.3l2 1.5A7 7 0 0 0 5 12c0 .4 0 .8.1 1.2l-2 1.5 2 3.4 2.3-.9a7 7 0 0 0 2 1.1l.4 2.7h4.6l.4-2.7a7 7 0 0 0 2-1.1l2.3.9 2-3.4-2-1.5c.1-.4.1-.8.1-1.2Z"/></svg></div><span>Настройки</span></div>
   </div>
-  <div class="dock">
-    <div class="app" data-id="safari"><div class="icon blue"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M15.5 8.5 13 13l-4.5 2.5L11 11z"/></svg></div></div>
-    <div class="app" data-id="youtube"><div class="icon red"><svg viewBox="0 0 24 24"><path d="M5 5h14v14H5z"/><path d="m10 8 5 4-5 4z" fill="#fff" stroke="none"/></svg></div></div>
-    <div class="app" data-id="telegram"><div class="icon cyan"><svg viewBox="0 0 24 24"><path d="m5 12 13-6-4 12-3-4-4-1z"/></svg></div></div>
-    <div class="app" data-id="messages"><div class="icon green"><svg viewBox="0 0 24 24"><path d="M4 5h16v11H9l-5 4z"/></svg></div></div>
-    <div class="app" data-id="settings"><div class="icon gray"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 0 0-.1-1.2l2-1.5-2-3.4-2.3.9a7 7 0 0 0-2-1.1L14.3 3h-4.6l-.4 2.7a7 7 0 0 0-2 1.1L5 5.9 3 9.3l2 1.5A7 7 0 0 0 5 12c0 .4 0 .8.1 1.2l-2 1.5 2 3.4 2.3-.9a7 7 0 0 0 2 1.1l.4 2.7h4.6l.4-2.7a7 7 0 0 0 2-1.1l2.3.9 2-3.4-2-1.5c.1-.4.1-.8.1-1.2Z"/></svg></div></div><div class="icon gray"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 0 0-.1-1.2l2-1.5-2-3.4-2.3.9a7 7 0 0 0-2-1.1L14.3 3h-4.6l-.4 2.7a7 7 0 0 0-2 1.1L5 5.9 3 9.3l2 1.5A7 7 0 0 0 5 12c0 .4 0 .8.1 1.2l-2 1.5 2 3.4 2.3-.9a7 7 0 0 0 2 1.1l.4 2.7h4.6l.4-2.7a7 7 0 0 0 2-1.1l2.3.9 2-3.4-2-1.5c.1-.4.1-.8.1-1.2Z"/></svg></div></div>
+
+  <div class="dockwrap">
+    <div class="dock">
+      <div class="app" data-id="safari"><div class="icon blue"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M15.5 8.5 13 13l-4.5 2.5L11 11z"/></svg></div></div>
+      <div class="app" data-id="youtube"><div class="icon red"><svg viewBox="0 0 24 24"><path d="M5 5h14v14H5z"/><path d="m10 8 5 4-5 4z" fill="#fff" stroke="none"/></svg></div></div>
+      <div class="app" data-id="telegram"><div class="icon cyan"><svg viewBox="0 0 24 24"><path d="m5 12 13-6-4 12-3-4-4-1z"/></svg></div></div>
+      <div class="app" data-id="messages"><div class="icon green"><svg viewBox="0 0 24 24"><path d="M4 5h16v11H9l-5 4z"/></svg></div></div>
+      <div class="app" data-id="settings"><div class="icon gray"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 0 0-.1-1.2l2-1.5-2-3.4-2.3.9a7 7 0 0 0-2-1.1L14.3 3h-4.6l-.4 2.7a7 7 0 0 0-2 1.1L5 5.9 3 9.3l2 1.5A7 7 0 0 0 5 12c0 .4 0 .8.1 1.2l-2 1.5 2 3.4 2.3-.9a7 7 0 0 0 2 1.1l.4 2.7h4.6l.4-2.7a7 7 0 0 0 2-1.1l2.3.9 2-3.4-2-1.5c.1-.4.1-.8.1-1.2Z"/></svg></div></div>
+    </div>
+    <div class="dockglow"></div>
   </div>
-  <div class="note">VR Desktop • рабочее пространство HandAR в стерео-VR • рука / VR BOX</div>
+
+  <div class="note">VR Desktop • рабочее пространство HandAR в стерео‑VR • рука / VR BOX</div>
 </div>
 <script>
 function post(id){try{window.webkit.messageHandlers.handarApp.postMessage({id:id});}catch(e){}}
-function clock(){const d=new Date();document.getElementById('time').textContent=d.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});}
+function clock(){const d=new Date();document.getElementById('time').textContent=d.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});document.getElementById('date').textContent=d.toLocaleDateString('ru-RU',{weekday:'long',day:'numeric',month:'long'});}
 setInterval(clock,1000);clock();
 document.querySelectorAll('.app').forEach(function(a){a.addEventListener('click',function(){a.classList.add('launch');post(a.dataset.id);setTimeout(()=>a.classList.remove('launch'),320);});});
 </script>
 </body>
 </html>
+
 """#
 
     private static func htmlPage(title: String, icon: String, accent: String, body: String, scripts: String = "") -> String {

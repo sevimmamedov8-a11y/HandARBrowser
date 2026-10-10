@@ -34,14 +34,58 @@ private func sphereHit(ray: WorldRay, center: SIMD3<Float>, radius: Float) -> Fl
     return t > 0 ? t : nil
 }
 
+// MARK: - Рендер надписи в картинку (кириллица + эмодзи)
+
+private func renderLabelImage(
+    _ value: String,
+    color: UIColor,
+    fontSize: CGFloat,
+    weight: UIFont.Weight = .semibold
+) -> UIImage? {
+    guard !value.isEmpty else { return nil }
+    let font = UIFont.systemFont(ofSize: fontSize, weight: weight)
+    let attributes: [NSAttributedString.Key: Any] = [
+        .font: font,
+        .foregroundColor: color
+    ]
+    let string = NSAttributedString(string: value, attributes: attributes)
+    let bounds = string.boundingRect(
+        with: CGSize(width: 4000, height: 4000),
+        options: [.usesLineFragmentOrigin, .usesFontLeading],
+        context: nil
+    )
+    let size = CGSize(width: ceil(bounds.width) + 2, height: ceil(bounds.height) + 2)
+    guard size.width > 2, size.height > 2 else { return nil }
+    let format = UIGraphicsImageRendererFormat()
+    format.scale = 1
+    format.opaque = false
+    let renderer = UIGraphicsImageRenderer(size: size, format: format)
+    return renderer.image { _ in
+        string.draw(
+            with: CGRect(x: 1, y: 1, width: bounds.width, height: bounds.height),
+            options: [.usesLineFragmentOrigin, .usesFontLeading],
+            context: nil
+        )
+    }
+}
+
 // MARK: - Текстовая плашка (всегда к лицу)
 
 private final class TextSprite: SCNNode {
     private var current = ""
+    private let plane = SCNPlane(width: 1, height: 1)
+    private let planeNode = SCNNode()
 
     override init() {
         super.init()
         constraints = [SCNBillboardConstraint()]
+        let material = SCNMaterial()
+        material.lightingModel = .constant
+        material.isDoubleSided = true
+        material.diffuse.contents = UIColor.clear
+        plane.materials = [material]
+        planeNode.geometry = plane
+        addChildNode(planeNode)
     }
 
     required init?(coder: NSCoder) {
@@ -51,17 +95,21 @@ private final class TextSprite: SCNNode {
     func setText(_ value: String, color: UIColor = .white) {
         guard value != current else { return }
         current = value
-        let text = SCNText(string: value, extrusionDepth: 0.004)
-        text.font = UIFont.systemFont(ofSize: 52, weight: .semibold)
-        text.flatness = 0.15
-        let material = SCNMaterial()
-        material.applyConstant(color, emissive: 1)
-        text.materials = [material]
-        let (minBounds, maxBounds) = text.boundingBox
-        let node = SCNNode(geometry: text)
-        node.pivot = SCNMatrix4MakeTranslation(-(minBounds.x + maxBounds.x) / 2, -(minBounds.y + maxBounds.y) / 2, 0)
-        childNodes.forEach { $0.removeFromParentNode() }
-        addChildNode(node)
+        if let image = renderLabelImage(value, color: color, fontSize: 52) {
+            plane.width = image.size.width
+            plane.height = image.size.height
+            planeNode.geometry?.firstMaterial?.diffuse.contents = image
+            planeNode.isHidden = false
+        } else {
+            planeNode.isHidden = true
+        }
+    }
+
+    /// Масштаб так, чтобы надпись была `width` метров шириной.
+    func fitWidth(_ width: Float) {
+        guard plane.width > 1 else { return }
+        let scale = width / Float(plane.width)
+        self.scale = SCNVector3(scale, scale, scale)
     }
 }
 
@@ -84,16 +132,22 @@ private final class SecurityButton {
         plate = SCNNode(geometry: box)
         node.addChildNode(plate)
 
-        let label = SCNText(string: title, extrusionDepth: 0.006)
-        label.font = UIFont.systemFont(ofSize: fontSize, weight: .bold)
-        label.flatness = 0.1
-        let textMaterial = SCNMaterial()
-        textMaterial.applyConstant(.white, emissive: 1)
-        label.materials = [textMaterial]
-        let (minBounds, maxBounds) = label.boundingBox
-        let textNode = SCNNode(geometry: label)
-        textNode.pivot = SCNMatrix4MakeTranslation(-(minBounds.x + maxBounds.x) / 2, -(minBounds.y + maxBounds.y) / 2, 0.01)
-        plate.addChildNode(textNode)
+        // Надпись рисуем в картинку и вписываем в табличку —
+        // так кириллица и эмодзи гарантированно видны.
+        _ = fontSize
+        if let image = renderLabelImage(title, color: .white, fontSize: 64, weight: .bold) {
+            let labelPlane = SCNPlane(width: image.size.width, height: image.size.height)
+            let textMaterial = SCNMaterial()
+            textMaterial.lightingModel = .constant
+            textMaterial.isDoubleSided = true
+            textMaterial.diffuse.contents = image
+            labelPlane.materials = [textMaterial]
+            let textNode = SCNNode(geometry: labelPlane)
+            let fit = Float(min(0.40 / Double(image.size.width), 0.115 / Double(image.size.height)))
+            textNode.scale = SCNVector3(fit, fit, fit)
+            textNode.position = SCNVector3(0, 0, 0.014)
+            plate.addChildNode(textNode)
+        }
         node.constraints = [SCNBillboardConstraint()]
     }
 
@@ -123,13 +177,15 @@ private enum SecurityTool: Int, CaseIterable {
     case breathalyzer
     case waterPistol
     case taser
+    case hand
 
     var title: String {
         switch self {
-        case .scanner: return "СКАНЕР"
-        case .breathalyzer: return "АЛКО"
-        case .waterPistol: return "ВОДЯНКА"
-        case .taser: return "ШОКЕР"
+        case .scanner: return "📡 СКАНЕР"
+        case .breathalyzer: return "🫁 АЛКО"
+        case .waterPistol: return "💦 ВОДЯНКА"
+        case .taser: return "⚡ ШОКЕР"
+        case .hand: return "✋ РУКА"
         }
     }
 
@@ -139,6 +195,7 @@ private enum SecurityTool: Int, CaseIterable {
         case .breathalyzer: return UIColor(red: 0.12, green: 0.75, blue: 0.45, alpha: 1)
         case .waterPistol: return UIColor(red: 0.15, green: 0.70, blue: 0.90, alpha: 1)
         case .taser: return UIColor(red: 0.95, green: 0.80, blue: 0.10, alpha: 1)
+        case .hand: return UIColor(red: 0.98, green: 0.55, blue: 0.22, alpha: 1)
         }
     }
 }
@@ -151,6 +208,8 @@ private enum GuestPhase {
     case leaving
     case attacking
     case stunned
+    case held       // схвачен рукой и висит в воздухе
+    case dropping  // брошен, падает на пол
 }
 
 private enum ScanKind {
@@ -184,6 +243,10 @@ private final class SecurityGuest {
     private var scanRing = SCNNode()
     private var scanBar = SCNNode()
     private let verdict = TextSprite()
+    private let nameTag = TextSprite()
+    private(set) var displayName = "Гость"
+    private var resumePhase: GuestPhase = .atGate
+    private var dropVelocity: Float = 0
 
     private var scanProgress: Float = 0
     private var activeScan: ScanKind?
@@ -312,10 +375,29 @@ private final class SecurityGuest {
         contrabandNode.isHidden = true
         root.addChildNode(contrabandNode)
 
-        // Плашка над головой
+        // Плашка и имя над головой
         verdict.setText("...")
-        verdict.position = SCNVector3(0, 1.85, 0)
+        verdict.position = SCNVector3(0, 1.82, 0)
+        verdict.scale = SCNVector3(0.0036, 0.0036, 0.0036)
         root.addChildNode(verdict)
+
+        nameTag.setText("🙂 \(displayName)")
+        nameTag.position = SCNVector3(0, 2.08, 0)
+        nameTag.scale = SCNVector3(0.0026, 0.0026, 0.0026)
+        root.addChildNode(nameTag)
+    }
+
+    func setName(_ name: String) {
+        displayName = name
+        refreshNameTag()
+    }
+
+    private func refreshNameTag() {
+        var text = "🙂 \(displayName)"
+        if scanned && hasContraband { text += " 📦" }
+        if breathTested && isDrunk { text += " 🍺" }
+        if phase == .attacking { text += " 😡" }
+        nameTag.setText(text)
     }
 
     private func buildScanUI() {
@@ -363,7 +445,7 @@ private final class SecurityGuest {
     // MARK: Диалог
 
     func talkPhrase() -> String {
-        if phase == .attacking { return "ВОТ ПОЛУЧИ!" }
+        if phase == .attacking { return "😡 ВОТ ПОЛУЧИ!" }
         if isAggressive { return ["Не приставай!", "Чё смотришь?", "А ну отойди!"].randomElement()! }
         if isDrunk { return ["Мне ещё пять...", "Ты же охрана? Пусти-и!", "Я почти трезвый..."].randomElement()! }
         if hasContraband { return ["У меня ничего нет.", "Быстрее пропускай.", "Я опаздываю..."].randomElement()! }
@@ -371,11 +453,11 @@ private final class SecurityGuest {
     }
 
     func reactToWater() -> String {
-        isAggressive ? "БЛЯХА! МОКРЫЙ!" : "ФУ, ЧТО ТВОРИШЬ?!"
+        isAggressive ? "💦 БЛЯХА! МОКРЫЙ!" : "💦 ФУ, ЧТО ТВОРИШЬ?!"
     }
 
     func reactToTaser() -> String {
-        isAggressive ? "ААА! ХВАТИТ!" : "ЗА ЧТО?!"
+        isAggressive ? "⚡ ААА! ХВАТИТ!" : "⚡ ЗА ЧТО?!"
     }
 
     // MARK: Обновление
@@ -402,6 +484,19 @@ private final class SecurityGuest {
                 phase = .leaving
                 walkedInward = false
             }
+        case .held:
+            // Висит в руке — машет ногами, сам не ходит.
+            swingLimbs(factor: 1.7)
+        case .dropping:
+            dropVelocity -= 9.8 * dt
+            root.position.y += dropVelocity * dt
+            if root.position.y <= 0 {
+                root.position.y = 0
+                dropVelocity = 0
+                phase = resumePhase
+                refreshNameTag()
+            }
+            swingLimbs(factor: 0.5)
         case .leaving:
             let direction: Float = walkedInward ? -1 : 1
             root.position.z += 1.15 * dt * direction
@@ -443,12 +538,12 @@ private final class SecurityGuest {
             scanRing.position = SCNVector3(0, 0.95, 0.25)
             scanBar.position = SCNVector3(0, 1.33, 0.23)
             scanBar.geometry?.firstMaterial?.diffuse.contents = UIColor(red: 0.35, green: 0.85, blue: 1, alpha: 1)
-            verdict.setText("Сканирую грудь...")
+            verdict.setText("🔍 Сканирую грудь...")
         } else {
             scanRing.position = SCNVector3(0, 1.50, 0.22)
             scanBar.position = SCNVector3(0, 1.66, 0.20)
             scanBar.geometry?.firstMaterial?.diffuse.contents = UIColor(red: 0.35, green: 1.0, blue: 0.55, alpha: 1)
-            verdict.setText("Дуй в алкотестер...")
+            verdict.setText("🫁 Дуй в алкотестер...")
         }
     }
 
@@ -472,13 +567,14 @@ private final class SecurityGuest {
             case .body:
                 scanned = true
                 contrabandNode.isHidden = !hasContraband
-                verdict.setText(hasContraband ? "ЗАПРЕТ!" : "ЧИСТО",
+                verdict.setText(hasContraband ? "📦 ЗАПРЕТ!" : "✅ ЧИСТО",
                                 color: hasContraband ? .systemRed : .systemGreen)
             case .face:
                 breathTested = true
-                verdict.setText(isDrunk ? "ПЬЯНИЦА!" : "ТРЕЗВЫЙ",
+                verdict.setText(isDrunk ? "🍺 ПЬЯНИЦА!" : "😌 ТРЕЗВЫЙ",
                                 color: isDrunk ? .systemOrange : .systemGreen)
             }
+            refreshNameTag()
             return true
         }
         return false
@@ -511,7 +607,8 @@ private final class SecurityGuest {
     func beginAttack() {
         guard phase == .atGate else { return }
         phase = .attacking
-        showVerdict("ВОТ ПОЛУЧИ!", color: .systemRed)
+        refreshNameTag()
+        showVerdict("😡 ВОТ ПОЛУЧИ!", color: .systemRed)
     }
 
     func wasHitByPlayer() {
@@ -522,7 +619,37 @@ private final class SecurityGuest {
     func leave(accepted: Bool) {
         phase = .leaving
         walkedInward = accepted
-        verdict.setText(accepted ? "ВНУТРИ" : "ОТКАЗ", color: accepted ? .systemGreen : .systemOrange)
+        verdict.setText(accepted ? "✅ ВНУТРИ" : "🚫 ОТКАЗ", color: accepted ? .systemGreen : .systemOrange)
+    }
+
+    // MARK: Захват рукой
+
+    func beginGrab() {
+        guard phase != .leaving, phase != .held, phase != .dropping else { return }
+        cancelScan()
+        resumePhase = phase
+        phase = .held
+        refreshNameTag()
+        showVerdict("😬 ДЕРЖИСЬ!", color: .systemPurple)
+    }
+
+    func dropToFloor() {
+        guard phase == .held else { return }
+        phase = .dropping
+        dropVelocity = -0.6
+    }
+
+    func ejectThroughDoor() {
+        resumePhase = .leaving
+        walkedInward = true
+        showVerdict("🚪 ПОЛЁЛ ВОН!", color: .systemOrange)
+    }
+
+    func whackReaction() -> String {
+        if isAggressive { return "😡 А ну отвали!" }
+        if isDrunk { return "🥴 Ай, зачем бить?!" }
+        if hasContraband { return "😨 Я ничего не делал!" }
+        return "😟 Ты что, охрана?!"
     }
 
     func removeFromWorld() {
@@ -561,10 +688,10 @@ final class SecurityVRGame {
     private let toolLabel = TextSprite()
     private let rulesBoard = TextSprite()
 
-    private let acceptButton = SecurityButton(title: "ВПУСТИТЬ", color: UIColor(red: 0.15, green: 0.70, blue: 0.32, alpha: 1))
-    private let rejectButton = SecurityButton(title: "ОТКАЗАТЬ", color: UIColor(red: 0.80, green: 0.16, blue: 0.22, alpha: 1))
-    private let rulesButton = SecurityButton(title: "ПРАВИЛА", color: UIColor(red: 0.35, green: 0.35, blue: 0.42, alpha: 1), hitRadius: 0.22, fontSize: 4.6)
-    private let exitButton = SecurityButton(title: "ВЫХОД", color: UIColor(white: 0.25, alpha: 1), hitRadius: 0.22, fontSize: 4.6)
+    private let acceptButton = SecurityButton(title: "✅ ВПУСТИТЬ", color: UIColor(red: 0.15, green: 0.70, blue: 0.32, alpha: 1))
+    private let rejectButton = SecurityButton(title: "❌ ОТКАЗАТЬ", color: UIColor(red: 0.80, green: 0.16, blue: 0.22, alpha: 1))
+    private let rulesButton = SecurityButton(title: "📜 ПРАВИЛА", color: UIColor(red: 0.35, green: 0.35, blue: 0.42, alpha: 1), hitRadius: 0.22, fontSize: 4.6)
+    private let exitButton = SecurityButton(title: "🚪 ВЫХОД", color: UIColor(white: 0.25, alpha: 1), hitRadius: 0.22, fontSize: 4.6)
     private var toolButtons: [SecurityTool: SecurityButton] = [:]
     private var decisionButtons: [SecurityButton] { [acceptButton, rejectButton] }
     private var allButtons: [SecurityButton] {
@@ -574,8 +701,23 @@ final class SecurityVRGame {
     private var rulesVisible = false
     private var effects: [(node: SCNNode, ttl: Float)] = []
 
+    // Хват предметов и гостей
+    private var pickables: [SCNNode] = []
+    private var heldItem: SCNNode?
+    private var heldGuest: SecurityGuest?
+    private var heldPrevWorld = SIMD3<Float>(0, 0, 0)
+    private var heldVelocity = SIMD3<Float>(0, 0, 0)
+    private var freeItems: [(node: SCNNode, velocity: SIMD3<Float>)] = []
+    private var whackCooldown: Float = 0
+
     private var previousPinch = false
     private var lastFrameTime = CACurrentMediaTime()
+
+    private static let guestNames = [
+        "Игорь", "Артём", "Макс", "Рома", "Кирилл", "Олег",
+        "Тимур", "Дэн", "Никита", "Юля", "Алина", "Марина",
+        "Даша", "Ксюша", "Вика", "Соня"
+    ]
 
     // MARK: Старт / стоп
 
@@ -595,13 +737,32 @@ final class SecurityVRGame {
         )
         root.simdOrientation = simd_quatf(from: SIMD3<Float>(0, 0, -1), to: forward)
 
+        // Перезапуск: чистим прошлую сессию, чтобы узлы не дублировались.
+        root.childNodes.forEach { $0.removeFromParentNode() }
+        pickables.removeAll()
+        freeItems.removeAll()
+        heldItem = nil
+        heldGuest = nil
+        whackCooldown = 0
+        rulesVisible = false
+        money = 0
+        score = 0
+        wave = 1
+        servedInWave = 0
+        spawnCooldown = 0.5
+        walkSpeed = 0.8
+        contrabandChance = 0.35
+        drunkChance = 0.30
+        aggressiveChance = 0.25
+        selectedTool = .scanner
+
         buildEnvironment()
         buildHUD()
         scene.rootNode.addChildNode(root)
 
         previousPinch = false
         lastFrameTime = CACurrentMediaTime()
-        toastLabel.setText("Пропускай гостей. Правила — кнопка ПРАВИЛА")
+        toastLabel.setText("🛡 Пропускай гостей. 📜 ПРАВИЛА — кнопка сверху. ✋ РУКА — хватать")
         refreshHUD()
     }
 
@@ -610,6 +771,10 @@ final class SecurityVRGame {
         isRunning = false
         guest?.removeFromWorld()
         guest = nil
+        heldItem = nil
+        heldGuest = nil
+        freeItems.removeAll()
+        pickables.removeAll()
         effects.forEach { $0.node.removeFromParentNode() }
         effects.removeAll()
         root.removeFromParentNode()
@@ -690,17 +855,31 @@ final class SecurityVRGame {
         stripBackNode.position = SCNVector3(0, 3.1, -4.02)
         root.addChildNode(stripBackNode)
 
-        // Вывеска
-        let signTop = SCNText(string: "SECURITY", extrusionDepth: 0.02)
-        signTop.font = UIFont.systemFont(ofSize: 16, weight: .bold)
-        signTop.flatness = 0.1
-        signTop.materials = [neonMagenta]
-        let signTopNode = SCNNode(geometry: signTop)
-        let (signMin, signMax) = signTop.boundingBox
-        signTopNode.pivot = SCNMatrix4MakeTranslation(-(signMin.x + signMax.x) / 2, -(signMin.y + signMax.y) / 2, 0)
-        signTopNode.position = SCNVector3(0, 2.35, -3.9)
-        signTopNode.constraints = [SCNBillboardConstraint()]
-        root.addChildNode(signTopNode)
+        // Вывеска — рисуем в картинку, масштаб подбирается по ширине.
+        let signTop = TextSprite()
+        signTop.setText("SECURITY", color: UIColor(red: 1, green: 0.25, blue: 0.75, alpha: 1))
+        signTop.position = SCNVector3(0, 2.85, -3.88)
+        signTop.fitWidth(3.0)
+        root.addChildNode(signTop)
+
+        // Подписи помещения
+        let doorLabel = TextSprite()
+        doorLabel.setText("🚪 В КЛУБ")
+        doorLabel.position = SCNVector3(0, 2.16, -3.97)
+        doorLabel.fitWidth(1.5)
+        root.addChildNode(doorLabel)
+
+        let detectorLabel = TextSprite()
+        detectorLabel.setText("🔍 ДОСМОТР")
+        detectorLabel.position = SCNVector3(0, 2.3, -3.74)
+        detectorLabel.fitWidth(1.6)
+        root.addChildNode(detectorLabel)
+
+        let rugLabel = TextSprite()
+        rugLabel.setText("🚶 ЖДИ ЗДЕСЬ")
+        rugLabel.position = SCNVector3(0.95, 0.3, -2.5)
+        rugLabel.fitWidth(1.1)
+        root.addChildNode(rugLabel)
 
         // Дверь клуба
         let door = SCNBox(width: 1.1, height: 2.1, length: 0.08, chamferRadius: 0.02)
@@ -767,57 +946,106 @@ final class SecurityVRGame {
         let scannerMat = SCNMaterial()
         scannerMat.applyConstant(UIColor(white: 0.35, alpha: 1))
         scannerBody.materials = [scannerMat]
-        let scanner = SCNNode(geometry: scannerBody)
-        scanner.position = SCNVector3(-1.75, deskY, 0.9)
-        root.addChildNode(scanner)
+        addPickable(
+            geometry: scannerBody,
+            position: SCNVector3(-1.75, deskY, 0.9),
+            emoji: "📡",
+            labelHeight: 0.14
+        )
 
         // Алкотестер
         let alco = SCNCylinder(radius: 0.02, height: 0.12)
         let alcoMat = SCNMaterial()
         alcoMat.applyConstant(UIColor(red: 0.9, green: 0.9, blue: 0.95, alpha: 1))
         alco.materials = [alcoMat]
-        let alcoNode = SCNNode(geometry: alco)
-        alcoNode.position = SCNVector3(-1.45, deskY + 0.03, 0.9)
-        alcoNode.eulerAngles.z = 1.4
-        root.addChildNode(alcoNode)
+        addPickable(
+            geometry: alco,
+            position: SCNVector3(-1.45, deskY, 0.9),
+            eulerAngles: SCNVector3(0, 0, 1.4),
+            emoji: "🫁",
+            labelHeight: 0.15
+        )
 
         // Водяной пистолет
         let waterBody = SCNBox(width: 0.14, height: 0.05, length: 0.04, chamferRadius: 0.01)
         let waterMat = SCNMaterial()
         waterMat.applyConstant(UIColor(red: 0.1, green: 0.4, blue: 0.95, alpha: 1), emissive: 0.2)
         waterBody.materials = [waterMat]
-        let water = SCNNode(geometry: waterBody)
-        water.position = SCNVector3(-1.15, deskY, 0.9)
-        root.addChildNode(water)
+        addPickable(
+            geometry: waterBody,
+            position: SCNVector3(-1.15, deskY, 0.9),
+            emoji: "💦",
+            labelHeight: 0.14
+        )
 
         // Электрошокер
         let taserBody = SCNBox(width: 0.10, height: 0.04, length: 0.035, chamferRadius: 0.008)
         let taserMat = SCNMaterial()
         taserMat.applyConstant(UIColor(red: 0.9, green: 0.75, blue: 0.1, alpha: 1), emissive: 0.25)
         taserBody.materials = [taserMat]
-        let taser = SCNNode(geometry: taserBody)
-        taser.position = SCNVector3(-0.85, deskY, 0.9)
-        root.addChildNode(taser)
+        addPickable(
+            geometry: taserBody,
+            position: SCNVector3(-0.85, deskY, 0.9),
+            emoji: "⚡",
+            labelHeight: 0.13
+        )
+
+        // Бутылка на стойке — чисто чтобы швырнуть
+        let bottleBody = SCNCylinder(radius: 0.03, height: 0.24)
+        let bottleMat = SCNMaterial()
+        bottleMat.applyConstant(UIColor(red: 0.15, green: 0.45, blue: 0.12, alpha: 1), emissive: 0.2)
+        bottleBody.materials = [bottleMat]
+        addPickable(
+            geometry: bottleBody,
+            position: SCNVector3(-0.65, deskY + 0.09, 1.02),
+            emoji: "🍾",
+            labelHeight: 0.17
+        )
+    }
+
+    /// Предмет, который можно подхватить ✋ РУКОЙ. Внутри — моделька и эмодзи над ней.
+    private func addPickable(
+        geometry: SCNGeometry,
+        position: SCNVector3,
+        eulerAngles: SCNVector3 = SCNVector3Zero,
+        emoji: String,
+        labelHeight: Float
+    ) {
+        let holder = SCNNode()
+        holder.position = position
+
+        let body = SCNNode(geometry: geometry)
+        body.eulerAngles = eulerAngles
+        holder.addChildNode(body)
+
+        let label = TextSprite()
+        label.setText(emoji)
+        label.scale = SCNVector3(0.0024, 0.0024, 0.0024)
+        label.position = SCNVector3(0, labelHeight, 0)
+        holder.addChildNode(label)
+
+        root.addChildNode(holder)
+        pickables.append(holder)
     }
 
     private func buildHUD() {
         // Верхний ряд
-        moneyLabel.setText("$0", color: UIColor(red: 1, green: 0.82, blue: 0.25, alpha: 1))
+        moneyLabel.setText("💰 $0", color: UIColor(red: 1, green: 0.82, blue: 0.25, alpha: 1))
         moneyLabel.position = SCNVector3(-1.15, 2.0, 0.35)
         moneyLabel.scale = SCNVector3(0.007, 0.007, 0.007)
         root.addChildNode(moneyLabel)
 
-        scoreLabel.setText("Очки: 0")
+        scoreLabel.setText("⭐ Очки: 0")
         scoreLabel.position = SCNVector3(1.15, 2.0, 0.35)
         scoreLabel.scale = SCNVector3(0.0065, 0.0065, 0.0065)
         root.addChildNode(scoreLabel)
 
-        waveLabel.setText("Волна 1")
+        waveLabel.setText("👥 Волна 1")
         waveLabel.position = SCNVector3(0, 2.3, 0.2)
         waveLabel.scale = SCNVector3(0.006, 0.006, 0.006)
         root.addChildNode(waveLabel)
 
-        hintLabel.setText("Гость идёт к входу")
+        hintLabel.setText("🚪 Гость идёт к входу")
         hintLabel.position = SCNVector3(0, 1.45, 0.55)
         hintLabel.scale = SCNVector3(0.0055, 0.0055, 0.0055)
         root.addChildNode(hintLabel)
@@ -826,7 +1054,7 @@ final class SecurityVRGame {
         toastLabel.scale = SCNVector3(0.0055, 0.0055, 0.0055)
         root.addChildNode(toastLabel)
 
-        toolLabel.setText("Инструмент: СКАНЕР")
+        toolLabel.setText("🔧 Инструмент: 📡 СКАНЕР")
         toolLabel.position = SCNVector3(-0.9, 1.62, 0.75)
         toolLabel.scale = SCNVector3(0.005, 0.005, 0.005)
         root.addChildNode(toolLabel)
@@ -864,32 +1092,36 @@ final class SecurityVRGame {
     }
 
     private static let rulesText = """
-    ПРАВИЛА КЛУБА
+    📜 ПРАВИЛА КЛУБА
 
-    1. Щипок на груди со СКАНЕРОМ —
-    ищи контрабанду.
-    2. Щипок на лицо с АЛКО —
-    проверяй на трезвость.
-    3. Пьяных и с контрабандой —
-    отказывай.
-    4. Щипок по гостю с любой
-    кнопкой — поговорить.
-    5. Напали? ВОДЯНКА успокоит,
-    ШОКЕР оглушит.
-    6. Шокером по мирным — штраф!
+    1. 📡 СКАНЕР — удержание на груди:
+    обыск контрабанды.
+    2. 🫁 АЛКО — удержание на лице:
+    проверка на трезвость.
+    3. 📦 С контрабандой и 🍺 пьяных
+    в клуб не пускай.
+    4. 👆 Короткий щипок по гостю —
+    поговорить.
+    5. ✋ РУКА — щипок: взять предмет
+    со стойки или схватить гостя.
+    6. 🤾 Схватил гостя? Покажи на дверь
+    🚪 и отпусти — выкинешь на улицу.
+    7. 💦 Водянка — агрессору в нос.
+    8. ⚡ ШОКЕР оглушает, но по мирным
+    за него штраф!
     """
 
     private func refreshHUD() {
-        moneyLabel.setText("$\(money)")
-        scoreLabel.setText("Очки: \(score)")
-        waveLabel.setText("Волна \(wave)")
+        moneyLabel.setText("💰 $\(money)", color: UIColor(red: 1, green: 0.82, blue: 0.25, alpha: 1))
+        scoreLabel.setText("⭐ Очки: \(score)")
+        waveLabel.setText("👥 Волна \(wave)")
     }
 
     private func refreshToolHighlight() {
         for (tool, button) in toolButtons {
             button.setHighlight(tool == selectedTool)
         }
-        toolLabel.setText("Инструмент: \(selectedTool.title)")
+        toolLabel.setText("🔧 Инструмент: \(selectedTool.title)")
     }
 
     // MARK: Эффекты
@@ -921,6 +1153,132 @@ final class SecurityVRGame {
         }
     }
 
+    // MARK: Хват
+
+    /// Тянем предмет/гостя за лучом; предметом можно заехать гостю.
+    private func followHeld(ray: WorldRay?, dt: Float) {
+        guard heldItem != nil || heldGuest != nil else { return }
+        guard let ray else { return }
+        let world = ray.origin + ray.direction * (heldGuest != nil ? 1.5 : 0.5)
+        let local = root.convertPosition(SCNVector3(world.x, world.y, world.z), from: nil)
+        if let item = heldItem {
+            item.position = local
+            whackGuest(with: world)
+        } else if let guest = heldGuest {
+            guest.root.position = SCNVector3(local.x, max(local.y - 1.05, 0.05), local.z)
+        }
+        if dt > 0.001 {
+            heldVelocity = (world - heldPrevWorld) / dt
+        }
+        heldPrevWorld = world
+    }
+
+    /// Отпустили щипок: предмет летит по броску, гость падает на пол.
+    private func releaseHold() {
+        if let item = heldItem {
+            heldItem = nil
+            let currentWorld = item.presentation.simdWorldPosition
+            let base = root.convertPosition(
+                SCNVector3(currentWorld.x, currentWorld.y, currentWorld.z),
+                from: nil
+            )
+            let ahead = root.convertPosition(
+                SCNVector3(
+                    currentWorld.x + heldVelocity.x,
+                    currentWorld.y + heldVelocity.y,
+                    currentWorld.z + heldVelocity.z
+                ),
+                from: nil
+            )
+            var localVelocity = SIMD3<Float>(
+                Float(ahead.x - base.x),
+                Float(ahead.y - base.y),
+                Float(ahead.z - base.z)
+            )
+            let speed = simd_length(localVelocity)
+            if speed > 8 { localVelocity = localVelocity / speed * 8 }
+            freeItems.append((node: item, velocity: localVelocity))
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            return
+        }
+        if let guest = heldGuest {
+            heldGuest = nil
+            if guest.root.position.z < 0 {
+                // Вытащил в часть комнаты со дверью — значит выкидывает.
+                guest.ejectThroughDoor()
+                guest.dropToFloor()
+                money += 35
+                score += 50
+                if guest.isAggressive {
+                    money += 15
+                    score += 40
+                }
+                toastLabel.setText("🚪 Выкинул гостя за дверь! +$35")
+                refreshHUD()
+                servedInWave += 1
+                if servedInWave >= 5 { nextWave() }
+            } else {
+                guest.dropToFloor()
+                toastLabel.setText("🫳 Отпустил гостя")
+            }
+            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+        }
+    }
+
+    /// Удар предметом в руке: гость отшатывается и матерится.
+    private func whackGuest(with itemWorld: SIMD3<Float>) {
+        guard heldItem != nil, whackCooldown <= 0 else { return }
+        guard let guest,
+              guest.phase != .leaving, guest.phase != .held, guest.phase != .dropping else { return }
+        let chest = guest.root.convertPosition(guest.chestLocalPoint(), to: nil).simd3
+        let head = guest.root.convertPosition(guest.headLocalPoint(), to: nil).simd3
+        let distance = min(simd_distance(chest, itemWorld), simd_distance(head, itemWorld))
+        guard distance < 0.45 else { return }
+        whackCooldown = 0.9
+        guest.showVerdict(guest.whackReaction(), color: .orange)
+        guest.root.position.z = max(guest.root.position.z - 0.3, -3.6)
+        let hitPoint = guest.root.convertPosition(guest.chestLocalPoint(), from: nil)
+        spawnFlash(at: hitPoint, color: .orange)
+        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+    }
+
+    /// Физика брошенных предметов: гравитация, отскок, пол и стойка.
+    private func updateFreeItems(dt: Float) {
+        guard !freeItems.isEmpty else { return }
+        for index in stride(from: freeItems.count - 1, through: 0, by: -1) {
+            var entry = freeItems[index]
+            entry.velocity.y -= 9.8 * dt
+            var position = entry.node.simdPosition
+            position += entry.velocity * dt
+
+            let overDesk = position.x > -2.05 && position.x < -0.45
+                && position.z > 0.55 && position.z < 1.25
+            let surface: Float = overDesk ? 0.84 : 0.06
+            if position.y <= surface && entry.velocity.y < 0 {
+                position.y = surface
+                entry.velocity.y = -entry.velocity.y * 0.28
+                entry.velocity.x *= 0.55
+                entry.velocity.z *= 0.55
+                if abs(entry.velocity.y) < 0.6 {
+                    entry.velocity = SIMD3<Float>(0, 0, 0)
+                }
+            }
+
+            // Стены комнаты
+            if position.x < -3.4 { position.x = -3.4; entry.velocity.x = abs(entry.velocity.x) * 0.4 }
+            if position.x > 3.4 { position.x = 3.4; entry.velocity.x = -abs(entry.velocity.x) * 0.4 }
+            if position.z < -3.95 { position.z = -3.95; entry.velocity.z = abs(entry.velocity.z) * 0.4 }
+            if position.z > 3.2 { position.z = 3.2; entry.velocity.z = -abs(entry.velocity.z) * 0.4 }
+
+            entry.node.simdPosition = position
+            if simd_length(entry.velocity) < 0.05 {
+                freeItems.remove(at: index)
+            } else {
+                freeItems[index] = entry
+            }
+        }
+    }
+
     // MARK: Ввод
 
     func update(ray: WorldRay?, pinch: Bool) {
@@ -930,10 +1288,12 @@ final class SecurityVRGame {
         lastFrameTime = now
 
         let pinchPressed = pinch && !previousPinch
+        let pinchReleased = !pinch && previousPinch
         previousPinch = pinch
 
         updateGuest(dt: dt)
         updateEffects(dt: dt)
+        whackCooldown = max(whackCooldown - dt, 0)
 
         // Подсветка наведением
         for button in allButtons {
@@ -951,15 +1311,38 @@ final class SecurityVRGame {
         var hitFace = false
         var chestWorld = SCNVector3Zero
         var headWorld = SCNVector3Zero
-        if let ray, let guest, guest.phase == .atGate || guest.phase == .attacking {
+        if let ray, let guest,
+           guest.phase == .arriving || guest.phase == .atGate
+            || guest.phase == .attacking || guest.phase == .stunned {
             chestWorld = guest.root.convertPosition(guest.chestLocalPoint(), to: nil)
             headWorld = guest.root.convertPosition(guest.headLocalPoint(), to: nil)
             hitChest = sphereHit(ray: ray, center: chestWorld.simd3, radius: 0.30) != nil
             hitFace = sphereHit(ray: ray, center: headWorld.simd3, radius: 0.24) != nil
         }
 
+        // Хват: отпустили щипок или тащим предмет/гостя за лучом.
+        if pinchReleased {
+            releaseHold()
+        }
+        if pinch {
+            followHeld(ray: ray, dt: dt)
+        }
+        updateFreeItems(dt: dt)
+
+        // Подсказка — чего можно подхватить лучом.
+        if heldItem == nil, heldGuest == nil, let ray {
+            if let item = pickables.first(where: {
+                sphereHit(ray: ray, center: $0.presentation.simdWorldPosition, radius: 0.16) != nil
+            }) {
+                _ = item
+                hintLabel.setText("👇 ✋ РУКА + щипок — взять предмет")
+            } else if selectedTool == .hand, hitChest || hitFace {
+                hintLabel.setText("👇 Щипок — схватить. У двери отпусти — выкину")
+            }
+        }
+
         // Удержание щипка — сканирование текущим инструментом.
-        if pinch, let guest, guest.phase == .atGate {
+        if pinch, heldItem == nil, let guest, guest.phase == .atGate {
             switch selectedTool {
             case .scanner where hitChest:
                 if !guest.scanned { guest.beginScan(kind: .body) }
@@ -997,6 +1380,31 @@ final class SecurityVRGame {
                 return
             }
 
+            // ✋ РУКА — взять предмет со стойки или схватить гостя.
+            if selectedTool == .hand {
+                if let item = pickables.first(where: {
+                    sphereHit(ray: ray, center: $0.presentation.simdWorldPosition, radius: 0.16) != nil
+                }) {
+                    freeItems.removeAll { $0.node === item }
+                    heldItem = item
+                    heldVelocity = .zero
+                    heldPrevWorld = ray.origin + ray.direction * 0.5
+                    hintLabel.setText("🔓 Отпусти — уронишь или швырни в гостя")
+                    UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                    return
+                }
+                if let guest, guest.phase != .leaving, guest.phase != .held,
+                   hitChest || hitFace {
+                    heldGuest = guest
+                    guest.beginGrab()
+                    heldVelocity = .zero
+                    heldPrevWorld = ray.origin + ray.direction * 1.5
+                    hintLabel.setText("🤾 Держу! Покажи на дверь 🚪 и отпусти — выкину")
+                    UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                    return
+                }
+            }
+
             if let guest, guest.phase == .atGate || guest.phase == .attacking {
                 if guest.phase == .atGate {
                     if acceptButton.hitTest(ray: ray) {
@@ -1029,22 +1437,25 @@ final class SecurityVRGame {
                         let wasAggressive = guest.isAggressive
                         guest.applyWater()
                         money += wasAggressive ? 25 : -10
-                        toastLabel.setText(wasAggressive ? "Облил агрессивного! +$25" : "Облил мирного гостя. -$10")
+                        toastLabel.setText(wasAggressive ? "💦 Облил агрессивного! +$25" : "💦 Облил мирного гостя. -$10")
                         refreshHUD()
                     case .taser:
                         spawnFlash(at: localHit, color: .systemYellow)
-                        let wasAggressive = guest.isAggressive
+                        let wasAggressiveTaser = guest.isAggressive
                         guest.applyTaser()
-                        if wasAggressive {
+                        if wasAggressiveTaser {
                             score += 60
                             money += 30
-                            toastLabel.setText("Оглушил агрессивного! +$30")
+                            toastLabel.setText("⚡ Оглушил агрессивного! +$30")
                         } else {
                             score -= 50
                             money -= 50
-                            toastLabel.setText("Оглушил мирного! Штраф -$50")
+                            toastLabel.setText("⚡ Оглушил мирного! Штраф -$50")
                         }
                         refreshHUD()
+                    case .hand:
+                        // Захват обработан выше — сюда не попадаем.
+                        break
                     }
                     return
                 }
@@ -1065,23 +1476,24 @@ final class SecurityVRGame {
         guard let guest else { return }
         guest.update(dt: dt)
 
-        if guest.phase == .atGate, guest.arrived {
+        if guest.phase == .atGate, guest.arrived, heldItem == nil, heldGuest == nil {
             switch selectedTool {
-            case .scanner: hintLabel.setText("Щипок на груди — осмотр. Голова — поговорить")
-            case .breathalyzer: hintLabel.setText("Щипок на лицо — проверка на трезвость")
-            case .waterPistol: hintLabel.setText("Щипок по гостю — брызнуть водой")
-            case .taser: hintLabel.setText("Щипок по гостю — оглушить")
+            case .scanner: hintLabel.setText("📡 Щипок на груди (удержание) — осмотр. Голова — поговорить")
+            case .breathalyzer: hintLabel.setText("🫁 Щипок на лицо (удержание) — проверка на трезвость")
+            case .waterPistol: hintLabel.setText("💦 Щипок по гостю — брызнуть водой")
+            case .taser: hintLabel.setText("⚡ Щипок по гостю — оглушить")
+            case .hand: hintLabel.setText("✋ Щипок — взять предмет или схватить гостя")
             }
         }
 
         // Агрессивный гость бежит к игроку, если никто не вмешался.
         if guest.phase == .attacking {
-            hintLabel.setText("ОН НАПАЁТ! Водянка или шокер!")
+            hintLabel.setText("🚨 ОН НАПАЁТ! 💦 или ⚡!")
             if guest.root.position.z >= 0.70 {
                 guest.wasHitByPlayer()
                 money -= 70
                 score -= 40
-                toastLabel.setText("Он пробил оборону! -$70")
+                toastLabel.setText("🤕 Он пробил оборону! -$70")
                 refreshHUD()
             }
         }
@@ -1106,7 +1518,8 @@ final class SecurityVRGame {
         newGuest.root.position = SCNVector3(.random(in: -0.15...0.15), 0, -3.9)
         root.addChildNode(newGuest.root)
         guest = newGuest
-        hintLabel.setText("Гость идёт к входу")
+        newGuest.setName(Self.guestNames.randomElement() ?? "Гость")
+        hintLabel.setText("🚪 Гость идёт к входу")
     }
 
     private func decide(accept: Bool) {
@@ -1117,40 +1530,38 @@ final class SecurityVRGame {
         }
         if !accept, guest.isAggressive {
             guest.beginAttack()
-            toastLabel.setText("Он разозлился и бросился на тебя!")
-            hintLabel.setText("ОН НАПАЁТ! Водянка или шокер!")
+            toastLabel.setText("😡 Он разозлился и бросился на тебя!")
+            hintLabel.setText("🚨 ОН НАПАЁТ! 💦 или ⚡!")
             servedInWave += 1
             if servedInWave >= 5 { nextWave() }
             return
         }
 
         let clean = !guest.hasContraband && !guest.isDrunk
-        let correctDecision = (accept != clean)
         if accept && clean {
             score += 100
             money += 20
-            toastLabel.setText("Пропустил чистого гостя +$20")
+            toastLabel.setText("✅ Пропустил чистого гостя +$20")
         } else if !accept && guest.hasContraband {
             score += 150
             money += 80
-            toastLabel.setText("Изъял контрабанду! +$80")
+            toastLabel.setText("📦 Изъял контрабанду! +$80")
         } else if !accept && guest.isDrunk {
             score += 120
             money += 60
-            toastLabel.setText("Пьяного развернул! +$60")
+            toastLabel.setText("🍺 Пьяного развернул! +$60")
         } else if accept && guest.hasContraband {
             score -= 120
             money -= 40
-            toastLabel.setText("Пропустил контрабанду! -40")
+            toastLabel.setText("🚫 Пропустил контрабанду! -$40")
         } else if accept && guest.isDrunk {
             score -= 90
             money -= 30
-            toastLabel.setText("Пьяного в клуб! -30")
+            toastLabel.setText("🥴 Пьяного в клуб! -$30")
         } else {
             score -= 60
-            toastLabel.setText("Отказал чистому гостю. -60")
+            toastLabel.setText("❌ Отказал чистому гостю. -60")
         }
-        _ = correctDecision
         guest.leave(accepted: accept)
         servedInWave += 1
         hintLabel.setText("")
@@ -1167,7 +1578,7 @@ final class SecurityVRGame {
         contrabandChance = min(contrabandChance + 0.06, 0.7)
         drunkChance = min(drunkChance + 0.05, 0.6)
         aggressiveChance = min(aggressiveChance + 0.04, 0.55)
-        toastLabel.setText("ВОЛНА \(wave): гости быстрее и хитрее")
+        toastLabel.setText("🔔 ВОЛНА \(wave): гости быстрее и хитрее")
         refreshHUD()
     }
 }

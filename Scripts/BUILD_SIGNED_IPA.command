@@ -6,18 +6,18 @@ read "TEAM?Apple Developer Team ID (10 chars): "
 if [[ -z "${TEAM}" ]]; then echo "Team ID is required"; exit 1; fi
 rm -rf build
 mkdir -p build
-xcodebuild -project HandARCinema.xcodeproj \
-  -target HandARCinema \
+xcodebuild -project HandARBrowser.xcodeproj \
+  -target HandARBrowser \
   -configuration Release \
   -sdk iphoneos \
-  -archivePath build/HandARCinema.xcarchive \
+  -archivePath build/HandARBrowser.xcarchive \
   DEVELOPMENT_TEAM="$TEAM" \
   CODE_SIGN_STYLE=Automatic \
   archive
 rm -rf build/Payload
 mkdir build/Payload
-cp -R build/HandARCinema.xcarchive/Products/Applications/HandARCinema.app build/Payload/
+cp -R build/HandARBrowser.xcarchive/Products/Applications/HandARBrowser.app build/Payload/
 cd build
-/usr/bin/zip -qry HandARCinema-signed.ipa Payload
+/usr/bin/zip -qry HandARBrowser-signed.ipa Payload
 cd "$ROOT"
-echo "Created: $ROOT/build/HandARCinema-signed.ipa"
+echo "Created: $ROOT/build/HandARBrowser-signed.ipa"

@@ -2851,7 +2851,7 @@ html,body{margin:0;width:100%;height:100%;overflow:hidden;font-family:-apple-sys
 body{user-select:none;-webkit-user-select:none}
 
 /* ---- Фон: аврора + звёзды + виньетка ---- */
-.scene{position:fixed;inset:0;overflow:hidden}
+.scene{position:fixed;inset:0;overflow:hidden;pointer-events:none;z-index:0}
 .aurora{position:absolute;border-radius:50%;filter:blur(70px);opacity:.55;will-change:transform}
 .aurora.a1{width:52vmax;height:52vmax;left:-12vmax;top:-18vmax;background:radial-gradient(circle,#2f6bff 0%,transparent 62%);animation:drift1 26s ease-in-out infinite alternate}
 .aurora.a2{width:46vmax;height:46vmax;right:-14vmax;top:-10vmax;background:radial-gradient(circle,#b14bff 0%,transparent 62%);animation:drift2 32s ease-in-out infinite alternate}
@@ -2863,7 +2863,7 @@ body{user-select:none;-webkit-user-select:none}
 @keyframes drift3{from{transform:translate(0,0) scale(1)}to{transform:translate(-6vw,-5vh) scale(1.2)}}
 
 /* ---- Каркас ---- */
-.wall{position:relative;height:100%;padding:22px 34px 18px;display:flex;flex-direction:column;gap:15px}
+.wall{position:relative;z-index:1;height:100%;padding:22px 34px 18px;display:flex;flex-direction:column;gap:15px}
 
 /* ---- Статусная строка ---- */
 .statusbar{display:flex;align-items:center;justify-content:space-between;height:44px}

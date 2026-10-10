@@ -8,8 +8,8 @@ mkdir -p build
 # Build the target directly. We intentionally do not pass -derivedDataPath,
 # because current xcodebuild requires a scheme when that option is used.
 xcodebuild \
-  -project HandARCinema.xcodeproj \
-  -target HandARCinema \
+  -project HandARBrowser.xcodeproj \
+  -target HandARBrowser \
   -configuration Release \
   -sdk iphoneos \
   CONFIGURATION_BUILD_DIR="$ROOT/build/App" \
@@ -18,13 +18,13 @@ xcodebuild \
   CODE_SIGN_IDENTITY="" \
   build
 
-APP="$ROOT/build/App/HandARCinema.app"
+APP="$ROOT/build/App/HandARBrowser.app"
 test -d "$APP"
 rm -rf build/Payload
 mkdir -p build/Payload
 cp -R "$APP" build/Payload/
 cd build
-/usr/bin/zip -qry HandARCinema-unsigned.ipa Payload
+/usr/bin/zip -qry HandARBrowser-unsigned.ipa Payload
 cd "$ROOT"
 
-echo "Created: $ROOT/build/HandARCinema-unsigned.ipa"
+echo "Created: $ROOT/build/HandARBrowser-unsigned.ipa"

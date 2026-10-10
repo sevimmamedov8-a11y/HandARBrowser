@@ -170,6 +170,78 @@ private final class SecurityButton {
     }
 }
 
+// MARK: - Моя рука (тащится за настоящей рукой)
+
+/// Ладонь + 4 пальца + большой. Следует за лучом кончика указательного
+/// пальца, поэтому хват выходит «рука к руке», а не взглядом.
+private final class MyHand {
+    let node = SCNNode()
+    private var fingers: [SCNNode] = []
+    private(set) var worldPosition = SIMD3<Float>(0, 0, 0)
+    private(set) var worldSpeed: Float = 0
+
+    init() {
+        let skin = SCNMaterial()
+        skin.applyConstant(UIColor(red: 0.82, green: 0.62, blue: 0.45, alpha: 1))
+
+        let palmGeometry = SCNBox(width: 0.16, height: 0.075, length: 0.052, chamferRadius: 0.024)
+        palmGeometry.materials = [skin]
+        node.addChildNode(SCNNode(geometry: palmGeometry))
+
+        let fingerXs: [Float] = [-0.058, -0.019, 0.020, 0.058]
+        for (index, x) in fingerXs.enumerated() {
+            let length: Float = index == 1 ? 0.09 : 0.078
+            let geometry = SCNBox(
+                width: 0.028, height: length, length: 0.028, chamferRadius: 0.012
+            )
+            geometry.materials = [skin]
+            let pivot = SCNNode()
+            pivot.position = SCNVector3(x, 0.042, 0)
+            let finger = SCNNode(geometry: geometry)
+            finger.position = SCNVector3(0, length * 0.5, 0)
+            pivot.addChildNode(finger)
+            node.addChildNode(pivot)
+            fingers.append(pivot)
+        }
+
+        let thumbGeometry = SCNBox(width: 0.030, height: 0.082, length: 0.032, chamferRadius: 0.012)
+        thumbGeometry.materials = [skin]
+        let thumb = SCNNode(geometry: thumbGeometry)
+        thumb.position = SCNVector3(-0.088, 0.008, 0.012)
+        thumb.eulerAngles = SCNVector3(0, 0, -0.8)
+        thumb.scale = SCNVector3(1, 1, 1)
+        node.addChildNode(thumb)
+        fingers.append(thumb)
+    }
+
+    /// Ставим кисть в точку луча и направляем пальцы вперёд по лучу.
+    func update(targetWorld: SIMD3<Float>, direction: SIMD3<Float>, dt: Float, gripping: Bool) {
+        let previous = worldPosition
+        worldPosition = targetWorld
+        if dt > 0.001 {
+            let instant = simd_length(targetWorld - previous) / dt
+            worldSpeed = instant * 0.35 + worldSpeed * 0.65
+        }
+        node.simdPosition = targetWorld
+        node.simdOrientation = simd_quatf(
+            from: SIMD3<Float>(0, 1, 0),
+            to: simd_normalize(direction)
+        )
+        // Кулак — пальцы поджимаются.
+        let curl = gripping ? 0.55 : 1.0
+        for (index, finger) in fingers.enumerated() {
+            if index == fingers.count - 1 { continue }
+            finger.eulerAngles.x = gripping ? -1.15 : 0
+            finger.scale = SCNVector3(1, curl, 1)
+        }
+    }
+
+    func reset() {
+        worldSpeed = 0
+        node.removeFromParentNode()
+    }
+}
+
 // MARK: - Инструмент охраны
 
 private enum SecurityTool: Int, CaseIterable {
@@ -247,6 +319,7 @@ private final class SecurityGuest {
     private(set) var displayName = "Гость"
     private var resumePhase: GuestPhase = .atGate
     private var dropVelocity: Float = 0
+    private var armTips: [SCNNode] = []
 
     private var scanProgress: Float = 0
     private var activeScan: ScanKind?
@@ -328,14 +401,15 @@ private final class SecurityGuest {
             arm.materials = [shirt]
             let armNode = SCNNode(geometry: arm)
             armNode.position = SCNVector3(0, -0.31, 0)
-            let hand = SCNSphere(radius: 0.055)
+            let hand = SCNSphere(radius: 0.062)
             hand.materials = [skin]
             let handNode = SCNNode(geometry: hand)
-            handNode.position = SCNVector3(0, -0.64, 0)
+            handNode.position = SCNVector3(0, -0.655, 0)
             pivot.addChildNode(armNode)
             pivot.addChildNode(handNode)
             root.addChildNode(pivot)
             armPivots.append(pivot)
+            armTips.append(handNode)
         }
 
         // Голова + волосы
@@ -351,6 +425,8 @@ private final class SecurityGuest {
         hairNode.position = SCNVector3(0, 1.535, -0.012)
         hairNode.scale = SCNVector3(1, 0.55, 1)
         root.addChildNode(hairNode)
+
+        buildFace(skin: skin, hair: hair)
 
         // Пьяный держит бутылку.
         if isDrunk {
@@ -377,13 +453,13 @@ private final class SecurityGuest {
 
         // Плашка и имя над головой
         verdict.setText("...")
-        verdict.position = SCNVector3(0, 1.82, 0)
-        verdict.scale = SCNVector3(0.0036, 0.0036, 0.0036)
+        verdict.position = SCNVector3(0, 1.86, 0)
+        verdict.scale = SCNVector3(0.0024, 0.0024, 0.0024)
         root.addChildNode(verdict)
 
         nameTag.setText("🙂 \(displayName)")
-        nameTag.position = SCNVector3(0, 2.08, 0)
-        nameTag.scale = SCNVector3(0.0026, 0.0026, 0.0026)
+        nameTag.position = SCNVector3(0, 2.15, 0)
+        nameTag.scale = SCNVector3(0.0022, 0.0022, 0.0022)
         root.addChildNode(nameTag)
     }
 
@@ -431,6 +507,85 @@ private final class SecurityGuest {
         scanBar.isHidden = true
         root.addChildNode(scanBar)
     }
+
+    // MARK: Лицо
+
+    private func buildFace(skin: SCNMaterial, hair: SCNMaterial) {
+        let white = SCNMaterial()
+        white.applyConstant(UIColor(white: 0.97, alpha: 1))
+        let black = SCNMaterial()
+        black.applyConstant(UIColor(white: 0.03, alpha: 1))
+        let brow = SCNMaterial()
+        let hairColor = (hair.diffuse.contents as? UIColor) ?? UIColor(white: 0.2, alpha: 1)
+        brow.applyConstant(hairColor)
+
+        // Уши
+        for side in [-1, 1] {
+            let ear = SCNSphere(radius: 0.028)
+            ear.materials = [skin]
+            let earNode = SCNNode(geometry: ear)
+            earNode.position = SCNVector3(0.135 * Float(side), 1.50, 0)
+            earNode.scale = SCNVector3(0.5, 1, 0.8)
+            root.addChildNode(earNode)
+        }
+
+        // Глаза: белок + зрачок + брови
+        for side in [-1, 1] {
+            let eye = SCNSphere(radius: 0.030)
+            eye.materials = [white]
+            let eyeNode = SCNNode(geometry: eye)
+            eyeNode.position = SCNVector3(0.052 * Float(side), 1.515, 0.085)
+            eyeNode.scale = SCNVector3(1, 1.15, 0.7)
+            root.addChildNode(eyeNode)
+
+            let pupil = SCNSphere(radius: 0.013)
+            pupil.materials = [black]
+            let pupilNode = SCNNode(geometry: pupil)
+            pupilNode.position = SCNVector3(0.052 * Float(side), 1.515, 0.106)
+            root.addChildNode(pupilNode)
+
+            let browBar = SCNBox(width: 0.052, height: 0.010, length: 0.012, chamferRadius: 0.004)
+            browBar.materials = [brow]
+            let browNode = SCNNode(geometry: browBar)
+            // Пьяный и злой сводят брови.
+            browNode.position = SCNVector3(
+                0.052 * Float(side),
+                1.556 + ((isDrunk || isAggressive) ? 0.005 : 0),
+                0.095
+            )
+            browNode.eulerAngles.z = ((isDrunk || isAggressive) ? -0.24 : -0.05) * Float(side)
+            root.addChildNode(browNode)
+        }
+
+        // Нос
+        let nose = SCNBox(width: 0.026, height: 0.045, length: 0.030, chamferRadius: 0.010)
+        nose.materials = [skin]
+        let noseNode = SCNNode(geometry: nose)
+        noseNode.position = SCNVector3(0, 1.478, 0.113)
+        noseNode.eulerAngles.x = 0.15
+        root.addChildNode(noseNode)
+
+        // Рот — у пьяного чуть открыт, у злого краснее.
+        let mouth = SCNBox(
+            width: isDrunk ? 0.062 : 0.050,
+            height: isDrunk ? 0.020 : 0.012,
+            length: 0.012,
+            chamferRadius: 0.004
+        )
+        let mouthMaterial = SCNMaterial()
+        mouthMaterial.applyConstant(
+            isAggressive ? UIColor(red: 0.45, green: 0.06, blue: 0.10, alpha: 1)
+                : UIColor(red: 0.55, green: 0.14, blue: 0.16, alpha: 1)
+        )
+        mouth.materials = [mouthMaterial]
+        let mouthNode = SCNNode(geometry: mouth)
+        mouthNode.position = SCNVector3(0, 1.428, 0.108)
+        mouthNode.eulerAngles.x = -0.12
+        root.addChildNode(mouthNode)
+    }
+
+    /// Кисти рук — именно за них хватает игрок.
+    func handTipNodes() -> [SCNNode] { armTips }
 
     // MARK: Геометрия для попаданий
 
@@ -485,8 +640,9 @@ private final class SecurityGuest {
                 walkedInward = false
             }
         case .held:
-            // Висит в руке — машет ногами, сам не ходит.
-            swingLimbs(factor: 1.7)
+            // Висит в кулаке: ногами дрыгает, а схваченная рука почти не машет,
+            // иначе хват «рука к руке» начинал бы трястись.
+            swingLimbs(factor: 1.5, armScale: 0.22)
         case .dropping:
             dropVelocity -= 9.8 * dt
             root.position.y += dropVelocity * dt
@@ -507,14 +663,14 @@ private final class SecurityGuest {
         }
     }
 
-    private func swingLimbs(factor: Float) {
+    private func swingLimbs(factor: Float, armScale: Float = 1.0) {
         let gait: Float = isDrunk ? 1.9 : 2.6
         let swing = sin(walkClock * gait) * 0.9 * factor
         for (index, pivot) in legPivots.enumerated() {
             pivot.eulerAngles.x = index == 0 ? swing : -swing
         }
         for (index, pivot) in armPivots.enumerated() {
-            pivot.eulerAngles.x = index == 0 ? -swing * 0.8 : swing * 0.8
+            pivot.eulerAngles.x = index == 0 ? -swing * 0.8 * armScale : swing * 0.8 * armScale
         }
         torso.position.y = Float(1.07) + abs(sin(walkClock * gait)) * 0.02 * factor
         // Пьяный шатается из стороны в сторону.
@@ -624,6 +780,15 @@ private final class SecurityGuest {
 
     // MARK: Захват рукой
 
+    func applyTaserOnPunch() {
+        guard phase != .held, phase != .leaving, phase != .dropping else { return }
+        cancelScan()
+        phase = .stunned
+        stunTimer = 0.8
+        refreshNameTag()
+        showVerdict("🥊 ОГРЕЛ!", color: .systemRed)
+    }
+
     func beginGrab() {
         guard phase != .leaving, phase != .held, phase != .dropping else { return }
         cancelScan()
@@ -705,10 +870,13 @@ final class SecurityVRGame {
     private var pickables: [SCNNode] = []
     private var heldItem: SCNNode?
     private var heldGuest: SecurityGuest?
+    private var heldGuestHand: SCNNode?
+    private let myHand = MyHand()
     private var heldPrevWorld = SIMD3<Float>(0, 0, 0)
     private var heldVelocity = SIMD3<Float>(0, 0, 0)
     private var freeItems: [(node: SCNNode, velocity: SIMD3<Float>)] = []
-    private var whackCooldown: Float = 0
+    private var punchCooldown: Float = 0
+    private let handDistance: Float = 0.45
 
     private var previousPinch = false
     private var lastFrameTime = CACurrentMediaTime()
@@ -743,7 +911,8 @@ final class SecurityVRGame {
         freeItems.removeAll()
         heldItem = nil
         heldGuest = nil
-        whackCooldown = 0
+        heldGuestHand = nil
+        punchCooldown = 0
         rulesVisible = false
         money = 0
         score = 0
@@ -759,6 +928,9 @@ final class SecurityVRGame {
         buildEnvironment()
         buildHUD()
         scene.rootNode.addChildNode(root)
+        // Моя рука живёт в мировых координатах — добавляем к корню сцены.
+        scene.rootNode.addChildNode(myHand.node)
+        myHand.node.isHidden = true
 
         previousPinch = false
         lastFrameTime = CACurrentMediaTime()
@@ -773,6 +945,8 @@ final class SecurityVRGame {
         guest = nil
         heldItem = nil
         heldGuest = nil
+        heldGuestHand = nil
+        myHand.reset()
         freeItems.removeAll()
         pickables.removeAll()
         effects.forEach { $0.node.removeFromParentNode() }
@@ -1029,35 +1203,36 @@ final class SecurityVRGame {
     }
 
     private func buildHUD() {
-        // Верхний ряд
+        // Верхний ряд — деньги/очки/волна
         moneyLabel.setText("💰 $0", color: UIColor(red: 1, green: 0.82, blue: 0.25, alpha: 1))
-        moneyLabel.position = SCNVector3(-1.15, 2.0, 0.35)
-        moneyLabel.scale = SCNVector3(0.007, 0.007, 0.007)
+        moneyLabel.position = SCNVector3(-1.05, 1.92, 0.0)
+        moneyLabel.scale = SCNVector3(0.0028, 0.0028, 0.0028)
         root.addChildNode(moneyLabel)
 
         scoreLabel.setText("⭐ Очки: 0")
-        scoreLabel.position = SCNVector3(1.15, 2.0, 0.35)
-        scoreLabel.scale = SCNVector3(0.0065, 0.0065, 0.0065)
+        scoreLabel.position = SCNVector3(1.05, 1.92, 0.0)
+        scoreLabel.scale = SCNVector3(0.0028, 0.0028, 0.0028)
         root.addChildNode(scoreLabel)
 
         waveLabel.setText("👥 Волна 1")
-        waveLabel.position = SCNVector3(0, 2.3, 0.2)
-        waveLabel.scale = SCNVector3(0.006, 0.006, 0.006)
+        waveLabel.position = SCNVector3(0, 2.12, -0.05)
+        waveLabel.scale = SCNVector3(0.0026, 0.0026, 0.0026)
         root.addChildNode(waveLabel)
 
+        toolLabel.setText("🔧 Инструмент: 📡 СКАНЕР")
+        toolLabel.position = SCNVector3(0, 1.74, 0.05)
+        toolLabel.scale = SCNVector3(0.0024, 0.0024, 0.0024)
+        root.addChildNode(toolLabel)
+
+        // Низ: подсказка и тост — внизу, чтобы не закрывать гостя
         hintLabel.setText("🚪 Гость идёт к входу")
-        hintLabel.position = SCNVector3(0, 1.45, 0.55)
-        hintLabel.scale = SCNVector3(0.0055, 0.0055, 0.0055)
+        hintLabel.position = SCNVector3(0, 0.62, 0.6)
+        hintLabel.scale = SCNVector3(0.0026, 0.0026, 0.0026)
         root.addChildNode(hintLabel)
 
-        toastLabel.position = SCNVector3(0, 1.62, 0.35)
-        toastLabel.scale = SCNVector3(0.0055, 0.0055, 0.0055)
+        toastLabel.position = SCNVector3(0, 0.86, 0.5)
+        toastLabel.scale = SCNVector3(0.0026, 0.0026, 0.0026)
         root.addChildNode(toastLabel)
-
-        toolLabel.setText("🔧 Инструмент: 📡 СКАНЕР")
-        toolLabel.position = SCNVector3(-0.9, 1.62, 0.75)
-        toolLabel.scale = SCNVector3(0.005, 0.005, 0.005)
-        root.addChildNode(toolLabel)
 
         // Кнопки инструментов — ряд над стойкой.
         for (index, tool) in SecurityTool.allCases.enumerated() {
@@ -1085,8 +1260,8 @@ final class SecurityVRGame {
 
         // Доска правил — спрятана до нажатия.
         rulesBoard.setText(Self.rulesText)
-        rulesBoard.position = SCNVector3(0, 1.75, -2.2)
-        rulesBoard.scale = SCNVector3(0.0032, 0.0032, 0.0032)
+        rulesBoard.position = SCNVector3(0, 1.8, -2.2)
+        rulesBoard.scale = SCNVector3(0.0022, 0.0022, 0.0022)
         rulesBoard.isHidden = true
         root.addChildNode(rulesBoard)
     }
@@ -1102,13 +1277,15 @@ final class SecurityVRGame {
     в клуб не пускай.
     4. 👆 Короткий щипок по гостю —
     поговорить.
-    5. ✋ РУКА — щипок: взять предмет
-    со стойки или схватить гостя.
-    6. 🤾 Схватил гостя? Покажи на дверь
-    🚪 и отпусти — выкинешь на улицу.
-    7. 💦 Водянка — агрессору в нос.
-    8. ⚡ ШОКЕР оглушает, но по мирным
-    за него штраф!
+    5. 🤝 Поднеси свою кисть к его руке
+    и щипок — схватит за руку.
+    6. 🤾 Таскай туда-сюда. У двери 🚪
+    отпусти — выкинешь на улицу.
+    7. 🥊 Быстрый замах кистью вплотную —
+    удар (по мирным штраф).
+    8. 💦 Водянка — агрессору в нос,
+    ⚡ ШОКЕР оглушает (тоже штраф
+    по мирным!).
     """
 
     private func refreshHUD() {
@@ -1155,22 +1332,40 @@ final class SecurityVRGame {
 
     // MARK: Хват
 
-    /// Тянем предмет/гостя за лучом; предметом можно заехать гостю.
+    /// Моя кисть едет за настоящей рукой: положение берём из луча кончика пальца.
+    private func updateMyHand(ray: WorldRay?, dt: Float, gripping: Bool) {
+        guard let ray else {
+            myHand.node.isHidden = true
+            return
+        }
+        myHand.node.isHidden = false
+        let target = ray.origin + ray.direction * handDistance
+        myHand.update(targetWorld: target, direction: ray.direction, dt: dt, gripping: gripping)
+    }
+
+    /// Тянем предмет или (рука к руке) гостя туда-сюда за своей кистью.
     private func followHeld(ray: WorldRay?, dt: Float) {
-        guard heldItem != nil || heldGuest != nil else { return }
-        guard let ray else { return }
-        let world = ray.origin + ray.direction * (heldGuest != nil ? 1.5 : 0.5)
-        let local = root.convertPosition(SCNVector3(world.x, world.y, world.z), from: nil)
         if let item = heldItem {
+            guard let ray else { return }
+            let world = ray.origin + ray.direction * handDistance
+            let local = root.convertPosition(SCNVector3(world.x, world.y, world.z), from: nil)
             item.position = local
-            whackGuest(with: world)
-        } else if let guest = heldGuest {
-            guest.root.position = SCNVector3(local.x, max(local.y - 1.05, 0.05), local.z)
+            if dt > 0.001 {
+                heldVelocity = (world - heldPrevWorld) / dt
+            }
+            heldPrevWorld = world
+            return
         }
-        if dt > 0.001 {
-            heldVelocity = (world - heldPrevWorld) / dt
-        }
-        heldPrevWorld = world
+        guard let guest = heldGuest, let handNode = heldGuestHand else { return }
+        guard let ray else { return }
+        _ = dt
+        // Приклеиваем его кисть к моему кулаку: тело едет следом.
+        let world = ray.origin + ray.direction * handDistance
+        let handNow = handNode.presentation.simdWorldPosition
+        var position = guest.root.simdPosition
+        position += world - handNow
+        position.y = max(position.y, -0.12)
+        guest.root.simdPosition = position
     }
 
     /// Отпустили щипок: предмет летит по броску, гость падает на пол.
@@ -1203,8 +1398,9 @@ final class SecurityVRGame {
         }
         if let guest = heldGuest {
             heldGuest = nil
+            heldGuestHand = nil
             if guest.root.position.z < 0 {
-                // Вытащил в часть комнаты со дверью — значит выкидывает.
+                // Дотащил до половины комнаты со дверью — значит выкидывает.
                 guest.ejectThroughDoor()
                 guest.dropToFloor()
                 money += 35
@@ -1225,21 +1421,32 @@ final class SecurityVRGame {
         }
     }
 
-    /// Удар предметом в руке: гость отшатывается и матерится.
-    private func whackGuest(with itemWorld: SIMD3<Float>) {
-        guard heldItem != nil, whackCooldown <= 0 else { return }
-        guard let guest,
-              guest.phase != .leaving, guest.phase != .held, guest.phase != .dropping else { return }
+    /// Удар кулаком: быстрый замах кистью вплотную к голове/груди.
+    private func punchGuest(_ guest: SecurityGuest, at handWorld: SIMD3<Float>) {
+        guard punchCooldown <= 0 else { return }
         let chest = guest.root.convertPosition(guest.chestLocalPoint(), to: nil).simd3
         let head = guest.root.convertPosition(guest.headLocalPoint(), to: nil).simd3
-        let distance = min(simd_distance(chest, itemWorld), simd_distance(head, itemWorld))
-        guard distance < 0.45 else { return }
-        whackCooldown = 0.9
-        guest.showVerdict(guest.whackReaction(), color: .orange)
-        guest.root.position.z = max(guest.root.position.z - 0.3, -3.6)
-        let hitPoint = guest.root.convertPosition(guest.chestLocalPoint(), from: nil)
+        let distance = min(simd_distance(chest, handWorld), simd_distance(head, handWorld))
+        guard distance < 0.24 else { return }
+
+        punchCooldown = 1.0
+        let hitPoint = root.convertPosition(guest.chestLocalPoint(), from: guest.root)
         spawnFlash(at: hitPoint, color: .orange)
-        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+        guest.root.position.z = max(guest.root.position.z - 0.35, -3.6)
+        if guest.isAggressive {
+            // По агрессору удар работает как самозащита.
+            score += 40
+            money += 15
+            toastLabel.setText("🥊 Удар по агрессору! +$15")
+            guest.applyTaserOnPunch()
+        } else {
+            score -= 25
+            money -= 5
+            toastLabel.setText("🥊 Ударил гостя... штраф -$5")
+            guest.showVerdict(guest.whackReaction(), color: .orange)
+        }
+        refreshHUD()
+        UIImpactFeedbackGenerator(style: .heavy).impactOccurred()
     }
 
     /// Физика брошенных предметов: гравитация, отскок, пол и стойка.
@@ -1293,7 +1500,8 @@ final class SecurityVRGame {
 
         updateGuest(dt: dt)
         updateEffects(dt: dt)
-        whackCooldown = max(whackCooldown - dt, 0)
+        updateMyHand(ray: ray, dt: dt, gripping: pinch)
+        punchCooldown = max(punchCooldown - dt, 0)
 
         // Подсветка наведением
         for button in allButtons {
@@ -1329,15 +1537,29 @@ final class SecurityVRGame {
         }
         updateFreeItems(dt: dt)
 
-        // Подсказка — чего можно подхватить лучом.
+        // Удар кулаком: быстрый замах вплотную к гостю (не держа его).
+        if heldItem == nil, heldGuest == nil, myHand.worldSpeed > 1.8, let guest,
+           guest.phase != .leaving, guest.phase != .held, guest.phase != .dropping {
+            punchGuest(guest, at: myHand.worldPosition)
+        }
+
+        // Подсказка — чего можно подхватить.
         if heldItem == nil, heldGuest == nil, let ray {
-            if let item = pickables.first(where: {
+            if pickables.first(where: {
                 sphereHit(ray: ray, center: $0.presentation.simdWorldPosition, radius: 0.16) != nil
-            }) {
-                _ = item
-                hintLabel.setText("👇 ✋ РУКА + щипок — взять предмет")
-            } else if selectedTool == .hand, hitChest || hitFace {
-                hintLabel.setText("👇 Щипок — схватить. У двери отпусти — выкину")
+            }) != nil {
+                hintLabel.setText("👇 Щипок — взять предмет")
+            } else if let guest, guest.phase != .leaving, guest.phase != .held,
+                      guest.phase != .dropping {
+                let myHandPoint = ray.origin + ray.direction * handDistance
+                let nearHand = guest.handTipNodes().contains {
+                    simd_distance($0.presentation.simdWorldPosition, myHandPoint) < 0.28
+                }
+                if nearHand {
+                    hintLabel.setText("👇 Кисть к его руке + щипок — схватить")
+                } else if myHand.worldSpeed > 1.8 {
+                    hintLabel.setText("👇 Быстрый замах — удар кулаком")
+                }
             }
         }
 
@@ -1380,26 +1602,33 @@ final class SecurityVRGame {
                 return
             }
 
-            // ✋ РУКА — взять предмет со стойки или схватить гостя.
-            if selectedTool == .hand {
+            // Кисть к его кисти + щипок — хват «рука к руке».
+            if heldItem == nil, heldGuest == nil, let ray, let guest,
+               guest.phase != .leaving, guest.phase != .held, guest.phase != .dropping {
+                let myHandPoint = ray.origin + ray.direction * handDistance
+                if let handNode = guest.handTipNodes().first(where: {
+                    simd_distance($0.presentation.simdWorldPosition, myHandPoint) < 0.28
+                }) {
+                    heldGuest = guest
+                    heldGuestHand = handNode
+                    guest.beginGrab()
+                    heldVelocity = .zero
+                    hintLabel.setText("🤾 Схватил за руку! Таскай туда-сюда, у двери отпусти — выкину")
+                    UIImpactFeedbackGenerator(style: .heavy).impactOccurred()
+                    return
+                }
+            }
+
+            // Предмет со стойки — подхватить (любым инструментом).
+            if heldItem == nil {
                 if let item = pickables.first(where: {
                     sphereHit(ray: ray, center: $0.presentation.simdWorldPosition, radius: 0.16) != nil
                 }) {
                     freeItems.removeAll { $0.node === item }
                     heldItem = item
                     heldVelocity = .zero
-                    heldPrevWorld = ray.origin + ray.direction * 0.5
-                    hintLabel.setText("🔓 Отпусти — уронишь или швырни в гостя")
-                    UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-                    return
-                }
-                if let guest, guest.phase != .leaving, guest.phase != .held,
-                   hitChest || hitFace {
-                    heldGuest = guest
-                    guest.beginGrab()
-                    heldVelocity = .zero
-                    heldPrevWorld = ray.origin + ray.direction * 1.5
-                    hintLabel.setText("🤾 Держу! Покажи на дверь 🚪 и отпусти — выкину")
+                    heldPrevWorld = ray.origin + ray.direction * handDistance
+                    hintLabel.setText("🔓 Отпусти — уронишь или швырни")
                     UIImpactFeedbackGenerator(style: .medium).impactOccurred()
                     return
                 }
@@ -1482,7 +1711,7 @@ final class SecurityVRGame {
             case .breathalyzer: hintLabel.setText("🫁 Щипок на лицо (удержание) — проверка на трезвость")
             case .waterPistol: hintLabel.setText("💦 Щипок по гостю — брызнуть водой")
             case .taser: hintLabel.setText("⚡ Щипок по гостю — оглушить")
-            case .hand: hintLabel.setText("✋ Щипок — взять предмет или схватить гостя")
+            case .hand: hintLabel.setText("🤝 Кисть к его руке + щипок — схватить")
             }
         }
 

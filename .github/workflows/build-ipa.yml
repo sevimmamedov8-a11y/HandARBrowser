@@ -1,4 +1,4 @@
-name: Build HandAR Vision IPA — V50
+name: Build HandAR IPA — V50
 
 on:
   push:
@@ -20,7 +20,7 @@ jobs:
       - name: Show Xcode and project targets
         run: |
           xcodebuild -version
-          xcodebuild -project HandARBrowser.xcodeproj -list
+          xcodebuild -project HandARCinema.xcodeproj -list
 
       - name: Validate project files
         run: |
@@ -32,16 +32,16 @@ jobs:
 
       - name: Verify IPA structure
         run: |
-          test -f build/HandARBrowser-unsigned.ipa
-          /usr/bin/unzip -l build/HandARBrowser-unsigned.ipa | grep -E 'Payload/HandARBrowser.app/' >/dev/null
-          /usr/bin/unzip -p build/HandARBrowser-unsigned.ipa Payload/HandARBrowser.app/Info.plist >/dev/null
+          test -f build/HandARCinema-unsigned.ipa
+          /usr/bin/unzip -l build/HandARCinema-unsigned.ipa | grep -E 'Payload/HandARCinema.app/' >/dev/null
+          /usr/bin/unzip -p build/HandARCinema-unsigned.ipa Payload/HandARCinema.app/Info.plist >/dev/null
           echo "IPA OK"
-          /usr/bin/unzip -p build/HandARBrowser-unsigned.ipa Payload/HandARBrowser.app/Info.plist | grep -Fq "HandAR Vision"
+          /usr/bin/unzip -p build/HandARCinema-unsigned.ipa Payload/HandARCinema.app/Info.plist | grep -Fq "HandAR"
 
       - name: Upload IPA artifact
         uses: actions/upload-artifact@v4
         with:
-          name: HandARBrowser-IPA
-          path: build/HandARBrowser-unsigned.ipa
+          name: HandARCinema-IPA
+          path: build/HandARCinema-unsigned.ipa
           if-no-files-found: error
           retention-days: 14

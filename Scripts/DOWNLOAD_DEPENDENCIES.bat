@@ -15,10 +15,10 @@ echo [OK] Motion       = CoreMotion
 echo [OK] Browser      = WebKit / WKWebView
 echo [OK] UI           = UIKit
 echo.
-if exist "HandARBrowser.xcodeproj\project.pbxproj" (
+if exist "HandARCinema.xcodeproj\project.pbxproj" (
   echo [OK] Xcode project found.
 ) else (
-  echo [ERROR] HandARBrowser.xcodeproj\project.pbxproj is missing.
+  echo [ERROR] HandARCinema.xcodeproj\project.pbxproj is missing.
   echo.
   pause
   exit /b 1

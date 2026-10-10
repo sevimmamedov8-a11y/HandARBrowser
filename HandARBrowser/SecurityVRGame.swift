@@ -1,11 +1,11 @@
-import SceneKit
+﻿import SceneKit
 import simd
 import UIKit
 
-// MARK: - Мелочи для материалов
+// MARK: - РњРµР»РѕС‡Рё РґР»СЏ РјР°С‚РµСЂРёР°Р»РѕРІ
 
 private extension SCNMaterial {
-    /// Ровный цвет без освещения — работает в пасстр-режиме с обоими глазами.
+    /// Р РѕРІРЅС‹Р№ С†РІРµС‚ Р±РµР· РѕСЃРІРµС‰РµРЅРёСЏ вЂ” СЂР°Р±РѕС‚Р°РµС‚ РІ РїР°СЃСЃС‚СЂ-СЂРµР¶РёРјРµ СЃ РѕР±РѕРёРјРё РіР»Р°Р·Р°РјРё.
     func applyConstant(_ color: UIColor, emissive: CGFloat = 0.0) {
         lightingModel = .constant
         diffuse.contents = color
@@ -21,7 +21,7 @@ private extension SCNVector3 {
     }
 }
 
-// MARK: - Пересечение луча со сферой
+// MARK: - РџРµСЂРµСЃРµС‡РµРЅРёРµ Р»СѓС‡Р° СЃРѕ СЃС„РµСЂРѕР№
 
 private func sphereHit(ray: WorldRay, center: SIMD3<Float>, radius: Float) -> Float? {
     let oc = ray.origin - center
@@ -34,7 +34,7 @@ private func sphereHit(ray: WorldRay, center: SIMD3<Float>, radius: Float) -> Fl
     return t > 0 ? t : nil
 }
 
-// MARK: - Текстовая плашка (всегда к лицу)
+// MARK: - РўРµРєСЃС‚РѕРІР°СЏ РїР»Р°С€РєР° (РІСЃРµРіРґР° Рє Р»РёС†Сѓ)
 
 private final class TextSprite: SCNNode {
     private var current = ""
@@ -65,7 +65,7 @@ private final class TextSprite: SCNNode {
     }
 }
 
-// MARK: - 3D-кнопка
+// MARK: - 3D-РєРЅРѕРїРєР°
 
 private final class SecurityButton {
     let node = SCNNode()
@@ -116,7 +116,7 @@ private final class SecurityButton {
     }
 }
 
-// MARK: - Гость (процедурный персонаж)
+// MARK: - Р“РѕСЃС‚СЊ (РїСЂРѕС†РµРґСѓСЂРЅС‹Р№ РїРµСЂСЃРѕРЅР°Р¶)
 
 private enum GuestPhase {
     case arriving
@@ -133,16 +133,16 @@ private final class SecurityGuest {
     private(set) var scanned = false
 
     private let speed: Float
-    private let walkClock: Float = 1.7
+    private var walkClock: Float = 1.7
     private let porchTarget: Float = 0.45
 
-    private let torso = SCNNode()
-    private let legPivots: [SCNNode] = []
-    private let armPivots: [SCNNode] = []
+    private var torso = SCNNode()
+    private var legPivots: [SCNNode] = []
+    private var armPivots: [SCNNode] = []
 
-    private let contrabandNode = SCNNode()
-    private let scanRing = SCNNode()
-    private let scanBar = SCNNode()
+    private var contrabandNode = SCNNode()
+    private var scanRing = SCNNode()
+    private var scanBar = SCNNode()
     private let verdict = TextSprite()
 
     private var scanProgress: Float = 0
@@ -183,7 +183,7 @@ private final class SecurityGuest {
     private func buildBody() {
         let (skin, hair, shirt) = bodyMaterials()
 
-        // Ноги — повороты от бёдер.
+        // РќРѕРіРё вЂ” РїРѕРІРѕСЂРѕС‚С‹ РѕС‚ Р±С‘РґРµСЂ.
         for side in [-1, 1] {
             let pivot = SCNNode()
             pivot.position = SCNVector3(0.11 * Float(side), 0.82, 0)
@@ -196,14 +196,14 @@ private final class SecurityGuest {
             legPivots.append(pivot)
         }
 
-        // Торс
+        // РўРѕСЂСЃ
         let body = SCNBox(width: 0.36, height: 0.50, length: 0.20, chamferRadius: 0.06)
         body.materials = [shirt]
         torso = SCNNode(geometry: body)
         torso.position = SCNVector3(0, 1.07, 0)
         root.addChildNode(torso)
 
-        // Руки с кистями
+        // Р СѓРєРё СЃ РєРёСЃС‚СЏРјРё
         for side in [-1, 1] {
             let pivot = SCNNode()
             pivot.position = SCNVector3(0.24 * Float(side), 1.30, 0)
@@ -221,7 +221,7 @@ private final class SecurityGuest {
             armPivots.append(pivot)
         }
 
-        // Голова + волосы
+        // Р“РѕР»РѕРІР° + РІРѕР»РѕСЃС‹
         let head = SCNSphere(radius: 0.135)
         head.materials = [skin]
         let headNode = SCNNode(geometry: head)
@@ -235,7 +235,7 @@ private final class SecurityGuest {
         hairNode.scale = SCNVector3(1, 0.55, 1)
         root.addChildNode(hairNode)
 
-        // Контрабанда — светящийся кубик за спиной.
+        // РљРѕРЅС‚СЂР°Р±Р°РЅРґР° вЂ” СЃРІРµС‚СЏС‰РёР№СЃСЏ РєСѓР±РёРє Р·Р° СЃРїРёРЅРѕР№.
         let cube = SCNBox(width: 0.075, height: 0.075, length: 0.05, chamferRadius: 0.012)
         let cubeMaterial = SCNMaterial()
         cubeMaterial.applyConstant(UIColor(red: 0.92, green: 0.12, blue: 0.14, alpha: 1), emissive: 0.9)
@@ -246,8 +246,8 @@ private final class SecurityGuest {
         contrabandNode.isHidden = true
         root.addChildNode(contrabandNode)
 
-        // Плашка результата над головой
-        verdict.setText("…")
+        // РџР»Р°С€РєР° СЂРµР·СѓР»СЊС‚Р°С‚Р° РЅР°Рґ РіРѕР»РѕРІРѕР№
+        verdict.setText("вЂ¦")
         verdict.position = SCNVector3(0, 1.85, 0)
         root.addChildNode(verdict)
     }
@@ -315,14 +315,14 @@ private final class SecurityGuest {
         for (index, pivot) in armPivots.enumerated() {
             pivot.eulerAngles.x = CGFloat(index == 0 ? -swing * 0.8 : swing * 0.8)
         }
-        torso.position.y = 1.07 + abs(sin(walkClock * 2.6)) * 0.02 * factor
+        torso.position.y = Float(1.07) + abs(sin(walkClock * 2.6)) * 0.02 * factor
     }
 
     func beginScan() {
         guard phase == .atGate, !scanned else { return }
         scanBar.isHidden = false
         scanRing.isHidden = false
-        verdict.setText("Сканирую…")
+        verdict.setText("РЎРєР°РЅРёСЂСѓСЋвЂ¦")
     }
 
     func addScanProgress(_ delta: Float) {
@@ -334,7 +334,7 @@ private final class SecurityGuest {
             scanRing.isHidden = true
             scanBar.isHidden = true
             contrabandNode.isHidden = !hasContraband
-            verdict.setText(hasContraband ? "ЗАПРЕТ!" : "ЧИСТО",
+            verdict.setText(hasContraband ? "Р—РђРџР Р•Рў!" : "Р§РРЎРўРћ",
                             color: hasContraband ? .systemRed : .systemGreen)
         }
     }
@@ -342,11 +342,15 @@ private final class SecurityGuest {
     func leave(accepted: Bool) {
         phase = .leaving
         walkedInward = accepted
-        verdict.setText(accepted ? "ВНУТРИ" : "ОТКАЗ", color: accepted ? .systemGreen : .systemOrange)
+        verdict.setText(accepted ? "Р’РќРЈРўР Р" : "РћРўРљРђР—", color: accepted ? .systemGreen : .systemOrange)
     }
 
     func torsoLocalPoint() -> SCNVector3 {
-        torso.position + SCNVector3(0, 0.08, 0)
+        SCNVector3(
+            torso.position.x,
+            torso.position.y + 0.08,
+            torso.position.z
+        )
     }
 
     func removeFromWorld() {
@@ -354,7 +358,7 @@ private final class SecurityGuest {
     }
 }
 
-// MARK: - Игра
+// MARK: - РРіСЂР°
 
 final class SecurityVRGame {
     var onExitRequested: (() -> Void)?
@@ -379,15 +383,15 @@ final class SecurityVRGame {
     private let hintLabel = TextSprite()
     private let toastLabel = TextSprite()
 
-    private let acceptButton = SecurityButton(title: "ВПУСТИТЬ", color: UIColor(red: 0.15, green: 0.70, blue: 0.32, alpha: 1))
-    private let rejectButton = SecurityButton(title: "ОТКАЗАТЬ", color: UIColor(red: 0.80, green: 0.16, blue: 0.22, alpha: 1))
-    private let exitButton = SecurityButton(title: "ВЫХОД", color: UIColor(white: 0.25, alpha: 1))
+    private let acceptButton = SecurityButton(title: "Р’РџРЈРЎРўРРўР¬", color: UIColor(red: 0.15, green: 0.70, blue: 0.32, alpha: 1))
+    private let rejectButton = SecurityButton(title: "РћРўРљРђР—РђРўР¬", color: UIColor(red: 0.80, green: 0.16, blue: 0.22, alpha: 1))
+    private let exitButton = SecurityButton(title: "Р’Р«РҐРћР”", color: UIColor(white: 0.25, alpha: 1))
     private var buttons: [SecurityButton] { [acceptButton, rejectButton, exitButton] }
 
     private var previousPinch = false
     private var lastFrameTime = CACurrentMediaTime()
 
-    // MARK: Старт / стоп
+    // MARK: РЎС‚Р°СЂС‚ / СЃС‚РѕРї
 
     func start(in scene: SCNScene, cameraOrigin: SIMD3<Float>, cameraForward: SIMD3<Float>) {
         guard !isRunning else { return }
@@ -409,7 +413,7 @@ final class SecurityVRGame {
 
         previousPinch = false
         lastFrameTime = CACurrentMediaTime()
-        toastLabel.setText("Проверяй гостей у входа")
+        toastLabel.setText("РџСЂРѕРІРµСЂСЏР№ РіРѕСЃС‚РµР№ Сѓ РІС…РѕРґР°")
         refreshHUD()
     }
 
@@ -422,28 +426,28 @@ final class SecurityVRGame {
         scene = nil
     }
 
-    // MARK: Сцена
+    // MARK: РЎС†РµРЅР°
 
     private func buildEnvironment() {
-        var neonCyan = SCNMaterial()
+        let neonCyan = SCNMaterial()
         neonCyan.applyConstant(UIColor(red: 0.15, green: 0.85, blue: 1, alpha: 1), emissive: 0.8)
-        var neonMagenta = SCNMaterial()
+        let neonMagenta = SCNMaterial()
         neonMagenta.applyConstant(UIColor(red: 1, green: 0.25, blue: 0.75, alpha: 1), emissive: 0.8)
-        var floorMaterial = SCNMaterial()
+        let floorMaterial = SCNMaterial()
         floorMaterial.applyConstant(UIColor(red: 0.07, green: 0.08, blue: 0.14, alpha: 1))
-        var wallMaterial = SCNMaterial()
+        let wallMaterial = SCNMaterial()
         wallMaterial.applyConstant(UIColor(white: 0.06, alpha: 1))
-        var gold = SCNMaterial()
+        let gold = SCNMaterial()
         gold.applyConstant(UIColor(red: 0.85, green: 0.68, blue: 0.25, alpha: 1), emissive: 0.15)
 
-        // Пол
+        // РџРѕР»
         let floor = SCNBox(width: 6.5, height: 0.1, length: 7, chamferRadius: 0.02)
         floor.materials = [floorMaterial]
         let floorNode = SCNNode(geometry: floor)
         floorNode.position = SCNVector3(0, -0.05, -0.5)
         root.addChildNode(floorNode)
 
-        // Стены
+        // РЎС‚РµРЅС‹
         let backWall = SCNBox(width: 6.5, height: 3.4, length: 0.1, chamferRadius: 0)
         backWall.materials = [wallMaterial]
         let backWallNode = SCNNode(geometry: backWall)
@@ -462,7 +466,7 @@ final class SecurityVRGame {
         rightWallNode.position = SCNVector3(3.2, 1.7, -0.5)
         root.addChildNode(rightWallNode)
 
-        // Неоновая подсветка
+        // РќРµРѕРЅРѕРІР°СЏ РїРѕРґСЃРІРµС‚РєР°
         let stripLeft = SCNBox(width: 0.02, height: 0.06, length: 6.4, chamferRadius: 0)
         stripLeft.materials = [neonMagenta]
         let stripLeftNode = SCNNode(geometry: stripLeft)
@@ -475,7 +479,7 @@ final class SecurityVRGame {
         stripRightNode.position = SCNVector3(3.1, 2.9, -0.5)
         root.addChildNode(stripRightNode)
 
-        // Вывеска
+        // Р’С‹РІРµСЃРєР°
         let signTop = SCNText(string: "SECURITY", extrusionDepth: 0.02)
         signTop.font = UIFont.systemFont(ofSize: 16, weight: .bold)
         signTop.flatness = 0.1
@@ -487,16 +491,16 @@ final class SecurityVRGame {
         signTopNode.constraints = [SCNBillboardConstraint()]
         root.addChildNode(signTopNode)
 
-        // Дверь клуба
+        // Р”РІРµСЂСЊ РєР»СѓР±Р°
         let door = SCNBox(width: 1.1, height: 2.1, length: 0.08, chamferRadius: 0.02)
-        var doorMaterial = SCNMaterial()
+        let doorMaterial = SCNMaterial()
         doorMaterial.applyConstant(UIColor(red: 0.10, green: 0.06, blue: 0.16, alpha: 1))
         door.materials = [doorMaterial]
         let doorNode = SCNNode(geometry: door)
         doorNode.position = SCNVector3(0, 1.05, -0.96)
         root.addChildNode(doorNode)
 
-        // Рамка металлодетектора
+        // Р Р°РјРєР° РјРµС‚Р°Р»Р»РѕРґРµС‚РµРєС‚РѕСЂР°
         let detectorPosts = SCNBox(width: 0.09, height: 2.0, length: 0.09, chamferRadius: 0.02)
         detectorPosts.materials = [gold]
         for side in [-1, 1] {
@@ -516,9 +520,9 @@ final class SecurityVRGame {
         beaconNode.position = SCNVector3(0, 2.13, -0.75)
         root.addChildNode(beaconNode)
 
-        // Турникет-стойка охраны (слева от игрока)
+        // РўСѓСЂРЅРёРєРµС‚-СЃС‚РѕР№РєР° РѕС…СЂР°РЅС‹ (СЃР»РµРІР° РѕС‚ РёРіСЂРѕРєР°)
         let desk = SCNBox(width: 1.5, height: 0.06, length: 0.6, chamferRadius: 0.01)
-        var deskMaterial = SCNMaterial()
+        let deskMaterial = SCNMaterial()
         deskMaterial.applyConstant(UIColor(red: 0.12, green: 0.12, blue: 0.16, alpha: 1))
         desk.materials = [deskMaterial]
         let deskNode = SCNNode(geometry: desk)
@@ -533,9 +537,9 @@ final class SecurityVRGame {
             root.addChildNode(leg)
         }
 
-        // Ковёр-дорожка перед входом
+        // РљРѕРІС‘СЂ-РґРѕСЂРѕР¶РєР° РїРµСЂРµРґ РІС…РѕРґРѕРј
         let rug = SCNBox(width: 0.9, height: 0.012, length: 2.4, chamferRadius: 0)
-        var rugMaterial = SCNMaterial()
+        let rugMaterial = SCNMaterial()
         rugMaterial.applyConstant(UIColor(red: 0.35, green: 0.09, blue: 0.09, alpha: 1))
         rug.materials = [rugMaterial]
         let rugNode = SCNNode(geometry: rug)
@@ -544,23 +548,23 @@ final class SecurityVRGame {
     }
 
     private func buildHUD() {
-        // Верхний ряд
+        // Р’РµСЂС…РЅРёР№ СЂСЏРґ
         moneyLabel.setText("$0", color: UIColor(red: 1, green: 0.82, blue: 0.25, alpha: 1))
         moneyLabel.position = SCNVector3(-1.15, 1.85, 0.35)
         moneyLabel.scale = SCNVector3(0.007, 0.007, 0.007)
         root.addChildNode(moneyLabel)
 
-        scoreLabel.setText("Очки: 0")
+        scoreLabel.setText("РћС‡РєРё: 0")
         scoreLabel.position = SCNVector3(1.15, 1.85, 0.35)
         scoreLabel.scale = SCNVector3(0.0065, 0.0065, 0.0065)
         root.addChildNode(scoreLabel)
 
-        waveLabel.setText("Волна 1")
+        waveLabel.setText("Р’РѕР»РЅР° 1")
         waveLabel.position = SCNVector3(0, 2.15, 0.2)
         waveLabel.scale = SCNVector3(0.006, 0.006, 0.006)
         root.addChildNode(waveLabel)
 
-        hintLabel.setText("Гость идёт ко входу")
+        hintLabel.setText("Р“РѕСЃС‚СЊ РёРґС‘С‚ РєРѕ РІС…РѕРґСѓ")
         hintLabel.position = SCNVector3(0, 1.45, 0.55)
         hintLabel.scale = SCNVector3(0.0055, 0.0055, 0.0055)
         root.addChildNode(hintLabel)
@@ -569,7 +573,7 @@ final class SecurityVRGame {
         toastLabel.scale = SCNVector3(0.0055, 0.0055, 0.0055)
         root.addChildNode(toastLabel)
 
-        // Кнопки решений
+        // РљРЅРѕРїРєРё СЂРµС€РµРЅРёР№
         acceptButton.node.position = SCNVector3(-0.62, 1.05, 0.55)
         root.addChildNode(acceptButton.node)
         rejectButton.node.position = SCNVector3(0.62, 1.05, 0.55)
@@ -582,11 +586,11 @@ final class SecurityVRGame {
 
     private func refreshHUD() {
         moneyLabel.setText("$\(money)")
-        scoreLabel.setText("Очки: \(score)")
-        waveLabel.setText("Волна \(wave)")
+        scoreLabel.setText("РћС‡РєРё: \(score)")
+        waveLabel.setText("Р’РѕР»РЅР° \(wave)")
     }
 
-    // MARK: Ввод
+    // MARK: Р’РІРѕРґ
 
     func update(ray: WorldRay?, pinch: Bool) {
         guard isRunning else { return }
@@ -599,7 +603,7 @@ final class SecurityVRGame {
 
         updateGuest(dt: dt)
 
-        // Подсветка наведением
+        // РџРѕРґСЃРІРµС‚РєР° РЅР°РІРµРґРµРЅРёРµРј
         for button in buttons {
             button.setHighlight(false)
         }
@@ -610,7 +614,7 @@ final class SecurityVRGame {
             }
         }
 
-        // Удержание на груди гостя = сканер
+        // РЈРґРµСЂР¶Р°РЅРёРµ РЅР° РіСЂСѓРґРё РіРѕСЃС‚СЏ = СЃРєР°РЅРµСЂ
         var holdingGuest = false
         if let ray, let guest, pinch, guest.phase == .atGate {
             let chestLocal = guest.torsoLocalPoint()
@@ -648,7 +652,7 @@ final class SecurityVRGame {
         }
     }
 
-    // MARK: Логика
+    // MARK: Р›РѕРіРёРєР°
 
     private func updateGuest(dt: Float) {
         if guest == nil {
@@ -660,7 +664,7 @@ final class SecurityVRGame {
         }
         guest?.update(dt: dt)
         if let guest, guest.phase == .atGate, guest.arrived {
-            hintLabel.setText("Удерживай щипок на груди — осмотр")
+            hintLabel.setText("РЈРґРµСЂР¶РёРІР°Р№ С‰РёРїРѕРє РЅР° РіСЂСѓРґРё вЂ” РѕСЃРјРѕС‚СЂ")
         }
         if let guest, guest.leftScene {
             guest.removeFromWorld()
@@ -675,7 +679,7 @@ final class SecurityVRGame {
         newGuest.root.position = SCNVector3(.random(in: -0.15...0.15), 0, -2.6)
         root.addChildNode(newGuest.root)
         guest = newGuest
-        hintLabel.setText("Гость идёт ко входу")
+        hintLabel.setText("Р“РѕСЃС‚СЊ РёРґС‘С‚ РєРѕ РІС…РѕРґСѓ")
     }
 
     private func decide(accept: Bool) {
@@ -685,13 +689,13 @@ final class SecurityVRGame {
             score += guest.hasContraband ? 150 : 100
             money += guest.hasContraband ? 80 : 20
             toastLabel.setText(guest.hasContraband
-                ? "Изъял контрабанду! +$80"
-                : "Впустил чистого гостя +$20")
+                ? "РР·СЉСЏР» РєРѕРЅС‚СЂР°Р±Р°РЅРґСѓ! +$80"
+                : "Р’РїСѓСЃС‚РёР» С‡РёСЃС‚РѕРіРѕ РіРѕСЃС‚СЏ +$20")
         } else {
             score -= accept ? 120 : 60
             toastLabel.setText(accept
-                ? "Пропустил контрабанду! -120"
-                : "Отказал чистому гостю. -60")
+                ? "РџСЂРѕРїСѓСЃС‚РёР» РєРѕРЅС‚СЂР°Р±Р°РЅРґСѓ! -120"
+                : "РћС‚РєР°Р·Р°Р» С‡РёСЃС‚РѕРјСѓ РіРѕСЃС‚СЋ. -60")
         }
         guest.leave(accepted: accept)
         servedInWave += 1
@@ -707,7 +711,7 @@ final class SecurityVRGame {
         wave += 1
         walkSpeed = min(walkSpeed * 1.18, 2.0)
         contrabandChance = min(contrabandChance + 0.07, 0.75)
-        toastLabel.setText("ВОЛНА \(wave): гости быстрее и хитрее")
+        toastLabel.setText("Р’РћР›РќРђ \(wave): РіРѕСЃС‚Рё Р±С‹СЃС‚СЂРµРµ Рё С…РёС‚СЂРµРµ")
         refreshHUD()
     }
 }

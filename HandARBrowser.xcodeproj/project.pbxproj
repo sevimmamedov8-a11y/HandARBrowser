@@ -7,12 +7,14 @@
 /* Begin PBXBuildFile section */
 	A685F0E452754F8990454846 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = FC21E499E8434390AA90DC20; };
 	B33BE08ED40C4C4296E92701 /* MainViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = B3E88CFBE7EB4D088588E46F; };
+	DBB0B0C2A5F44F6EAA4A9F11 /* SecurityVRGame.swift in Sources */ = {isa = PBXBuildFile; fileRef = B6AC4BB137B94C39A9ABC123; };
 	372B16B660AA4300AA68F330 /* WebInput.js in Resources */ = {isa = PBXBuildFile; fileRef = 6ED7A3A83BB74772A8A4360C; };
 /* End PBXBuildFile section */
 /* Begin PBXFileReference section */
 	74945642D2A0467CA902B9FD /* HandARBrowser.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = HandARBrowser.app; sourceTree = BUILT_PRODUCTS_DIR; };
 	FC21E499E8434390AA90DC20 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
 	B3E88CFBE7EB4D088588E46F /* MainViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainViewController.swift; sourceTree = "<group>"; };
+	B6AC4BB137B94C39A9ABC123 /* SecurityVRGame.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SecurityVRGame.swift; sourceTree = "<group>"; };
 	A88E8CA765064CA1983BB687 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 	6ED7A3A83BB74772A8A4360C /* WebInput.js */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; path = WebInput.js; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -20,7 +22,7 @@
 	EB60DC3CC97D4278AEE5878A /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = ( ); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXFrameworksBuildPhase section */
 /* Begin PBXGroup section */
-	52B287C77A0647968634E0FA /* HandARBrowser */ = {isa = PBXGroup; children = ( FC21E499E8434390AA90DC20, B3E88CFBE7EB4D088588E46F, A88E8CA765064CA1983BB687, 6ED7A3A83BB74772A8A4360C, ); path = HandARBrowser; sourceTree = "<group>"; };
+	52B287C77A0647968634E0FA /* HandARBrowser */ = {isa = PBXGroup; children = ( FC21E499E8434390AA90DC20, B3E88CFBE7EB4D088588E46F, B6AC4BB137B94C39A9ABC123, A88E8CA765064CA1983BB687, 6ED7A3A83BB74772A8A4360C, ); path = HandARBrowser; sourceTree = "<group>"; };
 	595A973A71A44AAF80A91AE1 /* Products */ = {isa = PBXGroup; children = ( 74945642D2A0467CA902B9FD, ); name = Products; sourceTree = "<group>"; };
 	23E494FE5F0A41A8827BA1B3 /* Main Group */ = {isa = PBXGroup; children = ( 52B287C77A0647968634E0FA, 595A973A71A44AAF80A91AE1, ); sourceTree = "<group>"; };
 /* End PBXGroup section */
@@ -34,7 +36,7 @@
 	2C8885DF8C53453382057D21 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = ( 372B16B660AA4300AA68F330 /* WebInput.js in Resources */, ); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXResourcesBuildPhase section */
 /* Begin PBXSourcesBuildPhase section */
-	1A9CA6CF8F4D48A8B4E9B8FD /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = ( A685F0E452754F8990454846 /* AppDelegate.swift in Sources */, B33BE08ED40C4C4296E92701 /* MainViewController.swift in Sources */, ); runOnlyForDeploymentPostprocessing = 0; };
+	1A9CA6CF8F4D48A8B4E9B8FD /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = ( A685F0E452754F8990454846 /* AppDelegate.swift in Sources */, B33BE08ED40C4C4296E92701 /* MainViewController.swift in Sources */, DBB0B0C2A5F44F6EAA4A9F11 /* SecurityVRGame.swift in Sources */, ); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXSourcesBuildPhase section */
 /* Begin XCBuildConfiguration section */
 	94E3AC8C69594CAAB57B91FD /* Debug */ = {isa = XCBuildConfiguration; buildSettings = { ALWAYS_SEARCH_USER_PATHS = NO; CLANG_ENABLE_MODULES = YES; CLANG_ENABLE_OBJC_ARC = YES; CLANG_CXX_LANGUAGE_STANDARD = "gnu++20"; CLANG_CXX_LIBRARY = "libc++"; CLANG_ENABLE_OBJC_WEAK = YES; CURRENT_PROJECT_VERSION = 1; DEBUG_INFORMATION_FORMAT = dwarf; GCC_C_LANGUAGE_STANDARD = gnu17; GCC_NO_COMMON_BLOCKS = YES; IPHONEOS_DEPLOYMENT_TARGET = 17.0; MTL_FAST_MATH = YES; OTHER_LDFLAGS = ("$(inherited)", "-framework", ARKit, "-framework", SceneKit, "-framework", Metal, "-framework", MetalKit, "-framework", GameController); SDKROOT = iphoneos; SWIFT_OPTIMIZATION_LEVEL = "-Onone"; SWIFT_VERSION = 5.0; }; name = Debug; };

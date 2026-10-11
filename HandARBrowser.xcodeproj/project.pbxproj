@@ -1,4 +1,4 @@
-
+// !$*UTF8*$!
 {
  archiveVersion = 1;
  classes = {};
@@ -8,8 +8,8 @@
 	A685F0E452754F8990454846 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = FC21E499E8434390AA90DC20; };
 	B33BE08ED40C4C4296E92701 /* MainViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = B3E88CFBE7EB4D088588E46F; };
 	DBB0B0C2A5F44F6EAA4A9F11 /* SecurityVRGame.swift in Sources */ = {isa = PBXBuildFile; fileRef = B6AC4BB137B94C39A9ABC123; };
-		C1E2F3A4B5C6D7E8F9A0B1C2 /* CinemaHall.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2F3A4B5C6D7E8F9A0B1C2D3; };
-		94BF228D5C144408B24860FF /* CinemaPlayback.swift in Sources */ = {isa = PBXBuildFile; fileRef = A802D87B160341A3A7B0B00C /* CinemaPlayback.swift */; };
+	C1E2F3A4B5C6D7E8F9A0B1C2 /* CinemaHall.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2F3A4B5C6D7E8F9A0B1C2D3; };
+	94BF228D5C144408B24860FF /* CinemaPlayback.swift in Sources */ = {isa = PBXBuildFile; fileRef = A802D87B160341A3A7B0B00C /* CinemaPlayback.swift */; };
 	372B16B660AA4300AA68F330 /* WebInput.js in Resources */ = {isa = PBXBuildFile; fileRef = 6ED7A3A83BB74772A8A4360C; };
 /* End PBXBuildFile section */
 /* Begin PBXFileReference section */
@@ -27,7 +27,6 @@
 /* End PBXFrameworksBuildPhase section */
 /* Begin PBXGroup section */
 	52B287C77A0647968634E0FA /* HandARBrowser */ = {isa = PBXGroup; children = ( FC21E499E8434390AA90DC20, B3E88CFBE7EB4D088588E46F, B6AC4BB137B94C39A9ABC123, D2F3A4B5C6D7E8F9A0B1C2D3, A802D87B160341A3A7B0B00C, A88E8CA765064CA1983BB687, 6ED7A3A83BB74772A8A4360C, ); path = HandARBrowser; sourceTree = "<group>"; };
-			A802D87B160341A3A7B0B00C,
 	595A973A71A44AAF80A91AE1 /* Products */ = {isa = PBXGroup; children = ( 74945642D2A0467CA902B9FD, ); name = Products; sourceTree = "<group>"; };
 	23E494FE5F0A41A8827BA1B3 /* Main Group */ = {isa = PBXGroup; children = ( 52B287C77A0647968634E0FA, 595A973A71A44AAF80A91AE1, ); sourceTree = "<group>"; };
 /* End PBXGroup section */

@@ -451,6 +451,16 @@ final class MainViewController: UIViewController, MTKViewDelegate {
                 )
             )
         }
+        // Кино-пробник: забирает прямую ссылку на поток у <video> страницы,
+        // чтобы кинотеатр играл её нативным AVPlayer (снимок WKWebView
+        // аппаратное видео не захватывает — кадр был бы чёрным).
+        controller.addUserScript(
+            WKUserScript(
+                source: Self.cinemaProbeScript,
+                injectionTime: .atDocumentStart,
+                forMainFrameOnly: false
+            )
+        )
         config.userContentController = controller
 
         let webView = WKWebView(frame: .zero, configuration: config)
@@ -544,6 +554,8 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     private let securityGame = SecurityVRGame()
     private var cinemaActive = false
     private let cinemaHall = CinemaHall()
+    private let cinemaPlayback = CinemaPlayback()
+    private var cinemaProbeTimer: Timer?
     private var browserAnchor: ARAnchor?
     private var browserWorldTransform: simd_float4x4?
     private var didCreateInitialAnchor = false
@@ -612,6 +624,101 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     private static let gmailURL = URL(string: "https://mail.google.com/")!
     private static let redditURL = URL(string: "https://www.reddit.com/")!
     private static let wikipediaURL = URL(string: "https://www.wikipedia.org/")!
+
+    /// Пробник плеера страницы: отдаёт прямую ссылку на поток, состояние
+    /// воспроизведения и умеет растнуть видео на весь экран, спрятав обвязку
+    /// сайта. Внедряется в каждый документ — нужен только кинотеатру.
+    private static let cinemaProbeScript = """
+    (function(){
+      function largest(){
+        var all = [].slice.call(document.querySelectorAll('video, audio'));
+        all.sort(function(a,b){return (b.clientWidth*b.clientHeight)-(a.clientWidth*a.clientHeight);});
+        return all[0] || null;
+      }
+      window.__handarVideoInfo = function(){
+        try{
+          var v = largest();
+          if(!v) return JSON.stringify({ok:false});
+          var src = v.currentSrc || v.src || '';
+          var ready = v.readyState >= 1;
+          var dur = isFinite(v.duration) ? (v.duration||0) : 0;
+          var usable = !!src && src.indexOf('blob:') !== 0 && src.indexOf('data:') !== 0
+                       && ready && dur > 0.5;
+          return JSON.stringify({ok:true, usable:usable, src:src, paused:v.paused,
+                                 duration:dur, currentTime:(v.currentTime||0),
+                                 volume:(typeof v.volume === 'number' ? v.volume : 1),
+                                 muted:!!v.muted});
+        }catch(e){ return JSON.stringify({ok:false}); }
+      };
+      window.__handarCinemaCommand = function(cmd, arg){
+        try{
+          var v = largest();
+          if(!v) return 'null';
+          if(cmd === 'play'){ var p = v.play(); if(p && p.catch){ p.catch(function(){}); } }
+          else if(cmd === 'pause'){ v.pause(); }
+          else if(cmd === 'mute'){ v.muted = true; }
+          else if(cmd === 'unmute'){ v.muted = false; }
+          else if(cmd === 'volume'){
+            v.volume = Math.max(0, Math.min(1, parseFloat(arg || '1')));
+            v.muted = false;
+          }
+          else if(cmd === 'fill'){
+            var st = document.getElementById('__handar-cinema-css');
+            if(!st){
+              st = document.createElement('style');
+              st.id = '__handar-cinema-css';
+              document.documentElement.appendChild(st);
+            }
+            st.textContent =
+              'html,body{margin:0!important;padding:0!important;background:#000!important;overflow:hidden!important}' +
+              '.html5-video-container,.html5-main-video,video{position:fixed!important;left:0!important;top:0!important;' +
+              'width:100vw!important;height:100vh!important;max-width:100vw!important;max-height:100vh!important;' +
+              'object-fit:cover!important;z-index:2147483640!important;background:#000!important}' +
+              '.ytp-chrome-bottom,.ytp-chrome-top,.ytp-gradient-bottom,.ytp-gradient-top,.ytp-paid-content-overlay,' +
+              '.ytp-ce-element,.ytp-large-play-button,.ytp-pause-overlay,.ytp-cards-teaser,#player-hero,' +
+              '.mobile-topbar-header,#masthead-container{display:none!important}';
+          }
+          return JSON.stringify({paused:v.paused, currentTime:(v.currentTime||0)});
+        }catch(e){ return 'null'; }
+      };
+    })();
+    """
+
+    private func isDirectMediaURL(_ url: URL) -> Bool {
+        let suffixes = [".mp4", ".m3u8", ".mpd", ".webm", ".mov", ".mkv", ".m4v"]
+        let path = url.absoluteString.lowercased()
+        return suffixes.contains { path.hasSuffix($0) || path.contains($0 + "?") }
+    }
+
+    /// YouTube — в минимальный embed: без шапки, рекомендаций и кнопок,
+    /// сразу полноэкранное видео. На iOS его <video> отдаёт HLS прямым URL,
+    /// который забирает пробник и играет нативным AVPlayer.
+    private func youtubeEmbedURL(_ url: URL) -> URL? {
+        guard let host = url.host?.lowercased(), host.contains("youtu") else { return nil }
+        var id: String?
+        if host.contains("youtu.be") {
+            id = url.lastPathComponent
+        } else if let value = URLComponents(url: url, resolvingAgainstBaseURL: false)?
+            .queryItems?.first(where: { $0.name == "v" })?.value {
+            id = value
+        } else {
+            let path = url.path.lowercased()
+            if path.contains("/shorts/") || path.contains("/embed/") || path.contains("/live/") {
+                id = url.lastPathComponent
+            }
+        }
+        guard let id, id.count >= 6 else { return nil }
+        var components = URLComponents(string: "https://www.youtube-nocookie.com/embed/\(id)")!
+        components.queryItems = [
+            URLQueryItem(name: "playsinline", value: "1"),
+            URLQueryItem(name: "autoplay", value: "1"),
+            URLQueryItem(name: "rel", value: "0"),
+            URLQueryItem(name: "modestbranding", value: "1"),
+            URLQueryItem(name: "iv_load_policy", value: "3"),
+            URLQueryItem(name: "fs", value: "0")
+        ]
+        return components.url
+    }
 
     // MARK: Жизненный цикл
 
@@ -807,7 +914,10 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     /// для видео. Это всё ещё та же мировая стерео-панель: меняется только
     /// её размер, поэтому YouTube остаётся внутри VR-композитора.
     private func setCinemaMode(_ active: Bool) {
-        guard inVR else { return }
+        // В 3D-зале экраном зала управляет CinemaHall: размеры и содержимое
+        // панели меняем только сами, иначе полноэкранное видео на странице
+        // сломало бы экран и включило прямой видеослой поверх зала.
+        guard inVR, !cinemaActive else { return }
 
         if !active {
             isCinemaMode = false
@@ -1445,7 +1555,8 @@ final class MainViewController: UIViewController, MTKViewDelegate {
 
         tracking.onAnchorUpdate = { [weak self] anchor in
             DispatchQueue.main.async {
-                guard let self, self.inVR, !self.isDragging else { return }
+                // В зале экран держит CinemaHall — якорь панели не трогаем.
+                guard let self, self.inVR, !self.isDragging, !self.cinemaActive else { return }
                 guard self.browserAnchor?.identifier == anchor.identifier else { return }
                 self.browserAnchor = anchor
                 self.browserWorldTransform = anchor.transform
@@ -1681,8 +1792,19 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         ))
 
         cinemaHall.onExitRequested = { [weak self] in self?.exitCinema() }
-        cinemaHall.onPlayPause = { [weak self] in self?.toggleCinemaPlayPause() }
-        cinemaHall.onVolume = { [weak self] delta in self?.adjustCinemaVolume(delta) }
+        cinemaHall.onPlayPause = { [weak self] in self?.cinemaTogglePlay() }
+        cinemaHall.onVolume = { [weak self] delta in self?.cinemaVolume(delta) }
+        cinemaHall.onSeek = { [weak self] delta in self?.cinemaSeek(by: delta) }
+        cinemaHall.onRestart = { [weak self] in self?.cinemaRestart() }
+        cinemaPlayback.onProgress = { [weak self] current, duration in
+            self?.cinemaHall.setTime(current: current, duration: duration)
+        }
+        cinemaPlayback.onFailed = { [weak self] message in
+            guard let self else { return }
+            NSLog("HandAR cinema playback failed: %@", message)
+            // Не вышли из зала: кадры снова пойдут снимками страницы.
+            self.startBrowserCapture()
+        }
         cinemaHall.start(in: worldScene, cameraOrigin: headNode.simdWorldPosition, cameraForward: forward)
 
         // Браузерная панель становится экраном зала.
@@ -1698,14 +1820,96 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         browserPlaneNode.simdWorldTransform = cinemaHall.screenWorldTransform
         browserPlaneNode.isHidden = false
 
-        browser.load(URLRequest(url: url ?? Self.youTubeURL))
-        startBrowserCapture()
+        // Звук кинотеатра не должен зависеть от положения беззвучного тумблера.
+        activateMediaAudioSession()
+
+        let target = youtubeEmbedURL(url ?? Self.youTubeURL) ?? (url ?? Self.youTubeURL)
+        if isDirectMediaURL(target) {
+            // Прямой файл — сразу нативный плеер, никакой обвязки сайта.
+            cinemaPlayback.load(url: target, into: browserMaterial)
+            cinemaHall.setPlayingState(true)
+        } else {
+            // Страница (YouTube и прочие): загружаем, забираем у её <video>
+            // прямую ссылку на поток и переключаем экран на AVPlayer.
+            browser.load(URLRequest(url: target))
+            startBrowserCapture()
+            startCinemaProbe()
+        }
         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
     }
 
+    // MARK: - Кино: пробник источника
+
+    private func startCinemaProbe() {
+        cinemaProbeTimer?.invalidate()
+        var attempts = 0
+        cinemaProbeTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            attempts += 1
+            guard attempts < 40 else {
+                self.stopCinemaProbe()
+                return
+            }
+            guard !self.cinemaPlayback.isActive else {
+                self.stopCinemaProbe()
+                return
+            }
+            self.browser.evaluateJavaScript(
+                "window.__handarVideoInfo ? window.__handarVideoInfo() : 'null';"
+            ) { [weak self] raw, _ in
+                guard let self,
+                      let raw = raw as? String, raw != "null",
+                      let data = raw.data(using: .utf8),
+                      let info = try? JSONSerialization.jsonObject(with: data),
+                      let object = info as? [String: Any],
+                      object["ok"] as? Bool == true
+                else { return }
+
+                if object["usable"] as? Bool == true,
+                   let src = object["src"] as? String,
+                   let videoURL = URL(string: src) {
+                    self.stopCinemaProbe()
+                    self.cinemaUsePlayer(videoURL)
+                } else {
+                    // Пока поток не отдан — растягиваем видео на всю панель,
+                    // чтобы снимок (fallback) не был в рамке сайта.
+                    self.browser.evaluateJavaScript(
+                        "window.__handarCinemaCommand && window.__handarCinemaCommand('fill');",
+                        completionHandler: nil
+                    )
+                    // Пытаемся запустить воспроизведение: автозапуск на
+                    // страницах иногда ждёт действия.
+                    self.browser.evaluateJavaScript(
+                        "window.__handarCinemaCommand && window.__handarCinemaCommand('play');",
+                        completionHandler: nil
+                    )
+                }
+            }
+        }
+    }
+
+    private func stopCinemaProbe() {
+        cinemaProbeTimer?.invalidate()
+        cinemaProbeTimer = nil
+    }
+
+    /// Переключает экран зала на нативный плеер и глушит страницу.
+    private func cinemaUsePlayer(_ url: URL) {
+        browser.evaluateJavaScript(
+            "window.__handarCinemaCommand && window.__handarCinemaCommand('mute');",
+            completionHandler: nil
+        )
+        cinemaPlayback.load(url: url, into: browserMaterial)
+        cinemaHall.setPlayingState(true)
+        stopBrowserCapture()
+    }
+
     private func exitCinema() {
+        stopCinemaProbe()
+        cinemaPlayback.release()
         cinemaHall.stop()
         cinemaActive = false
+        isCinemaMode = false
         browserHandleNode.isHidden = false
         toolbarNode.isHidden = false
         hideDirectVideoStage()
@@ -1714,6 +1918,31 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         startBrowserCapture()
         hidePointer()
         hidePointerDot()
+    }
+
+    private func cinemaTogglePlay() {
+        if cinemaPlayback.isActive {
+            cinemaPlayback.toggle()
+            cinemaHall.setPlayingState(cinemaPlayback.isPlaying)
+        } else {
+            toggleCinemaPlayPause()
+        }
+    }
+
+    private func cinemaVolume(_ delta: Float) {
+        guard cinemaPlayback.isActive else { return }
+        cinemaPlayback.volume += delta
+    }
+
+    private func cinemaSeek(by seconds: Double) {
+        guard cinemaPlayback.isActive else { return }
+        cinemaPlayback.seek(by: seconds)
+    }
+
+    private func cinemaRestart() {
+        guard cinemaPlayback.isActive else { return }
+        cinemaPlayback.restart()
+        cinemaHall.setPlayingState(true)
     }
 
     private func toggleCinemaPlayPause() {
@@ -1756,6 +1985,8 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         stopBrowserCapture()
         hideDirectVideoStage()
         releasePointer()
+        stopCinemaProbe()
+        cinemaPlayback.release()
 
         if securityGameActive {
             securityGame.stop()
@@ -1786,7 +2017,8 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     }
 
     @objc private func handleRecenterTap() {
-        guard inVR else { return }
+        // В кинотеатре тап по экрану не должен перетягивать экран зала.
+        guard inVR, !cinemaActive else { return }
         resetBrowserAnchor()
         UIImpactFeedbackGenerator(style: .light).impactOccurred()
     }
@@ -1929,7 +2161,9 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     }
 
     private func updateBrowserSnapshot() {
-        guard inVR, !directVideoActive, !snapshotInProgress else { return }
+        // Когда экран зала играет нативным плеером, снимки страницы не нужны:
+        // они бы затирали кадры AVPlayer.
+        guard inVR, !directVideoActive, !snapshotInProgress, !cinemaPlayback.isActive else { return }
         guard browser.bounds.width > 1, browser.bounds.height > 1 else { return }
         snapshotInProgress = true
 

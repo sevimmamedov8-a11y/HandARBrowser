@@ -3,7 +3,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 echo "== Hand AR Browser V53 project check =="
-for f in "HandARBrowser.xcodeproj/project.pbxproj" "HandARBrowser/AppDelegate.swift" "HandARBrowser/MainViewController.swift" "HandARBrowser/CinemaHall.swift" "HandARBrowser/Info.plist" "HandARBrowser/WebInput.js"; do
+for f in "HandARBrowser.xcodeproj/project.pbxproj" "HandARBrowser/AppDelegate.swift" "HandARBrowser/MainViewController.swift" "HandARBrowser/CinemaHall.swift" "HandARBrowser/CinemaPlayback.swift" "HandARBrowser/Info.plist" "HandARBrowser/WebInput.js"; do
   [[ -f "$f" ]] && echo "[OK] $f" || { echo "[FAIL] missing $f"; exit 1; }
 done
 

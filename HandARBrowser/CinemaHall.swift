@@ -201,7 +201,7 @@ final class CinemaHall {
     private let ambientLight = SCNLight()
 
     private var ceilingStrips: [SCNNode] = []
-    private var neonNodes: [SCNNode] = []
+    private var neonNodes: [SCNMaterial] = []
     private var roomMaterials: [SCNMaterial] = []
     private let timeLabel = CineText()
 
@@ -400,7 +400,8 @@ final class CinemaHall {
             )
             strip.materials = [ledMat]
             let node = SCNNode(geometry: strip)
-            node.position = SCNVector3(side * (Self.screenWidth + 0.10) * 0.5, Self.seatedEyeHeight, screenZ - 0.09)
+            let edgeX: Float = Float(side) * (Self.screenWidth + 0.10) * 0.5
+            node.position = SCNVector3(edgeX, Self.seatedEyeHeight, screenZ - 0.09)
             root.addChildNode(node)
         }
 

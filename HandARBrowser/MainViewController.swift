@@ -456,7 +456,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         // аппаратное видео не захватывает — кадр был бы чёрным).
         controller.addUserScript(
             WKUserScript(
-                source: Self.cinemaProbeScript,
+                source: MainViewController.cinemaProbeScript,
                 injectionTime: .atDocumentStart,
                 forMainFrameOnly: false
             )
@@ -3026,7 +3026,6 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         // Круглая линза максимально заполняет свою половину дисплея.
         // Радиус ограничен и по высоте, и по ширине, поэтому окружность
         // не превращается в овал и одинакова для обоих глаз.
-        let maxLensRadius = min(0.5, 0.5 / max(uniforms.aspect, 0.001))
         uniforms.rClip = 0.497
         uniforms.passthrough = (profile.passthrough && hasCamera) ? 1 : 0
 

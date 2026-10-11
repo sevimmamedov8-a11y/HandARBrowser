@@ -16,9 +16,9 @@
 //  ----------
 //    • Луч выходит из кончика указательного пальца. Где он встречает панель,
 //      там горит точка с кольцом — видно, куда наведён.
-//    • Нажатие: СРЕДНИЙ + большой палец.
-//    • Перетаскивание панели: УКАЗАТЕЛЬНЫЙ + большой, рука в нижней трети кадра.
-//    • Масштаб: две руки, средний + большой на каждой; двигаем указательные
+//    • Нажатие: УКАЗАТЕЛЬНЫЙ + большой палец (щипок).
+//    • Перетаскивание панели: СРЕДНИЙ + большой, рука в нижней трети кадра.
+//    • Масштаб: две руки, указательный + большой на каждой; двигаем указательные
 //      дальше друг от друга — окно увеличивается, ближе — уменьшается.
 //    • Панель ссылок над браузером: Google, YouTube, TikTok, Назад.
 //
@@ -39,9 +39,9 @@ struct HandSample {
     let middleTip: CGPoint
     let thumbTip: CGPoint
     let joints: [VNHumanHandPoseObservation.JointName: CGPoint]
-    /// Средний + большой: нажатие.
+    /// Указательный + большой: нажатие (ЛКМ).
     let clickPinch: Bool
-    /// Указательный + большой: захват панели.
+    /// Средний + большой: захват панели.
     let grabPinch: Bool
     /// Рука в кулаке — пальцы согнуты.
     let isFist: Bool
@@ -573,7 +573,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     private var controllerMotionAvailable = false
     private var controllerMotionRotation = SIMD3<Float>(repeating: 0)
 
-    // Масштабирование двумя руками: обе руки делают средний+большой палец,
+    // Масштабирование двумя руками: обе руки делают щипок указательный+большой,
     // затем расстояние между кончиками указательных меняет размер панели.
     private var isResizing = false
     private var resizeStartHandDistance: CGFloat = 0
@@ -2355,7 +2355,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
             controllerHandRoot.isHidden = true
         }
 
-        // Две руки: средний+большой палец = режим изменения размера.
+        // Две руки: щипок указательный+большой на обеих = режим изменения размера.
         // Расходятся указательные — окно увеличивается, сходятся — уменьшается.
         if let left, let right, left.clickPinch && right.clickPinch {
             updateResize(left: left, right: right)
@@ -2386,7 +2386,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
             return
         }
 
-        // Захват: указательный + большой, рука в нижней трети кадра.
+        // Захват: средний + большой, рука в нижней трети кадра.
         let inDragZone = sample.indexTip.y < dragZoneHeight
         if sample.grabPinch && (isDragging || inDragZone) {
             updateDrag(with: ray)
@@ -4041,21 +4041,21 @@ final class HandTracker {
                     let middleBase = filteredJoints[.middleMCP]
 
                     // Нормируем на ладонь, но не требуем идеального распознавания
-                    // среднего пальца каждый кадр. Так курсор остаётся стабильным,
-                    // а средний+большой используется только как команда клика.
+                    // среднего пальца каждый кадр. Так курсор остаётся стабильным.
+                    // Клик = щипок указательный+большой; захват = средний+большой.
                     let palmReference = indexBase ?? middleBase ?? filteredWrist
                     let palmSize = max(distance(filteredWrist, palmReference), 0.035)
-                    let clickRatio = filteredMiddle.map { distance($0, filteredThumb) / palmSize }
-                    let grabRatio = distance(filteredIndex, filteredThumb) / palmSize
+                    let clickRatio = distance(filteredIndex, filteredThumb) / palmSize
+                    let grabRatio = filteredMiddle.map { distance($0, filteredThumb) / palmSize }
 
                     state.index = filteredIndex
                     state.middle = filteredMiddle
                     state.thumb = filteredThumb
                     state.joints = filteredJoints
-                    state.clickPinch = clickRatio.map {
-                        pinchHysteresis(previous: state.clickPinch, ratio: $0, close: 0.52, open: 0.70)
+                    state.clickPinch = pinchHysteresis(previous: state.clickPinch, ratio: clickRatio, close: 0.52, open: 0.70)
+                    state.grabPinch = grabRatio.map {
+                        pinchHysteresis(previous: state.grabPinch, ratio: $0, close: 0.46, open: 0.64)
                     } ?? false
-                    state.grabPinch = pinchHysteresis(previous: state.grabPinch, ratio: grabRatio, close: 0.46, open: 0.64)
 
                     let sample = HandSample(
                         indexTip: filteredIndex,

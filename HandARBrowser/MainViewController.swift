@@ -2665,7 +2665,15 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         return active
     }
 
+    /// Скелет руки нужен только для распознавания щипка и не рисуется.
+    private let showHandSkeleton = false
+
     private func updateHandSkeleton(left: HandSample?, right: HandSample?) {
+        guard showHandSkeleton else {
+            leftHandSkeletonNode.isHidden = true
+            rightHandSkeletonNode.isHidden = true
+            return
+        }
         updateSingleHandSkeleton(sample: left, root: leftHandSkeletonNode, joints: leftSkeletonJoints, bones: leftSkeletonBones, palm: leftPalmNode)
         updateSingleHandSkeleton(sample: right, root: rightHandSkeletonNode, joints: rightSkeletonJoints, bones: rightSkeletonBones, palm: rightPalmNode)
     }
@@ -4050,15 +4058,17 @@ final class HandTracker {
                     let filteredMiddle = filteredJoints[.middleTip]
                     let filteredThumb = filteredJoints[.thumbTip] ?? thumb.location
                     let filteredWrist = filteredJoints[.wrist] ?? wrist.location
-                    let indexBase = filteredJoints[.indexMCP]
-                    let middleBase = filteredJoints[.middleMCP]
 
-                    // Нормируем на ладонь, но не требуем идеального распознавания
-                    // среднего пальца каждый кадр. Так курсор остаётся стабильным.
-                    // Клик = щипок указательный+большой; захват = средний+большой.
-                    let palmReference = indexBase ?? middleBase ?? filteredWrist
-                    let palmSize = max(distance(filteredWrist, palmReference), 0.035)
-                    let clickRatio = distance(filteredIndex, filteredThumb) / palmSize
+                    // Невидимый «скелет» руки: щипок считается по суставам, а не только
+                    // по кончикам, и нормируется на размер ладони, который не зависит
+                    // от поворота кисти. Клик = любое касание указательного и большого
+                    // (кончик в кончик, подушечка о подушечку, кончик о бок пальца).
+                    let palmSize = handScale(joints: filteredJoints, wrist: filteredWrist)
+                    let clickRatio = pinchDistance(
+                        joints: filteredJoints,
+                        indexTip: filteredIndex,
+                        thumbTip: filteredThumb
+                    ) / palmSize
                     let grabRatio = filteredMiddle.map { distance($0, filteredThumb) / palmSize }
 
                     state.index = filteredIndex
@@ -4066,10 +4076,11 @@ final class HandTracker {
                     state.thumb = filteredThumb
                     state.joints = filteredJoints
                     let wasClickPinch = state.clickPinch
-                    state.clickPinch = pinchHysteresis(previous: state.clickPinch, ratio: clickRatio, close: 0.52, open: 0.70)
-                    state.grabPinch = grabRatio.map {
+                    state.clickPinch = pinchHysteresis(previous: state.clickPinch, ratio: clickRatio, close: 0.34, open: 0.52)
+                    // Если указательный и большой сошлись — это клик, а не захват панели.
+                    state.grabPinch = state.clickPinch ? false : (grabRatio.map {
                         pinchHysteresis(previous: state.grabPinch, ratio: $0, close: 0.46, open: 0.64)
-                    } ?? false
+                    } ?? false)
 
                     var reportedIndex = filteredIndex
                     if state.clickPinch {
@@ -4157,6 +4168,53 @@ private func pinchHysteresis(
 @inline(__always)
 private func distance(_ a: CGPoint, _ b: CGPoint) -> CGFloat {
     hypot(a.x - b.x, a.y - b.y)
+}
+
+/// Расстояние от точки до отрезка ab.
+@inline(__always)
+private func segmentDistance(_ p: CGPoint, _ a: CGPoint, _ b: CGPoint) -> CGFloat {
+    let abx = b.x - a.x
+    let aby = b.y - a.y
+    let len2 = abx * abx + aby * aby
+    guard len2 > 1e-9 else { return distance(p, a) }
+    let t = max(0, min(1, ((p.x - a.x) * abx + (p.y - a.y) * aby) / len2))
+    return hypot(p.x - (a.x + t * abx), p.y - (a.y + t * aby))
+}
+
+/// Размер ладони для нормировки. Берём максимум из нескольких замеров:
+/// когда рука повёрнута и один замер укорачивается, другой остаётся длинным.
+private func handScale(
+    joints: [VNHumanHandPoseObservation.JointName: CGPoint],
+    wrist: CGPoint
+) -> CGFloat {
+    var scale: CGFloat = 0
+    if let m = joints[.middleMCP] { scale = max(scale, distance(wrist, m)) }
+    if let i = joints[.indexMCP] { scale = max(scale, distance(wrist, i)) }
+    if let i = joints[.indexMCP], let l = joints[.littleMCP] {
+        scale = max(scale, distance(i, l) * 1.25)
+    }
+    return max(scale, 0.035)
+}
+
+/// Минимальное расстояние между «костями» большого и указательного у кончиков.
+/// Работает при любом касании: кончик к кончику, подушечка к подушечке,
+/// кончик большого к боку указательного и наоборот.
+private func pinchDistance(
+    joints: [VNHumanHandPoseObservation.JointName: CGPoint],
+    indexTip: CGPoint,
+    thumbTip: CGPoint
+) -> CGFloat {
+    var best = distance(indexTip, thumbTip)
+    if let indexDIP = joints[.indexDIP] {
+        best = min(best, segmentDistance(thumbTip, indexDIP, indexTip))
+    }
+    if let thumbIP = joints[.thumbIP] {
+        best = min(best, segmentDistance(indexTip, thumbIP, thumbTip))
+    }
+    if let indexDIP = joints[.indexDIP], let thumbIP = joints[.thumbIP] {
+        best = min(best, distance(indexDIP, thumbTip) * 1.1, distance(thumbIP, indexTip) * 1.1)
+    }
+    return best
 }
 
 /// Палец согнут, если угол между сегментами MCP→PIP и PIP→DIP больше ~80°.

@@ -35,7 +35,11 @@ import MetalKit
 import simd
 
 struct HandSample {
+    /// Кончик указательного для луча и щипка. Во время щипка замирает в месте касания,
+    /// чтобы клик попадал туда, куда целились, а не уезжал за большим пальцем.
     let indexTip: CGPoint
+    /// Всегда живая позиция кончика указательного (для изменения размера двумя руками).
+    let liveIndexTip: CGPoint
     let middleTip: CGPoint
     let thumbTip: CGPoint
     let joints: [VNHumanHandPoseObservation.JointName: CGPoint]
@@ -2450,7 +2454,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     }
 
     private func updateResize(left: HandSample, right: HandSample) {
-        let distance = distance(left.indexTip, right.indexTip)
+        let distance = distance(left.liveIndexTip, right.liveIndexTip)
         guard distance > 0.06 else { return }
 
         if !isResizing {
@@ -3925,6 +3929,10 @@ final class HandTracker {
         var isFist = false
         var clickPinch = false
         var grabPinch = false
+        /// Последние позиции указательного, пока пальцы разведены (для якоря щипка).
+        var openIndexHistory: [CGPoint] = []
+        var pinchAnchor: CGPoint?
+        var pinchFrames = 0
 
         mutating func reset() {
             index = nil
@@ -3935,6 +3943,9 @@ final class HandTracker {
             isFist = false
             clickPinch = false
             grabPinch = false
+            openIndexHistory.removeAll(keepingCapacity: true)
+            pinchAnchor = nil
+            pinchFrames = 0
         }
     }
 
@@ -3970,11 +3981,9 @@ final class HandTracker {
                 for observation in self.request.results ?? [] {
                     guard
                         let allPoints = try? observation.recognizedPoints(.all),
-                        let index = allPoints[.indexTip],
                         let thumb = allPoints[.thumbTip],
                         let wrist = allPoints[.wrist],
-                        index.confidence > 0.45,
-                        thumb.confidence > 0.45,
+                        thumb.confidence > 0.35,
                         wrist.confidence > 0.35
                     else {
                         continue
@@ -4033,7 +4042,11 @@ final class HandTracker {
                         }
                     }
 
-                    let filteredIndex = filteredJoints[.indexTip] ?? index.location
+                    // Кончик указательного может пропасть на кадре щипка — тогда берём
+                    // последнюю стабильную позицию (сглаживание выше держит её 18 кадров).
+                    guard let filteredIndex = filteredJoints[.indexTip] ?? state.joints[.indexTip] else {
+                        continue
+                    }
                     let filteredMiddle = filteredJoints[.middleTip]
                     let filteredThumb = filteredJoints[.thumbTip] ?? thumb.location
                     let filteredWrist = filteredJoints[.wrist] ?? wrist.location
@@ -4052,13 +4065,36 @@ final class HandTracker {
                     state.middle = filteredMiddle
                     state.thumb = filteredThumb
                     state.joints = filteredJoints
+                    let wasClickPinch = state.clickPinch
                     state.clickPinch = pinchHysteresis(previous: state.clickPinch, ratio: clickRatio, close: 0.52, open: 0.70)
                     state.grabPinch = grabRatio.map {
                         pinchHysteresis(previous: state.grabPinch, ratio: $0, close: 0.46, open: 0.64)
                     } ?? false
 
+                    var reportedIndex = filteredIndex
+                    if state.clickPinch {
+                        if !wasClickPinch {
+                            // Якорь — позиция указательного за несколько кадров до касания.
+                            state.pinchAnchor = state.openIndexHistory.first ?? filteredIndex
+                            state.pinchFrames = 0
+                        }
+                        state.pinchFrames += 1
+                        // Первые кадры щипка курсор стоит на месте (клик), потом живёт дальше —
+                        // иначе не работала бы прокрутка, которая идёт тем же щипком.
+                        if state.pinchFrames <= 10, let anchor = state.pinchAnchor {
+                            reportedIndex = anchor
+                        }
+                    } else {
+                        state.pinchAnchor = nil
+                        state.openIndexHistory.append(filteredIndex)
+                        if state.openIndexHistory.count > 4 {
+                            state.openIndexHistory.removeFirst()
+                        }
+                    }
+
                     let sample = HandSample(
-                        indexTip: filteredIndex,
+                        indexTip: reportedIndex,
+                        liveIndexTip: filteredIndex,
                         middleTip: filteredMiddle ?? filteredIndex,
                         thumbTip: filteredThumb,
                         joints: filteredJoints,

@@ -16,9 +16,9 @@
 //  ----------
 //    • Луч выходит из кончика указательного пальца. Где он встречает панель,
 //      там горит точка с кольцом — видно, куда наведён.
-//    • Нажатие: УКАЗАТЕЛЬНЫЙ + большой палец (щипок).
-//    • Перетаскивание панели: СРЕДНИЙ + большой, рука в нижней трети кадра.
-//    • Масштаб: две руки, указательный + большой на каждой; двигаем указательные
+//    • Нажатие: СРЕДНИЙ + большой палец.
+//    • Перетаскивание панели: УКАЗАТЕЛЬНЫЙ + большой, рука в нижней трети кадра.
+//    • Масштаб: две руки, средний + большой на каждой; двигаем указательные
 //      дальше друг от друга — окно увеличивается, ближе — уменьшается.
 //    • Панель ссылок над браузером: Google, YouTube, TikTok, Назад.
 //
@@ -35,17 +35,13 @@ import MetalKit
 import simd
 
 struct HandSample {
-    /// Кончик указательного для луча и щипка. Во время щипка замирает в месте касания,
-    /// чтобы клик попадал туда, куда целились, а не уезжал за большим пальцем.
     let indexTip: CGPoint
-    /// Всегда живая позиция кончика указательного (для изменения размера двумя руками).
-    let liveIndexTip: CGPoint
     let middleTip: CGPoint
     let thumbTip: CGPoint
     let joints: [VNHumanHandPoseObservation.JointName: CGPoint]
-    /// Указательный + большой: нажатие (ЛКМ).
+    /// Средний + большой: нажатие.
     let clickPinch: Bool
-    /// Средний + большой: захват панели.
+    /// Указательный + большой: захват панели.
     let grabPinch: Bool
     /// Рука в кулаке — пальцы согнуты.
     let isFist: Bool
@@ -560,6 +556,9 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     private let cinemaHall = CinemaHall()
     private let cinemaPlayback = CinemaPlayback()
     private var cinemaProbeTimer: Timer?
+    /// Ссылка, которую открыли в зале: её же пробник перезагружает,
+    /// если страница не отдала поток с первого раза.
+    private var cinemaSourceURL: URL?
     private var browserAnchor: ARAnchor?
     private var browserWorldTransform: simd_float4x4?
     private var didCreateInitialAnchor = false
@@ -577,7 +576,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     private var controllerMotionAvailable = false
     private var controllerMotionRotation = SIMD3<Float>(repeating: 0)
 
-    // Масштабирование двумя руками: обе руки делают щипок указательный+большой,
+    // Масштабирование двумя руками: обе руки делают средний+большой палец,
     // затем расстояние между кончиками указательных меняет размер панели.
     private var isResizing = false
     private var resizeStartHandDistance: CGFloat = 0
@@ -645,9 +644,12 @@ final class MainViewController: UIViewController, MTKViewDelegate {
           if(!v) return JSON.stringify({ok:false});
           var src = v.currentSrc || v.src || '';
           var ready = v.readyState >= 1;
-          var dur = isFinite(v.duration) ? (v.duration||0) : 0;
+          // HLS-потоки, включая YouTube, отдают duration === Infinity —
+          // это не ошибка, а живой/плейлистный поток. Достаточно прямой
+          // ссылки и загруженных метаданных.
+          var dur = isFinite(v.duration) ? (v.duration||0) : Infinity;
           var usable = !!src && src.indexOf('blob:') !== 0 && src.indexOf('data:') !== 0
-                       && ready && dur > 0.5;
+                       && ready && (dur === Infinity || dur > 0.1);
           return JSON.stringify({ok:true, usable:usable, src:src, paused:v.paused,
                                  duration:dur, currentTime:(v.currentTime||0),
                                  volume:(typeof v.volume === 'number' ? v.volume : 1),
@@ -658,7 +660,16 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         try{
           var v = largest();
           if(!v) return 'null';
-          if(cmd === 'play'){ var p = v.play(); if(p && p.catch){ p.catch(function(){}); } }
+          if(cmd === 'play'){
+            // Автозапуск без жеста на iOS разрешён только для беззвучного
+            // видео. Звук потом берёт нативный плеер зала, страница молчит.
+            var p = v.play();
+            if(p && p.catch){
+              p.catch(function(){
+                try{ v.muted = true; var q = v.play(); if(q && q.catch){ q.catch(function(){}); } }catch(e){}
+              });
+            }
+          }
           else if(cmd === 'pause'){ v.pause(); }
           else if(cmd === 'mute'){ v.muted = true; }
           else if(cmd === 'unmute'){ v.muted = false; }
@@ -716,10 +727,16 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         components.queryItems = [
             URLQueryItem(name: "playsinline", value: "1"),
             URLQueryItem(name: "autoplay", value: "1"),
+            // Без muted iOS не даёт автозапуску стартовать без касания, а без
+            // старта у <video> не появляется currentSrc. Звук берёт нативный
+            // плеер зала — страница молчит, но поток отдаёт прямую ссылку.
+            URLQueryItem(name: "mute", value: "1"),
             URLQueryItem(name: "rel", value: "0"),
             URLQueryItem(name: "modestbranding", value: "1"),
             URLQueryItem(name: "iv_load_policy", value: "3"),
-            URLQueryItem(name: "fs", value: "0")
+            URLQueryItem(name: "fs", value: "0"),
+            URLQueryItem(name: "autohide", value: "1"),
+            URLQueryItem(name: "disablekb", value: "1")
         ]
         return components.url
     }
@@ -1803,6 +1820,9 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         cinemaPlayback.onProgress = { [weak self] current, duration in
             self?.cinemaHall.setTime(current: current, duration: duration)
         }
+        cinemaPlayback.onStarted = { [weak self] in
+            self?.cinemaHall.setNotice("")
+        }
         cinemaPlayback.onFailed = { [weak self] message in
             guard let self else { return }
             NSLog("HandAR cinema playback failed: %@", message)
@@ -1830,11 +1850,15 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         let target = youtubeEmbedURL(url ?? Self.youTubeURL) ?? (url ?? Self.youTubeURL)
         if isDirectMediaURL(target) {
             // Прямой файл — сразу нативный плеер, никакой обвязки сайта.
+            cinemaSourceURL = nil
+            cinemaHall.setNotice("загружаю видео…")
             cinemaPlayback.load(url: target, into: browserMaterial)
             cinemaHall.setPlayingState(true)
         } else {
             // Страница (YouTube и прочие): загружаем, забираем у её <video>
             // прямую ссылку на поток и переключаем экран на AVPlayer.
+            cinemaSourceURL = target
+            cinemaHall.setNotice("открываю видео…")
             browser.load(URLRequest(url: target))
             startBrowserCapture()
             startCinemaProbe()
@@ -1850,13 +1874,21 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         cinemaProbeTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
             guard let self else { return }
             attempts += 1
-            guard attempts < 40 else {
+            guard attempts < 120 else {
+                // Поток так и не отдан. Экран уже рисует снимки страницы,
+                // но на случай, если и они чёрные — честная подпись.
                 self.stopCinemaProbe()
+                self.cinemaHall.setNotice("видео не отвечает — нажми 🔁 или вставь ссылку .mp4")
                 return
             }
             guard !self.cinemaPlayback.isActive else {
                 self.stopCinemaProbe()
                 return
+            }
+            // Иногда embed стартует только после повторной загрузки:
+            // к середине попыток страница перезагружается один раз.
+            if attempts == 40, let url = self.cinemaSourceURL {
+                self.browser.load(URLRequest(url: url))
             }
             self.browser.evaluateJavaScript(
                 "window.__handarVideoInfo ? window.__handarVideoInfo() : 'null';"
@@ -1905,6 +1937,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         )
         cinemaPlayback.load(url: url, into: browserMaterial)
         cinemaHall.setPlayingState(true)
+        cinemaHall.setNotice("")
         stopBrowserCapture()
     }
 
@@ -1914,6 +1947,8 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         cinemaHall.stop()
         cinemaActive = false
         isCinemaMode = false
+        cinemaSourceURL = nil
+        cinemaHall.setNotice("")
         browserHandleNode.isHidden = false
         toolbarNode.isHidden = false
         hideDirectVideoStage()
@@ -1991,6 +2026,8 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         releasePointer()
         stopCinemaProbe()
         cinemaPlayback.release()
+        cinemaSourceURL = nil
+        cinemaHall.setNotice("")
 
         if securityGameActive {
             securityGame.stop()
@@ -2359,7 +2396,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
             controllerHandRoot.isHidden = true
         }
 
-        // Две руки: щипок указательный+большой на обеих = режим изменения размера.
+        // Две руки: средний+большой палец = режим изменения размера.
         // Расходятся указательные — окно увеличивается, сходятся — уменьшается.
         if let left, let right, left.clickPinch && right.clickPinch {
             updateResize(left: left, right: right)
@@ -2390,7 +2427,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
             return
         }
 
-        // Захват: средний + большой, рука в нижней трети кадра.
+        // Захват: указательный + большой, рука в нижней трети кадра.
         let inDragZone = sample.indexTip.y < dragZoneHeight
         if sample.grabPinch && (isDragging || inDragZone) {
             updateDrag(with: ray)
@@ -2454,7 +2491,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     }
 
     private func updateResize(left: HandSample, right: HandSample) {
-        let distance = distance(left.liveIndexTip, right.liveIndexTip)
+        let distance = distance(left.indexTip, right.indexTip)
         guard distance > 0.06 else { return }
 
         if !isResizing {
@@ -2665,15 +2702,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         return active
     }
 
-    /// Скелет руки нужен только для распознавания щипка и не рисуется.
-    private let showHandSkeleton = false
-
     private func updateHandSkeleton(left: HandSample?, right: HandSample?) {
-        guard showHandSkeleton else {
-            leftHandSkeletonNode.isHidden = true
-            rightHandSkeletonNode.isHidden = true
-            return
-        }
         updateSingleHandSkeleton(sample: left, root: leftHandSkeletonNode, joints: leftSkeletonJoints, bones: leftSkeletonBones, palm: leftPalmNode)
         updateSingleHandSkeleton(sample: right, root: rightHandSkeletonNode, joints: rightSkeletonJoints, bones: rightSkeletonBones, palm: rightPalmNode)
     }
@@ -3937,10 +3966,6 @@ final class HandTracker {
         var isFist = false
         var clickPinch = false
         var grabPinch = false
-        /// Последние позиции указательного, пока пальцы разведены (для якоря щипка).
-        var openIndexHistory: [CGPoint] = []
-        var pinchAnchor: CGPoint?
-        var pinchFrames = 0
 
         mutating func reset() {
             index = nil
@@ -3951,9 +3976,6 @@ final class HandTracker {
             isFist = false
             clickPinch = false
             grabPinch = false
-            openIndexHistory.removeAll(keepingCapacity: true)
-            pinchAnchor = nil
-            pinchFrames = 0
         }
     }
 
@@ -3989,9 +4011,11 @@ final class HandTracker {
                 for observation in self.request.results ?? [] {
                     guard
                         let allPoints = try? observation.recognizedPoints(.all),
+                        let index = allPoints[.indexTip],
                         let thumb = allPoints[.thumbTip],
                         let wrist = allPoints[.wrist],
-                        thumb.confidence > 0.35,
+                        index.confidence > 0.45,
+                        thumb.confidence > 0.45,
                         wrist.confidence > 0.35
                     else {
                         continue
@@ -4050,62 +4074,32 @@ final class HandTracker {
                         }
                     }
 
-                    // Кончик указательного может пропасть на кадре щипка — тогда берём
-                    // последнюю стабильную позицию (сглаживание выше держит её 18 кадров).
-                    guard let filteredIndex = filteredJoints[.indexTip] ?? state.joints[.indexTip] else {
-                        continue
-                    }
+                    let filteredIndex = filteredJoints[.indexTip] ?? index.location
                     let filteredMiddle = filteredJoints[.middleTip]
                     let filteredThumb = filteredJoints[.thumbTip] ?? thumb.location
                     let filteredWrist = filteredJoints[.wrist] ?? wrist.location
+                    let indexBase = filteredJoints[.indexMCP]
+                    let middleBase = filteredJoints[.middleMCP]
 
-                    // Невидимый «скелет» руки: щипок считается по суставам, а не только
-                    // по кончикам, и нормируется на размер ладони, который не зависит
-                    // от поворота кисти. Клик = любое касание указательного и большого
-                    // (кончик в кончик, подушечка о подушечку, кончик о бок пальца).
-                    let palmSize = handScale(joints: filteredJoints, wrist: filteredWrist)
-                    let clickRatio = pinchDistance(
-                        joints: filteredJoints,
-                        indexTip: filteredIndex,
-                        thumbTip: filteredThumb
-                    ) / palmSize
-                    let grabRatio = filteredMiddle.map { distance($0, filteredThumb) / palmSize }
+                    // Нормируем на ладонь, но не требуем идеального распознавания
+                    // среднего пальца каждый кадр. Так курсор остаётся стабильным,
+                    // а средний+большой используется только как команда клика.
+                    let palmReference = indexBase ?? middleBase ?? filteredWrist
+                    let palmSize = max(distance(filteredWrist, palmReference), 0.035)
+                    let clickRatio = filteredMiddle.map { distance($0, filteredThumb) / palmSize }
+                    let grabRatio = distance(filteredIndex, filteredThumb) / palmSize
 
                     state.index = filteredIndex
                     state.middle = filteredMiddle
                     state.thumb = filteredThumb
                     state.joints = filteredJoints
-                    let wasClickPinch = state.clickPinch
-                    state.clickPinch = pinchHysteresis(previous: state.clickPinch, ratio: clickRatio, close: 0.34, open: 0.52)
-                    // Если указательный и большой сошлись — это клик, а не захват панели.
-                    state.grabPinch = state.clickPinch ? false : (grabRatio.map {
-                        pinchHysteresis(previous: state.grabPinch, ratio: $0, close: 0.46, open: 0.64)
-                    } ?? false)
-
-                    var reportedIndex = filteredIndex
-                    if state.clickPinch {
-                        if !wasClickPinch {
-                            // Якорь — позиция указательного за несколько кадров до касания.
-                            state.pinchAnchor = state.openIndexHistory.first ?? filteredIndex
-                            state.pinchFrames = 0
-                        }
-                        state.pinchFrames += 1
-                        // Первые кадры щипка курсор стоит на месте (клик), потом живёт дальше —
-                        // иначе не работала бы прокрутка, которая идёт тем же щипком.
-                        if state.pinchFrames <= 10, let anchor = state.pinchAnchor {
-                            reportedIndex = anchor
-                        }
-                    } else {
-                        state.pinchAnchor = nil
-                        state.openIndexHistory.append(filteredIndex)
-                        if state.openIndexHistory.count > 4 {
-                            state.openIndexHistory.removeFirst()
-                        }
-                    }
+                    state.clickPinch = clickRatio.map {
+                        pinchHysteresis(previous: state.clickPinch, ratio: $0, close: 0.52, open: 0.70)
+                    } ?? false
+                    state.grabPinch = pinchHysteresis(previous: state.grabPinch, ratio: grabRatio, close: 0.46, open: 0.64)
 
                     let sample = HandSample(
-                        indexTip: reportedIndex,
-                        liveIndexTip: filteredIndex,
+                        indexTip: filteredIndex,
                         middleTip: filteredMiddle ?? filteredIndex,
                         thumbTip: filteredThumb,
                         joints: filteredJoints,
@@ -4168,53 +4162,6 @@ private func pinchHysteresis(
 @inline(__always)
 private func distance(_ a: CGPoint, _ b: CGPoint) -> CGFloat {
     hypot(a.x - b.x, a.y - b.y)
-}
-
-/// Расстояние от точки до отрезка ab.
-@inline(__always)
-private func segmentDistance(_ p: CGPoint, _ a: CGPoint, _ b: CGPoint) -> CGFloat {
-    let abx = b.x - a.x
-    let aby = b.y - a.y
-    let len2 = abx * abx + aby * aby
-    guard len2 > 1e-9 else { return distance(p, a) }
-    let t = max(0, min(1, ((p.x - a.x) * abx + (p.y - a.y) * aby) / len2))
-    return hypot(p.x - (a.x + t * abx), p.y - (a.y + t * aby))
-}
-
-/// Размер ладони для нормировки. Берём максимум из нескольких замеров:
-/// когда рука повёрнута и один замер укорачивается, другой остаётся длинным.
-private func handScale(
-    joints: [VNHumanHandPoseObservation.JointName: CGPoint],
-    wrist: CGPoint
-) -> CGFloat {
-    var scale: CGFloat = 0
-    if let m = joints[.middleMCP] { scale = max(scale, distance(wrist, m)) }
-    if let i = joints[.indexMCP] { scale = max(scale, distance(wrist, i)) }
-    if let i = joints[.indexMCP], let l = joints[.littleMCP] {
-        scale = max(scale, distance(i, l) * 1.25)
-    }
-    return max(scale, 0.035)
-}
-
-/// Минимальное расстояние между «костями» большого и указательного у кончиков.
-/// Работает при любом касании: кончик к кончику, подушечка к подушечке,
-/// кончик большого к боку указательного и наоборот.
-private func pinchDistance(
-    joints: [VNHumanHandPoseObservation.JointName: CGPoint],
-    indexTip: CGPoint,
-    thumbTip: CGPoint
-) -> CGFloat {
-    var best = distance(indexTip, thumbTip)
-    if let indexDIP = joints[.indexDIP] {
-        best = min(best, segmentDistance(thumbTip, indexDIP, indexTip))
-    }
-    if let thumbIP = joints[.thumbIP] {
-        best = min(best, segmentDistance(indexTip, thumbIP, thumbTip))
-    }
-    if let indexDIP = joints[.indexDIP], let thumbIP = joints[.thumbIP] {
-        best = min(best, distance(indexDIP, thumbTip) * 1.1, distance(thumbIP, indexTip) * 1.1)
-    }
-    return best
 }
 
 /// Палец согнут, если угол между сегментами MCP→PIP и PIP→DIP больше ~80°.

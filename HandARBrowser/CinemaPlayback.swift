@@ -40,15 +40,22 @@ final class CinemaPlayback: NSObject {
         player.actionAtItemEnd = .pause
         player.automaticallyWaitsToMinimizeStalling = true
 
+        // Статус приходит с внутренней очереди AVFoundation, а материал
+        // и UIKit можно трогать только с главной — переводим сами.
         statusObserver = item.observe(\.status, options: [.new, .initial]) { [weak self] item, _ in
             guard let self else { return }
-            if item.status == .readyToPlay {
-                self.duration = item.duration.seconds.isFinite ? item.duration.seconds : 0
-                self.startProgress()
-                self.onStarted?()
-                self.play()
-            } else if item.status == .failed {
-                self.onFailed?(item.error?.localizedDescription ?? "Не удалось запустить видео")
+            let status = item.status
+            let seconds = item.duration.seconds
+            let message = item.error?.localizedDescription ?? "Не удалось запустить видео"
+            DispatchQueue.main.async {
+                if status == .readyToPlay {
+                    self.duration = seconds.isFinite ? seconds : 0
+                    self.startProgress()
+                    self.onStarted?()
+                    self.play()
+                } else if status == .failed {
+                    self.onFailed?(message)
+                }
             }
         }
 

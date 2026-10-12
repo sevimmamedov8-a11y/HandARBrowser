@@ -204,6 +204,8 @@ final class CinemaHall {
     private var neonNodes: [SCNMaterial] = []
     private var roomMaterials: [SCNMaterial] = []
     private let timeLabel = CineText()
+    /// Подпись под экраном: загрузка либо подсказка, если поток не отдан.
+    private let noticeLabel = CineText()
 
     private let lightButton = CineButton(title: "💡 СВЕТ", color: UIColor(red: 0.95, green: 0.75, blue: 0.25, alpha: 1))
     private let playButton = CineButton(title: "⏯ ПАУЗА", color: UIColor(red: 0.15, green: 0.70, blue: 0.32, alpha: 1))
@@ -250,10 +252,12 @@ final class CinemaHall {
         buildScreenArea()
         buildSeats()
         buildCeilingLights()
+        buildAestheticDetails()
         buildControlPanel()
 
         ambientLight.type = .ambient
-        ambientLight.color = UIColor(white: 1, alpha: 1)
+        // Тёплый, а не белый: холодный свет выдаёт «сахар» и режет глаза.
+        ambientLight.color = UIColor(red: 1, green: 0.93, blue: 0.82, alpha: 1)
         let lightNode = SCNNode()
         lightNode.light = ambientLight
         root.addChildNode(lightNode)
@@ -288,9 +292,144 @@ final class CinemaHall {
         timeLabel.setText("⏱ \(clock(current)) / \(clock(duration))")
     }
 
+    /// Подпись под экраном: «загружаю…» или подсказка при сбое.
+    func setNotice(_ text: String) {
+        if text.isEmpty {
+            noticeLabel.setText("")
+            noticeLabel.isHidden = true
+            return
+        }
+        noticeLabel.isHidden = false
+        noticeLabel.setText("⚠️ \(text)", color: UIColor(red: 1, green: 0.76, blue: 0.42, alpha: 1))
+        noticeLabel.fitWidth(2.7)
+    }
+
     private func clock(_ seconds: Double) -> String {
         let total = max(Int(seconds.rounded()), 0)
         return String(format: "%02d:%02d", total / 60, total % 60)
+    }
+
+    /// Общий помощник для всех статичных коробок зала.
+    private func boxNode(_ w: CGFloat, _ h: CGFloat, _ l: CGFloat, _ mat: SCNMaterial) -> SCNNode {
+        let g = SCNBox(width: w, height: h, length: l, chamferRadius: 0)
+        g.materials = [mat]
+        return SCNNode(geometry: g)
+    }
+
+    /// Мелочи, из-за которых зал выглядит дорогим кинозалом, а не коробкой:
+    /// звёздный потолок, светящийся периметр, акустика на стенах,
+    /// тёплые лампы в проходах и дверные проёмы на задней стене.
+    private func buildAestheticDetails() {
+        // Светящийся периметр потолка — тянется по кромке зала.
+        let ledEdgeMat = SCNMaterial()
+        ledEdgeMat.lightingModel = .constant
+        let edgeColor = UIColor(red: 0.52, green: 0.79, blue: 1, alpha: 1)
+        ledEdgeMat.diffuse.contents = edgeColor
+        ledEdgeMat.emission.contents = edgeColor
+
+        let perimeter: [(Float, Float, Float, CGFloat, CGFloat, CGFloat)] = [
+            (-6.6, 4.15, -1.0, 13.2, 0.05, 0.05),
+            (6.6, 4.15, -1.0, 13.2, 0.05, 0.05),
+            (0.0, 4.15, 7.86, 13.3, 0.05, 0.05),
+            (0.0, 4.15, -9.86, 13.3, 0.05, 0.05)
+        ]
+        for (px, py, pz, w, h, l) in perimeter {
+            let strip = boxNode(w, h, l, ledEdgeMat)
+            strip.position = SCNVector3(px, py, pz)
+            root.addChildNode(strip)
+            ceilingStrips.append(strip)
+        }
+
+        // Звёздное небо: мелкие тёплые точки, рядки по потолку.
+        let starMat = SCNMaterial()
+        starMat.lightingModel = .constant
+        let starColor = UIColor(red: 1, green: 0.92, blue: 0.76, alpha: 1)
+        starMat.diffuse.contents = starColor
+        starMat.emission.contents = starColor
+
+        var starIndex: Float = 0
+        while starIndex < 44 {
+            let row = (starIndex / 11.0).rounded()
+            let col = starIndex.truncatingRemainder(dividingBy: 11.0)
+            let jitter = (starIndex * 0.37).truncatingRemainder(dividingBy: 1.0)
+            let x: Float = -6.0 + col * 1.2 + jitter * 0.5
+            let y: Float = 4.11
+            let z: Float = -9.4 + row * 1.9
+            let dot = SCNSphere(radius: 0.030)
+            dot.materials = [starMat]
+            let node = SCNNode(geometry: dot)
+            node.position = SCNVector3(x, y, z)
+            root.addChildNode(node)
+            ceilingStrips.append(node)
+            starIndex += 1
+        }
+
+        // Акустические панели по боковым стенам.
+        let acousticMat = SCNMaterial()
+        acousticMat.cineLit(UIColor(red: 0.11, green: 0.10, blue: 0.18, alpha: 1))
+        for side in [-1.0, 1.0] {
+            let sideX: Float = Float(side) * 6.72
+            var row = 0
+            while row < 3 {
+                var col = 0
+                while col < 10 {
+                    let mat = boxNode(0.09, 0.60, 1.32, acousticMat)
+                    let y: Float = 1.88 + Float(row) * 0.78
+                    let z: Float = -8.4 + Float(col) * 1.72
+                    mat.position = SCNVector3(sideX, y, z)
+                    root.addChildNode(mat)
+                    col += 1
+                }
+                row += 1
+            }
+        }
+
+        // Тёплые лампы в проходах между рядами.
+        let lampMat = SCNMaterial()
+        lampMat.lightingModel = .constant
+        let lampColor = UIColor(red: 1, green: 0.80, blue: 0.52, alpha: 1)
+        lampMat.diffuse.contents = lampColor
+        lampMat.emission.contents = lampColor
+        let postMat = SCNMaterial()
+        postMat.cineLit(UIColor(white: 0.09, alpha: 1))
+        for side in [-1.0, 1.0] {
+            let sideX: Float = Float(side) * 3.42
+            var i = 0
+            while i < 4 {
+                let z: Float = 1.85 + Float(i) * 1.55
+                let glow = SCNSphere(radius: 0.083)
+                glow.materials = [lampMat]
+                let glowNode = SCNNode(geometry: glow)
+                glowNode.position = SCNVector3(sideX, 0.74, z)
+                root.addChildNode(glowNode)
+                ceilingStrips.append(glowNode)
+
+                let post = boxNode(0.035, 0.74, 0.035, postMat)
+                post.position = SCNVector3(sideX, 0.37, z)
+                root.addChildNode(post)
+                i += 1
+            }
+        }
+
+        // Дверные арки на задней стене: зал перестаёт выглядеть глухой коробкой.
+        let archMat = SCNMaterial()
+        archMat.cineConstant(UIColor(red: 0.05, green: 0.05, blue: 0.09, alpha: 1))
+        let signMat = SCNMaterial()
+        signMat.lightingModel = .constant
+        let signColor = UIColor(red: 0.26, green: 1, blue: 0.46, alpha: 1)
+        signMat.diffuse.contents = signColor
+        signMat.emission.contents = signColor
+        for side in [-1.0, 1.0] {
+            let archX: Float = Float(side) * 3.15
+            let opening = boxNode(1.18, 2.32, 0.14, archMat)
+            opening.position = SCNVector3(archX, 1.16, 7.90)
+            root.addChildNode(opening)
+
+            let sign = boxNode(0.52, 0.17, 0.03, signMat)
+            sign.position = SCNVector3(archX, 2.62, 7.82)
+            root.addChildNode(sign)
+            ceilingStrips.append(sign)
+        }
     }
 
     // MARK: Постройка зала
@@ -344,6 +483,12 @@ final class CinemaHall {
         }
 
         // Постеры на задней стене.
+        let boardMat = SCNMaterial(); boardMat.cineLit(UIColor(red: 0.07, green: 0.07, blue: 0.13, alpha: 1))
+        let frameEdgeMat = SCNMaterial()
+        frameEdgeMat.lightingModel = .constant
+        let frameColor = UIColor(red: 0.62, green: 0.45, blue: 0.20, alpha: 1)
+        frameEdgeMat.diffuse.contents = frameColor
+        frameEdgeMat.emission.contents = frameColor
         let posters: [(Float, String)] = [
             (-3.4, "🎬 ЛУЧШИЕ ФИЛЬМЫ"),
             (0.0, "🍿 БЕСПЛАТНЫЙ ПОПКОРН"),
@@ -355,6 +500,14 @@ final class CinemaHall {
             poster.position = SCNVector3(x, 2.4, 7.85)
             poster.fitWidth(2.1)
             root.addChildNode(poster)
+
+            // Подложка-щит под постером: текст читается, а постеры не висят в воздухе.
+            let board = box(2.35, 1.08, 0.045, boardMat)
+            board.position = SCNVector3(x, 2.4, 7.89)
+            root.addChildNode(board)
+            let frame = box(2.45, 1.18, 0.03, frameEdgeMat)
+            frame.position = SCNVector3(x, 2.4, 7.92)
+            root.addChildNode(frame)
         }
     }
 
@@ -438,6 +591,15 @@ final class CinemaHall {
         timeLabel.position = SCNVector3(0, 0.42, screenZ + 0.55)
         timeLabel.fitWidth(1.9)
         root.addChildNode(timeLabel)
+
+        // Подпись-предупреждение — строкой под картинкой, как субтитры.
+        noticeLabel.position = SCNVector3(
+            0,
+            Self.seatedEyeHeight - Self.screenHeight * 0.5 - 0.42,
+            screenZ + 0.08
+        )
+        noticeLabel.isHidden = true
+        root.addChildNode(noticeLabel)
     }
 
     private func buildSeats() {

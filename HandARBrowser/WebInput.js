@@ -108,10 +108,16 @@
 
   // Лента TikTok прокручивается без событий play/pause на самой странице —
   // нужен таймер, а не только слушатели.
-  setInterval(evaluateVideoState, 700);
+  setInterval(function () { if (!document.hidden) evaluateVideoState(); }, 700);
 
+  let evaluationPending = false;
   const layoutObserver = new MutationObserver(function () {
-    evaluateVideoState();
+    if (evaluationPending) return;
+    evaluationPending = true;
+    requestAnimationFrame(function () {
+      evaluationPending = false;
+      if (!document.hidden) evaluateVideoState();
+    });
   });
   function startObservingWhenReady() {
     if (document.body) {
@@ -267,8 +273,11 @@
     };
   }
 
-  const videoObserver = new MutationObserver(function () {
-    patchVideos(document);
+  const videoObserver = new MutationObserver(function (mutations) {
+    // Existing videos have already been patched. Visit only newly inserted trees.
+    mutations.forEach(function (mutation) {
+      mutation.addedNodes.forEach(function (node) { patchVideos(node); });
+    });
   });
   function startVideoObserver() {
     if (!document.documentElement) {

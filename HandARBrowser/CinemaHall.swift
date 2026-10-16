@@ -114,6 +114,7 @@ private final class CineButton {
     let hitRadius: Float
     private let plate: SCNNode
     private let textNode = SCNNode()
+    private var currentTitle: String?
     private let base: UIColor
     private let width: Float
     private let height: Float
@@ -137,10 +138,12 @@ private final class CineButton {
     }
 
     func setTitle(_ title: String) {
+        guard currentTitle != title else { return }
         guard let image = renderTextImage(title, color: .white, fontSize: 48, weight: .medium) else {
             textNode.isHidden = true
             return
         }
+        currentTitle = title
         let plane = SCNPlane(width: image.size.width, height: image.size.height)
         let material = SCNMaterial()
         material.cineConstant(.white)

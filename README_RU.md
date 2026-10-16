@@ -1,6 +1,8 @@
-# HandAR Vision — V69
+# HandAR Vision — V70
 
-Текущий интерфейс и ограничения: `V69_RELEASE_NOTES_RU.md`. Исправления плеера: `V68_RELEASE_NOTES_RU.md`. Ниже сохранена история архитектуры.
+Оптимизация и проверки: `V70_RELEASE_NOTES_RU.md`.
+
+Интерфейс и ограничения: `V69_RELEASE_NOTES_RU.md`. Исправления плеера: `V68_RELEASE_NOTES_RU.md`. Ниже сохранена история архитектуры.
 
 ## Архитектура V50: VR Desktop, приложения и контроллер
 

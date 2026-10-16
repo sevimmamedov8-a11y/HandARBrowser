@@ -421,6 +421,34 @@ struct ToolbarItem {
 
 // MARK: - Главный контроллер ---------------------------------------------------
 
+// Pure policy shared by browser capture, Vision and offscreen rendering.
+struct VRPerformanceBudget {
+    let thermalLevel: Int
+
+    var handFrameInterval: Double {
+        switch thermalLevel {
+        case 2: return 1.0 / 20.0
+        case 3...: return 1.0 / 15.0
+        default: return 1.0 / 30.0
+        }
+    }
+
+    var maximumRenderScale: Double {
+        switch thermalLevel {
+        case 1: return 1.1
+        case 2: return 1.0
+        case 3...: return 0.85
+        default: return 2.0
+        }
+    }
+
+    func snapshotInterval(home: Bool, cinema: Bool, interacting: Bool) -> Double {
+        let fps: Double = cinema ? 24 : (home && !interacting ? 6 : 12)
+        let thermalCap: Double = thermalLevel >= 2 ? 12 : 24
+        return 1.0 / min(fps, thermalCap)
+    }
+}
+
 private final class WeakScriptMessageHandler: NSObject, WKScriptMessageHandler {
     weak var target: WKScriptMessageHandler?
 
@@ -487,6 +515,8 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         return webView
     }()
     private var browserTimer: Timer?
+    private var browserCaptureEnabled = false
+    private var lastBrowserInteractionTime: CFTimeInterval = 0
     private var snapshotInProgress = false
 
     // Технологический обход чёрного YouTube-video: аппаратный HTML5 video
@@ -521,6 +551,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     private let handMaskLock = NSLock()
     private var pendingHandMaskBytes = [UInt8]()
     private var pendingHandMaskActive = false
+    private var handMaskNeedsUpload = false
 
     // Сцена: одна на оба глаза
     private let worldScene = SCNScene()
@@ -558,6 +589,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     private var toolbarCenterY: Float = 0
     private let toolbarButtonHeight: Float = 0.072
     private var highlightedToolbarIndex: Int?
+    private var toolbarImages: [(normal: UIImage, highlighted: UIImage)] = []
 
     private var menu: MainMenuView!
     private var diagnosticsView: VRBoxDiagnosticsView?
@@ -1046,10 +1078,10 @@ final class MainViewController: UIViewController, MTKViewDelegate {
             let material = SCNMaterial()
             material.lightingModel = .constant
             material.isDoubleSided = true
-            material.diffuse.contents = MainViewController.buttonImage(
-                title: items[index].title,
-                highlighted: false
-            )
+            let normal = Self.buttonImage(title: items[index].title, highlighted: false)
+            let highlighted = Self.buttonImage(title: items[index].title, highlighted: true)
+            toolbarImages.append((normal, highlighted))
+            material.diffuse.contents = normal
             material.emission.contents = material.diffuse.contents
             plane.firstMaterial = material
 
@@ -1070,7 +1102,9 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     /// Текстура кнопки. Рисуем заранее — в VR нет места для UIKit-слоёв.
     private static func buttonImage(title: String, highlighted: Bool) -> UIImage {
         let size = CGSize(width: 320, height: 120)
-        let renderer = UIGraphicsImageRenderer(size: size)
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1 // 320 physical pixels already exceed the projected button size.
+        let renderer = UIGraphicsImageRenderer(size: size, format: format)
         return renderer.image { context in
             let rect = CGRect(origin: .zero, size: size)
             let path = UIBezierPath(roundedRect: rect.insetBy(dx: 4, dy: 4), cornerRadius: 54)
@@ -2229,16 +2263,30 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     }
 
     private func startBrowserCapture() {
-        browserTimer?.invalidate()
-        // Чтение страницы сносно смотрится на 12 fps. Видео на 12 fps
-        // дёргается заметно, поэтому в кинорежиме поднимаем частоту.
-        let interval = isCinemaMode ? (1.0 / 24.0) : (1.0 / 12.0)
-        browserTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
-            self?.updateBrowserSnapshot()
+        stopBrowserCapture()
+        guard inVR, !directVideoActive, !cinemaPlayback.isActive, !securityGameActive else { return }
+        browserCaptureEnabled = true
+        scheduleBrowserCapture()
+    }
+
+    private func scheduleBrowserCapture() {
+        guard browserCaptureEnabled else { return }
+        let budget = VRPerformanceBudget(thermalLevel: ProcessInfo.processInfo.thermalState.rawValue)
+        let interval = budget.snapshotInterval(
+            home: spatialHomeVisible, cinema: isCinemaMode,
+            interacting: CACurrentMediaTime() - lastBrowserInteractionTime < 0.5
+        )
+        let timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: false) { [weak self] _ in
+            guard let self, self.browserCaptureEnabled else { return }
+            self.updateBrowserSnapshot()
+            self.scheduleBrowserCapture()
         }
+        timer.tolerance = interval * 0.1
+        browserTimer = timer
     }
 
     private func stopBrowserCapture() {
+        browserCaptureEnabled = false
         snapshotGeneration = UUID()
         browserTimer?.invalidate()
         browserTimer = nil
@@ -2331,6 +2379,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
                 directVideoPointer.isHidden = false
                 directVideoPointer.center = screen
                 directVideoPointer.backgroundColor = controllerButtonDown ? UIColor(red: 0.35, green: 0.85, blue: 1, alpha: 0.9) : .white
+                lastBrowserInteractionTime = CACurrentMediaTime()
                 input.update(normalizedPoint: local, pinch: controllerButtonDown, webView: webView)
                 if controllerButtonDown { activateDirectVideoAudio() }
             } else {
@@ -2363,6 +2412,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
             from: WorldRay(origin: headNode.simdWorldPosition, direction: simd_normalize(world - headNode.simdWorldPosition)),
             hit: world
         )
+        lastBrowserInteractionTime = CACurrentMediaTime()
         input.update(normalizedPoint: CGPoint(x: x, y: y), pinch: controllerButtonDown, webView: browser)
     }
 
@@ -2388,6 +2438,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         directVideoPointer.isHidden = false
         directVideoPointer.center = screenPoint
         directVideoPointer.backgroundColor = sample.clickPinch ? UIColor(red: 0.35, green: 0.85, blue: 1, alpha: 0.9) : .white
+        lastBrowserInteractionTime = CACurrentMediaTime()
         input.update(normalizedPoint: local, pinch: sample.clickPinch, webView: webView)
         if sample.clickPinch { activateDirectVideoAudio() }
         if let left = directVideoLeft, let right = directVideoRight {
@@ -2527,6 +2578,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
             return
         }
 
+        lastBrowserInteractionTime = CACurrentMediaTime()
         input.update(
             normalizedPoint: CGPoint(x: CGFloat(normalizedX), y: CGFloat(normalizedY)),
             pinch: sample.clickPinch,
@@ -2634,8 +2686,14 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     /// графики скелета — она только определяет, какие настоящие пиксели камеры
     /// нужно показать поверх браузера.
     private func queueHandForegroundMask(left: HandSample?, right: HandSample?) {
-        var bytes = [UInt8](repeating: 0, count: handMaskWidth * handMaskHeight)
         let activeSamples = [left, right].compactMap { $0 }
+        if activeSamples.isEmpty {
+            handMaskLock.lock()
+            let alreadyClear = !pendingHandMaskActive
+            handMaskLock.unlock()
+            if alreadyClear { return }
+        }
+        var bytes = [UInt8](repeating: 0, count: handMaskWidth * handMaskHeight)
         guard !activeSamples.isEmpty,
               let context = CGContext(
                 data: &bytes,
@@ -2649,6 +2707,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
             handMaskLock.lock()
             pendingHandMaskBytes = bytes
             pendingHandMaskActive = false
+            handMaskNeedsUpload = true
             handMaskLock.unlock()
             return
         }
@@ -2670,6 +2729,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         handMaskLock.lock()
         pendingHandMaskBytes = bytes
         pendingHandMaskActive = true
+        handMaskNeedsUpload = true
         handMaskLock.unlock()
     }
 
@@ -2731,6 +2791,11 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         guard let texture = handMaskTexture else { return false }
         handMaskLock.lock()
         let active = pendingHandMaskActive
+        guard handMaskNeedsUpload else {
+            handMaskLock.unlock()
+            return active
+        }
+        handMaskNeedsUpload = false
         let bytes = pendingHandMaskBytes
         handMaskLock.unlock()
 
@@ -2964,14 +3029,15 @@ final class MainViewController: UIViewController, MTKViewDelegate {
 
     private func highlightToolbar(_ index: Int?) {
         guard highlightedToolbarIndex != index else { return }
+        let previous = highlightedToolbarIndex
         highlightedToolbarIndex = index
-        for (position, node) in toolbarButtonNodes.enumerated() {
-            let image = MainViewController.buttonImage(
-                title: linkItems[position].title,
-                highlighted: position == index
-            )
-            node.geometry?.firstMaterial?.diffuse.contents = image
-            node.geometry?.firstMaterial?.emission.contents = image
+        // Only the old and new selections change; all textures were built once.
+        for position in [previous, index].compactMap({ $0 }) {
+            guard toolbarButtonNodes.indices.contains(position), toolbarImages.indices.contains(position) else { continue }
+            let image = position == index ? toolbarImages[position].highlighted : toolbarImages[position].normal
+            let material = toolbarButtonNodes[position].geometry?.firstMaterial
+            material?.diffuse.contents = image
+            material?.emission.contents = image
         }
     }
 
@@ -3219,12 +3285,15 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     }
 
     private func ensureEyeTextures(for drawableSize: CGSize) {
-        let factor = CGFloat(max(profile.supersample, 1))
+        let budget = VRPerformanceBudget(thermalLevel: ProcessInfo.processInfo.thermalState.rawValue)
+        let requested = profile.supersample.isFinite ? Double(max(profile.supersample, 1)) : 1
+        let factor = CGFloat(min(requested, budget.maximumRenderScale))
+        // Equal integer eye widths, including after thermal resolution changes.
         let target = CGSize(
-            width: (drawableSize.width * factor).rounded(),
-            height: (drawableSize.height * factor).rounded()
+            width: max(2, (drawableSize.width * factor / 2).rounded() * 2),
+            height: max(1, (drawableSize.height * factor).rounded())
         )
-        if eyeTexture != nil, eyeTextureSize == target { return }
+        if eyeTexture != nil, eyeDepthTexture != nil, eyeTextureSize == target { return }
 
         let colorDescriptor = MTLTextureDescriptor.texture2DDescriptor(
             pixelFormat: .bgra8Unorm,
@@ -3927,6 +3996,7 @@ final class HandTracker {
 
     private let queue = DispatchQueue(label: "handar.vision", qos: .userInitiated)
     private let gate = DispatchSemaphore(value: 1)
+    private var lastProcessedTime: CFTimeInterval = -.infinity
 
     /// Сглаженные позиции и состояния щипков по каждой руке.
     private struct HandState {
@@ -3963,6 +4033,13 @@ final class HandTracker {
         orientation: CGImagePropertyOrientation
     ) {
         guard gate.wait(timeout: .now()) == .success else { return }
+        let now = CACurrentMediaTime()
+        let budget = VRPerformanceBudget(thermalLevel: ProcessInfo.processInfo.thermalState.rawValue)
+        guard now - lastProcessedTime >= budget.handFrameInterval else {
+            gate.signal()
+            return
+        }
+        lastProcessedTime = now
 
         queue.async { [weak self] in
             guard let self else { return }

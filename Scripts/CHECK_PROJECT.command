@@ -2,7 +2,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
-echo "== Hand AR Browser V69 project check =="
+echo "== Hand AR Browser V70 project check =="
 for f in "HandARBrowser.xcodeproj/project.pbxproj" "HandARBrowser/AppDelegate.swift" "HandARBrowser/MainViewController.swift" "HandARBrowser/CinemaHall.swift" "HandARBrowser/CinemaPlayback.swift" "HandARBrowser/Info.plist" "HandARBrowser/WebInput.js"; do
   [[ -f "$f" ]] && echo "[OK] $f" || { echo "[FAIL] missing $f"; exit 1; }
 done
@@ -56,7 +56,8 @@ grep -Fq "func resetPanelToDefaultSizeInstantly()" "$SRC"
 grep -Fq "extension MainViewController: WKScriptMessageHandler" "$SRC"
 grep -Fq "userContentController.add(WeakScriptMessageHandler(self), name: \"handarVideo\")" "$SRC"
 grep -Fq "removeScriptMessageHandler(forName: \"handarVideo\")" "$SRC"
-grep -Fq "isCinemaMode ? (1.0 / 24.0) : (1.0 / 12.0)" "$SRC"
+grep -Fq "struct VRPerformanceBudget" "$SRC"
+grep -Fq "scheduleBrowserCapture()" "$SRC"
 
 JS="HandARBrowser/WebInput.js"
 grep -Fq "handarVideo" "$JS"
@@ -150,7 +151,7 @@ grep -Fq "NSCameraUsageDescription" HandARBrowser/Info.plist
 ! grep -Fq "let isPinching: Bool" "$SRC"
 ! grep -Fq "cursorNode" "$SRC"
 
-# V69 spatial Home View and common app shell.
+# V70 spatial Home View and common app shell.
 grep -Fq 'class="rail glass"' "$SRC"
 grep -Fq 'class="window-ornament"' "$SRC"
 grep -Fq 'class="spatial-sidebar"' "$SRC"
@@ -158,7 +159,7 @@ grep -Fq 'applySpatialSurface(home: true, transparent: true)' "$SRC"
 grep -Fq 'case "environment-camera", "environment-dark"' "$SRC"
 grep -Fq 'handar-hover' "$JS"
 
-echo "[OK] V69 static project checks"
+echo "[OK] V70 static project checks"
 
 if command -v swiftc >/dev/null 2>&1; then
   # Parser-only validation can fail on Linux because Apple SDK modules are unavailable;

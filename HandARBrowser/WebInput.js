@@ -6,7 +6,7 @@
   }
   let hoverTarget=null;
   function updateHover(target){
-    const next=target.closest('button,a,.app,.btn,.key,.tile,.file-row') || null;
+    const next=target && target.closest ? target.closest('button,a,.app,.btn,.key,.tile,.file-row') : null;
     if(next===hoverTarget)return;
     if(hoverTarget)hoverTarget.classList.remove('handar-hover');
     hoverTarget=next;
@@ -39,10 +39,32 @@
     target.dispatchEvent(new MouseEvent('mouseup',{bubbles:true,cancelable:true,clientX:x,clientY:y,buttons:0}));
     if(!a.moved && Math.hypot(x-(a.startX ?? a.x),y-(a.startY ?? a.y))<52){
       const clickable=target.closest('a,button,input,textarea,select,summary,label,[role=button]')||target;
-      clickable.dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true,clientX:x,clientY:y}));
+      const click=new MouseEvent('click',{bubbles:true,cancelable:true,clientX:x,clientY:y});
+      Object.defineProperty(click,'handarConfirmed',{value:true});
+      clickable.dispatchEvent(click);
     }
     active.delete(id);
   };
+
+  window.__handarPointerCancel=function(x,y,id){
+    active.delete(id);
+    const target=el(x,y);
+    target.dispatchEvent(new PointerEvent('pointercancel',{bubbles:true,pointerId:id,pointerType:'mouse',clientX:x,clientY:y,buttons:0}));
+    target.dispatchEvent(new MouseEvent('mouseup',{bubbles:true,clientX:x,clientY:y,buttons:0}));
+    updateHover(null);
+  };
+  window.__handarClearHover=function(){updateHover(null);};
+
+  // --- Confirmation feedback (one click, no sound on hover/drag) ---
+  document.addEventListener('click', function(event) {
+    if (!event.isTrusted && !event.handarConfirmed) return;
+    const target = event.target && event.target.closest && event.target.closest('button,a,input,select,summary,label,[role=button],.app,.file-row');
+    if (!target || target.disabled || target.getAttribute('aria-disabled') === 'true') return;
+    target.classList.add('handar-confirmed');
+    setTimeout(function(){target.classList.remove('handar-confirmed');}, 200);
+    try { window.webkit.messageHandlers.handarFeedback.postMessage({type:'click'}); } catch(e) {}
+  }, true);
+  // --- End confirmation feedback ---
 
   // --- Кинорежим: сообщаем нативной стороне, когда на странице открыто
   // видео на весь экран (или почти на весь), чтобы она развернула панель

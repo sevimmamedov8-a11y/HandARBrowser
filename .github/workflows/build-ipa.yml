@@ -1,4 +1,4 @@
-name: Build HandAR Vision IPA — V70
+name: Build HandAR Vision IPA — V73
 
 on:
   push:
@@ -30,9 +30,11 @@ jobs:
       - name: Check performance policy and browser regressions
         run: |
           python3 Tests/check_performance.py
+          python3 Tests/check_youtube_url.py
           node --check HandARBrowser/WebInput.js
           node Tests/web-input.cjs
           node Tests/web-performance.cjs
+          node Tests/cinema-playback.cjs
 
       - name: Build iPhoneOS app (unsigned)
         run: ./Scripts/BUILD_UNSIGNED_IPA.command
@@ -44,7 +46,7 @@ jobs:
           /usr/bin/unzip -p build/HandARBrowser-unsigned.ipa Payload/HandARBrowser.app/Info.plist > build/packaged-Info.plist
           /usr/bin/plutil -lint build/packaged-Info.plist
           test "$(/usr/bin/plutil -extract CFBundleDisplayName raw -o - build/packaged-Info.plist)" = "HandAR Vision"
-          test "$(/usr/bin/plutil -extract CFBundleVersion raw -o - build/packaged-Info.plist)" = "70"
+          test "$(/usr/bin/plutil -extract CFBundleVersion raw -o - build/packaged-Info.plist)" = "73"
           echo "IPA OK"
 
       - name: Upload IPA artifact

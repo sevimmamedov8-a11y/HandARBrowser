@@ -166,7 +166,7 @@ private final class CineButton {
     func setHighlight(_ highlighted: Bool) {
         let material = plate.geometry?.firstMaterial
         material?.diffuse.contents = highlighted
-            ? UIColor.white.withAlphaComponent(0.95)
+            ? UIColor(white: 0.58, alpha: 0.95)
             : base.withAlphaComponent(0.95)
         material?.emission.contents = highlighted
             ? base.withAlphaComponent(0.9)
@@ -190,6 +190,7 @@ final class CinemaHall {
     var onExitRequested: (() -> Void)?
     var onToggleLights: ((Bool) -> Void)?
     var onPlayPause: (() -> Void)?
+    var onInteraction: (() -> Void)?
     var onVolume: ((Float) -> Void)?
     var onSeek: ((Double) -> Void)?
     var onRestart: (() -> Void)?
@@ -758,6 +759,7 @@ final class CinemaHall {
         }
 
         guard pressed, let ray else { return false }
+        if allButtons.contains(where: { $0.hitTest(ray: ray) }) { onInteraction?() }
 
         if lightButton.hitTest(ray: ray) {
             setLights(!lightsOn)

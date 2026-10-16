@@ -1,6 +1,12 @@
-# HandAR Vision — V70
+# HandAR Vision — V73
 
-Оптимизация и проверки: `V70_RELEASE_NOTES_RU.md`.
+Прямой запуск YouTube: `V73_RELEASE_NOTES_RU.md`.
+
+Подтверждение действий и резервный видеоплеер: `V72_RELEASE_NOTES_RU.md`.
+
+Исправления меню и контраста: `V71_RELEASE_NOTES_RU.md`.
+
+Оптимизация V70: `V70_RELEASE_NOTES_RU.md`.
 
 Интерфейс и ограничения: `V69_RELEASE_NOTES_RU.md`. Исправления плеера: `V68_RELEASE_NOTES_RU.md`. Ниже сохранена история архитектуры.
 

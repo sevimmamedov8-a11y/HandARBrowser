@@ -1,4 +1,4 @@
-HANDAR VISION V70
+HANDAR VISION V73
 
 1. Открой HandARBrowser.xcodeproj на macOS с Xcode и iOS SDK.
 2. Выбери iPhone, команду подписи и собери приложение.
@@ -11,3 +11,9 @@ HANDAR VISION V70
 Поддержка YouTube зависит от доступного прямого потока; blob/DRM не преобразуются в AVPlayer.
 
 Оптимизация: V70_RELEASE_NOTES_RU.md.
+
+Исправления меню и контраста: V71_RELEASE_NOTES_RU.md.
+
+Подтверждение действий и видео: V72_RELEASE_NOTES_RU.md.
+
+Прямой запуск YouTube: V73_RELEASE_NOTES_RU.md.

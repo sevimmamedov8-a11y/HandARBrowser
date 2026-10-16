@@ -23,4 +23,4 @@ print("PASS: 33 performance policy checks")
 with tempfile.TemporaryDirectory(prefix='handar-policy-') as directory:
     script=Path(directory)/'policy.swift'
     script.write_text(source[start:end]+tests,encoding='utf-8')
-    subprocess.run(['swift',str(script)],check=True)
+    subprocess.run(['swift',str(script)],check=True,timeout=30)

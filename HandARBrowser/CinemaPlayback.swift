@@ -25,6 +25,7 @@ final class CinemaPlayback: NSObject {
     private var endObserver: NSObjectProtocol?
     private var failureObserver: NSObjectProtocol?
     private var generation = UUID()
+    private var loadTimeout: DispatchWorkItem?
 
     /// Показатель того, что экран зала уже переключён на плеер.
     private weak var screenMaterial: SCNMaterial?
@@ -61,6 +62,14 @@ final class CinemaPlayback: NSObject {
             self.onFailed?("Воспроизведение потока прервано")
         }
 
+        let timeout = DispatchWorkItem { [weak self] in
+            guard let self, self.generation == loadGeneration else { return }
+            self.release()
+            self.onFailed?("Поток не загрузился за 20 секунд")
+        }
+        loadTimeout = timeout
+        DispatchQueue.main.asyncAfter(deadline: .now() + 20, execute: timeout)
+
         // Статус приходит с внутренней очереди AVFoundation, а материал
         // и UIKit можно трогать только с главной — переводим сами.
         statusObserver = item.observe(\.status, options: [.new, .initial]) { [weak self] item, _ in
@@ -71,6 +80,8 @@ final class CinemaPlayback: NSObject {
             DispatchQueue.main.async {
                 guard self.generation == loadGeneration else { return }
                 if status == .readyToPlay {
+                    self.loadTimeout?.cancel()
+                    self.loadTimeout = nil
                     self.duration = seconds.isFinite ? seconds : 0
                     self.startProgress()
                     self.onStarted?()
@@ -169,6 +180,8 @@ final class CinemaPlayback: NSObject {
     // MARK: Стоп
 
     func release() {
+        loadTimeout?.cancel()
+        loadTimeout = nil
         generation = UUID()
         if let endObserver { NotificationCenter.default.removeObserver(endObserver) }
         if let failureObserver { NotificationCenter.default.removeObserver(failureObserver) }

@@ -4,13 +4,22 @@
     const e=document.elementFromPoint(x,y);
     return e || document.body;
   }
+  let hoverTarget=null;
+  function updateHover(target){
+    const next=target.closest('button,a,.app,.btn,.key,.tile,.file-row') || null;
+    if(next===hoverTarget)return;
+    if(hoverTarget)hoverTarget.classList.remove('handar-hover');
+    hoverTarget=next;
+    if(hoverTarget)hoverTarget.classList.add('handar-hover');
+  }
   window.__handarHover=function(x,y){
     const target=el(x,y);
+    updateHover(target);
     target.dispatchEvent(new PointerEvent('pointermove',{bubbles:true,cancelable:true,pointerId:1,pointerType:'mouse',clientX:x,clientY:y,buttons:0}));
     target.dispatchEvent(new MouseEvent('mousemove',{bubbles:true,cancelable:true,clientX:x,clientY:y,buttons:0}));
   };
   window.__handarPointerDown=function(x,y,id){
-    active.set(id,{x,y});
+    active.set(id,{x,y,startX:x,startY:y,moved:false});
     const target=el(x,y);
     target.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true,cancelable:true,pointerId:id,pointerType:'mouse',clientX:x,clientY:y,buttons:1}));
     target.dispatchEvent(new MouseEvent('mousedown',{bubbles:true,cancelable:true,clientX:x,clientY:y,buttons:1}));
@@ -19,17 +28,18 @@
     const target=el(x,y);
     target.dispatchEvent(new PointerEvent('pointermove',{bubbles:true,cancelable:true,pointerId:id,pointerType:'mouse',clientX:x,clientY:y,buttons:1}));
     target.dispatchEvent(new MouseEvent('mousemove',{bubbles:true,cancelable:true,clientX:x,clientY:y,buttons:1}));
-    active.set(id,{x,y});
+    const start=active.get(id)||{startX:x,startY:y};
+    active.set(id,{x,y,startX:start.startX,startY:start.startY,
+      moved:start.moved || Math.hypot(x-start.startX,y-start.startY)>=52});
   };
   window.__handarPointerUp=function(x,y,id){
     const a=active.get(id)||{x,y};
     const target=el(x,y);
     target.dispatchEvent(new PointerEvent('pointerup',{bubbles:true,cancelable:true,pointerId:id,pointerType:'mouse',clientX:x,clientY:y,buttons:0}));
     target.dispatchEvent(new MouseEvent('mouseup',{bubbles:true,cancelable:true,clientX:x,clientY:y,buttons:0}));
-    if(Math.hypot(x-a.x,y-a.y)<52){
+    if(!a.moved && Math.hypot(x-(a.startX ?? a.x),y-(a.startY ?? a.y))<52){
       const clickable=target.closest('a,button,input,textarea,select,summary,label,[role=button]')||target;
       clickable.dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true,clientX:x,clientY:y}));
-      if(typeof clickable.click==='function'){try{clickable.click();}catch(e){}}
     }
     active.delete(id);
   };

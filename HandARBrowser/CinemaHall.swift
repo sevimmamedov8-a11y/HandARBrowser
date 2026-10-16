@@ -126,7 +126,8 @@ private final class CineButton {
 
         let box = SCNBox(width: CGFloat(width), height: CGFloat(height), length: 0.026, chamferRadius: 0.024)
         let material = SCNMaterial()
-        material.cineConstant(color.withAlphaComponent(0.95), emissive: 0.22)
+        material.cineConstant(color.withAlphaComponent(0.78), emissive: 0.10)
+        material.blendMode = .alpha
         box.materials = [material]
         plate = SCNNode(geometry: box)
         node.addChildNode(plate)
@@ -136,7 +137,7 @@ private final class CineButton {
     }
 
     func setTitle(_ title: String) {
-        guard let image = renderTextImage(title, color: .white, fontSize: 48, weight: .bold) else {
+        guard let image = renderTextImage(title, color: .white, fontSize: 48, weight: .medium) else {
             textNode.isHidden = true
             return
         }
@@ -207,14 +208,14 @@ final class CinemaHall {
     /// Подпись под экраном: загрузка либо подсказка, если поток не отдан.
     private let noticeLabel = CineText()
 
-    private let lightButton = CineButton(title: "💡 СВЕТ", color: UIColor(red: 0.95, green: 0.75, blue: 0.25, alpha: 1))
-    private let playButton = CineButton(title: "⏯ ПАУЗА", color: UIColor(red: 0.15, green: 0.70, blue: 0.32, alpha: 1))
+    private let lightButton = CineButton(title: "Свет", color: UIColor(white: 0.36, alpha: 1))
+    private let playButton = CineButton(title: "Пауза", color: UIColor(white: 0.36, alpha: 1))
     private let backButton = CineButton(title: "⏪ −10с", color: UIColor(white: 0.34, alpha: 1))
     private let fwdButton = CineButton(title: "⏩ +10с", color: UIColor(white: 0.34, alpha: 1))
-    private let volDownButton = CineButton(title: "🔉", color: UIColor(red: 0.15, green: 0.55, blue: 0.90, alpha: 1))
-    private let volUpButton = CineButton(title: "🔊", color: UIColor(red: 0.15, green: 0.55, blue: 0.90, alpha: 1))
+    private let volDownButton = CineButton(title: "🔉", color: UIColor(white: 0.36, alpha: 1))
+    private let volUpButton = CineButton(title: "🔊", color: UIColor(white: 0.36, alpha: 1))
     private let restartButton = CineButton(title: "🔁", color: UIColor(white: 0.34, alpha: 1))
-    private let exitButton = CineButton(title: "🚪 ВЫХОД", color: UIColor(red: 0.80, green: 0.18, blue: 0.26, alpha: 1))
+    private let exitButton = CineButton(title: "Закрыть", color: UIColor(white: 0.36, alpha: 1))
     private let panelTitle = CineText()
     private let panelHint = CineText()
 
@@ -469,12 +470,12 @@ final class CinemaHall {
         // Неоновая подсветка по бокам.
         let neonCyan = SCNMaterial()
         neonCyan.lightingModel = .constant
-        neonCyan.diffuse.contents = UIColor(red: 0.25, green: 0.9, blue: 1, alpha: 1)
-        neonCyan.emission.contents = UIColor(red: 0.25, green: 0.9, blue: 1, alpha: 1)
+        neonCyan.diffuse.contents = UIColor(white: 0.46, alpha: 1)
+        neonCyan.emission.contents = UIColor(white: 0.46, alpha: 1)
         let neonMagenta = SCNMaterial()
         neonMagenta.lightingModel = .constant
-        neonMagenta.diffuse.contents = UIColor(red: 1, green: 0.30, blue: 0.78, alpha: 1)
-        neonMagenta.emission.contents = UIColor(red: 1, green: 0.30, blue: 0.78, alpha: 1)
+        neonMagenta.diffuse.contents = UIColor(white: 0.46, alpha: 1)
+        neonMagenta.emission.contents = UIColor(white: 0.46, alpha: 1)
         neonNodes = [neonCyan, neonMagenta]
         for (index, side) in [-1.0, 1.0].enumerated() {
             let strip = box(0.07, 0.09, 16, index == 0 ? neonCyan : neonMagenta)
@@ -515,8 +516,8 @@ final class CinemaHall {
         let bezelMat = SCNMaterial(); bezelMat.cineConstant(UIColor(white: 0.04, alpha: 1))
         let ledMat = SCNMaterial()
         ledMat.lightingModel = .constant
-        ledMat.diffuse.contents = UIColor(red: 0.35, green: 0.75, blue: 1, alpha: 1)
-        ledMat.emission.contents = UIColor(red: 0.35, green: 0.75, blue: 1, alpha: 1)
+        ledMat.diffuse.contents = UIColor(white: 0.68, alpha: 1)
+        ledMat.emission.contents = UIColor(white: 0.68, alpha: 1)
 
         let screenZ = -Self.screenDistance
         let bezel = SCNBox(
@@ -583,7 +584,7 @@ final class CinemaHall {
 
         // Вывеска и время сеанса под экраном.
         let sign = CineText()
-        sign.setText("🎬 HANDAR IMAX", color: UIColor(red: 0.92, green: 0.82, blue: 1, alpha: 1))
+        sign.setText("HandAR Cinema", color: UIColor(red: 0.92, green: 0.82, blue: 1, alpha: 1))
         sign.position = SCNVector3(0, Self.seatedEyeHeight + Self.screenHeight * 0.5 + 0.55, screenZ + 0.05)
         sign.fitWidth(3.2)
         root.addChildNode(sign)
@@ -688,7 +689,7 @@ final class CinemaHall {
         // Компактная панель сразу за креслом зрителя.
         let z: Float = 1.62
 
-        panelTitle.setText("🎛 ПУЛЬТ", color: UIColor(red: 0.72, green: 0.86, blue: 1, alpha: 1))
+        panelTitle.setText("Управление", color: UIColor(red: 0.72, green: 0.86, blue: 1, alpha: 1))
         panelTitle.position = SCNVector3(0, 1.74, z)
         panelTitle.scale = SCNVector3(0.0026, 0.0026, 0.0026)
         root.addChildNode(panelTitle)
@@ -736,7 +737,7 @@ final class CinemaHall {
     }
 
     func setPlayingState(_ playing: Bool) {
-        playButton.setTitle(playing ? "⏯ ПАУЗА" : "▶ ИГРАТЬ")
+        playButton.setTitle(playing ? "Пауза" : "Смотреть")
     }
 
     @discardableResult

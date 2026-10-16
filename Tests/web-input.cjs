@@ -1,0 +1,22 @@
+const fs=require('fs'), vm=require('vm'), assert=require('assert');
+const base=require('path').resolve(__dirname,'..')+'/';
+const js=fs.readFileSync(base+'HandARBrowser/WebInput.js','utf8');
+let clicks=0;
+const target={dispatchEvent(e){if(e.type==='click')clicks++},closest(){return this},click(){clicks++}};
+class Event {constructor(type,options){this.type=type;Object.assign(this,options)}}
+const context={window:{},document:{elementFromPoint(){return target}},PointerEvent:Event,MouseEvent:Event};
+vm.createContext(context);
+vm.runInContext(js.split('  // --- Кинорежим:')[0]+'})();',context);
+const w=context.window;
+w.__handarPointerDown(10,10,1);w.__handarPointerUp(10,10,1);assert.equal(clicks,1,'one click per tap');
+w.__handarPointerDown(0,0,1);w.__handarPointerMove(200,0,1);w.__handarPointerUp(200,0,1);assert.equal(clicks,1,'drag must not click');
+w.__handarPointerDown(0,0,1);w.__handarPointerMove(200,0,1);w.__handarPointerMove(0,0,1);w.__handarPointerUp(0,0,1);assert.equal(clicks,1,'returning drag must not click');
+w.__handarPointerDown(10,10,1);w.__handarPointerMove(15,12,1);w.__handarPointerUp(15,12,1);assert.equal(clicks,2,'small jitter still clicks');
+const swift=fs.readFileSync(base+'HandARBrowser/MainViewController.swift','utf8');
+const probe=swift.split('private static let cinemaProbeScript = """')[1].split('    """')[0];
+const video={clientWidth:100,clientHeight:100,currentSrc:'https://example.com/a.m3u8',readyState:1,duration:Infinity,currentTime:0,volume:1};
+const pc={window:{},document:{querySelectorAll(){return [video]}}};vm.createContext(pc);vm.runInContext(probe,pc);
+assert.equal(JSON.parse(pc.window.__handarVideoInfo()).usable,true,'live HLS source');
+video.currentSrc='blob:123';assert.equal(JSON.parse(pc.window.__handarVideoInfo()).usable,false,'blob cannot be native URL');
+video.currentSrc='https://example.com/a.mp4';video.readyState=0;assert.equal(JSON.parse(pc.window.__handarVideoInfo()).usable,false,'wait for metadata');
+console.log('PASS: 7 behavioral checks (tap, drag, returning drag, jitter, HLS, blob, metadata)');

@@ -10,7 +10,7 @@ import UIKit
 /// (кадр видео уходит отдельным слоем), поэтому картинка YouTube в VR
 /// всегда чёрная, а субтитры — DOM-ом — видны. Аппаратный плеер рисует
 /// кадры прямо в сцену SceneKit, ссылку на поток мы забираем у `<video>`
-/// открытой страницы (в iOS YouTube отдаёт HLS прямым URL).
+/// открытой страницы, когда она предоставляет доступный прямой URL.
 final class CinemaPlayback: NSObject {
     var onProgress: ((Double, Double) -> Void)?
     var onFailed: ((String) -> Void)?
@@ -22,6 +22,9 @@ final class CinemaPlayback: NSObject {
     private var player: AVPlayer?
     private var timeObserver: Any?
     private var statusObserver: NSKeyValueObservation?
+    private var endObserver: NSObjectProtocol?
+    private var failureObserver: NSObjectProtocol?
+    private var generation = UUID()
 
     /// Показатель того, что экран зала уже переключён на плеер.
     private weak var screenMaterial: SCNMaterial?
@@ -31,6 +34,7 @@ final class CinemaPlayback: NSObject {
     func load(url: URL, into material: SCNMaterial) {
         release()
         screenMaterial = material
+        let loadGeneration = generation
 
         let asset = AVURLAsset(url: url, options: [
             "AVURLAssetAllowsCellularAccessKey": true
@@ -40,6 +44,23 @@ final class CinemaPlayback: NSObject {
         player.actionAtItemEnd = .pause
         player.automaticallyWaitsToMinimizeStalling = true
 
+        self.player = player
+        isActive = true
+        showIn(material)
+        endObserver = NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemDidPlayToEndTime, object: item, queue: .main
+        ) { [weak self] _ in
+            guard let self, self.generation == loadGeneration else { return }
+            self.isPlaying = false
+        }
+        failureObserver = NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemFailedToPlayToEndTime, object: item, queue: .main
+        ) { [weak self] _ in
+            guard let self, self.generation == loadGeneration else { return }
+            self.release()
+            self.onFailed?("Воспроизведение потока прервано")
+        }
+
         // Статус приходит с внутренней очереди AVFoundation, а материал
         // и UIKit можно трогать только с главной — переводим сами.
         statusObserver = item.observe(\.status, options: [.new, .initial]) { [weak self] item, _ in
@@ -48,20 +69,19 @@ final class CinemaPlayback: NSObject {
             let seconds = item.duration.seconds
             let message = item.error?.localizedDescription ?? "Не удалось запустить видео"
             DispatchQueue.main.async {
+                guard self.generation == loadGeneration else { return }
                 if status == .readyToPlay {
                     self.duration = seconds.isFinite ? seconds : 0
                     self.startProgress()
                     self.onStarted?()
                     self.play()
                 } else if status == .failed {
+                    self.release()
                     self.onFailed?(message)
                 }
             }
         }
 
-        self.player = player
-        isActive = true
-        showIn(material)
     }
 
     /// Переключить экран зала на кадры плеера.
@@ -98,7 +118,8 @@ final class CinemaPlayback: NSObject {
     // MARK: Управление
 
     func play() {
-        player?.play()
+        guard let player else { return }
+        player.play()
         isPlaying = true
     }
 
@@ -112,6 +133,7 @@ final class CinemaPlayback: NSObject {
     }
 
     func setVolume(_ value: Float) {
+        guard value.isFinite else { return }
         player?.volume = min(max(value, 0), 1)
     }
 
@@ -125,8 +147,9 @@ final class CinemaPlayback: NSObject {
     }
 
     func seek(to seconds: Double) {
-        guard let player else { return }
-        let target = CMTime(seconds: max(seconds, 0), preferredTimescale: 600)
+        guard let player, seconds.isFinite else { return }
+        let upper = duration > 0 ? duration : Double.greatestFiniteMagnitude
+        let target = CMTime(seconds: min(max(seconds, 0), upper), preferredTimescale: 600)
         player.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero)
     }
 
@@ -141,9 +164,16 @@ final class CinemaPlayback: NSObject {
         return t.isFinite ? t : 0
     }
 
+    deinit { release() }
+
     // MARK: Стоп
 
     func release() {
+        generation = UUID()
+        if let endObserver { NotificationCenter.default.removeObserver(endObserver) }
+        if let failureObserver { NotificationCenter.default.removeObserver(failureObserver) }
+        endObserver = nil
+        failureObserver = nil
         if let player, let timeObserver {
             player.removeTimeObserver(timeObserver)
         }

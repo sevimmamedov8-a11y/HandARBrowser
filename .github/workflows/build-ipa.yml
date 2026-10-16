@@ -1,4 +1,4 @@
-name: Build HandAR Vision IPA — V50
+name: Build HandAR Vision IPA — V69
 
 on:
   push:
@@ -34,9 +34,11 @@ jobs:
         run: |
           test -f build/HandARBrowser-unsigned.ipa
           /usr/bin/unzip -l build/HandARBrowser-unsigned.ipa | grep -E 'Payload/HandARBrowser.app/' >/dev/null
-          /usr/bin/unzip -p build/HandARBrowser-unsigned.ipa Payload/HandARBrowser.app/Info.plist >/dev/null
+          /usr/bin/unzip -p build/HandARBrowser-unsigned.ipa Payload/HandARBrowser.app/Info.plist > build/packaged-Info.plist
+          /usr/bin/plutil -lint build/packaged-Info.plist
+          test "$(/usr/bin/plutil -extract CFBundleDisplayName raw -o - build/packaged-Info.plist)" = "HandAR Vision"
+          test "$(/usr/bin/plutil -extract CFBundleVersion raw -o - build/packaged-Info.plist)" = "69"
           echo "IPA OK"
-          /usr/bin/unzip -p build/HandARBrowser-unsigned.ipa Payload/HandARBrowser.app/Info.plist | grep -Fq "HandAR Vision"
 
       - name: Upload IPA artifact
         uses: actions/upload-artifact@v4

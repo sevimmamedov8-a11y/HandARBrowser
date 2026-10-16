@@ -421,6 +421,17 @@ struct ToolbarItem {
 
 // MARK: - Главный контроллер ---------------------------------------------------
 
+private final class WeakScriptMessageHandler: NSObject, WKScriptMessageHandler {
+    weak var target: WKScriptMessageHandler?
+
+    init(_ target: WKScriptMessageHandler) { self.target = target }
+
+    func userContentController(_ userContentController: WKUserContentController,
+                               didReceive message: WKScriptMessage) {
+        target?.userContentController(userContentController, didReceive: message)
+    }
+}
+
 final class MainViewController: UIViewController, MTKViewDelegate {
     private let tracking = ARStereoTrackingManager()
     private let hands = HandTracker()
@@ -429,6 +440,9 @@ final class MainViewController: UIViewController, MTKViewDelegate {
 
     // Одна логическая поверхность браузера. Стерео рождается из двух камер,
     // а не из двух копий страницы.
+    private var spatialHomeVisible = true
+    private let browserFrameNode = SCNNode()
+
     private let browser: WKWebView = {
         let config = WKWebViewConfiguration()
         config.defaultWebpagePreferences.allowsContentJavaScript = true
@@ -464,9 +478,9 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         config.userContentController = controller
 
         let webView = WKWebView(frame: .zero, configuration: config)
-        webView.isOpaque = true
-        webView.backgroundColor = .white
-        webView.scrollView.backgroundColor = .white
+        webView.isOpaque = false
+        webView.backgroundColor = .clear
+        webView.scrollView.backgroundColor = .clear
         webView.scrollView.alwaysBounceVertical = true
         webView.allowsBackForwardNavigationGestures = false
         webView.customUserAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 26_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Mobile/15E148 Safari/604.1"
@@ -556,6 +570,8 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     private let cinemaHall = CinemaHall()
     private let cinemaPlayback = CinemaPlayback()
     private var cinemaProbeTimer: Timer?
+    private var cinemaProbeGeneration = UUID()
+    private var snapshotGeneration = UUID()
     /// Ссылка, которую открыли в зале: её же пробник перезагружает,
     /// если страница не отдала поток с первого раза.
     private var cinemaSourceURL: URL?
@@ -700,18 +716,20 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     """
 
     private func isDirectMediaURL(_ url: URL) -> Bool {
-        let suffixes = [".mp4", ".m3u8", ".mpd", ".webm", ".mov", ".mkv", ".m4v"]
-        let path = url.absoluteString.lowercased()
-        return suffixes.contains { path.hasSuffix($0) || path.contains($0 + "?") }
+        let extensions = ["mp4", "m3u8", "mov", "m4v"]
+        return extensions.contains(url.pathExtension.lowercased())
     }
 
     /// YouTube — в минимальный embed: без шапки, рекомендаций и кнопок,
-    /// сразу полноэкранное видео. На iOS его <video> отдаёт HLS прямым URL,
-    /// который забирает пробник и играет нативным AVPlayer.
+    /// сразу полноэкранное видео. Пробник использует прямой URL, если сайт
+    /// его предоставляет; blob/DRM-потоки этим способом недоступны.
     private func youtubeEmbedURL(_ url: URL) -> URL? {
-        guard let host = url.host?.lowercased(), host.contains("youtu") else { return nil }
+        guard let host = url.host?.lowercased(),
+              host == "youtu.be" || host == "youtube.com" || host.hasSuffix(".youtube.com") ||
+              host == "youtube-nocookie.com" || host.hasSuffix(".youtube-nocookie.com")
+        else { return nil }
         var id: String?
-        if host.contains("youtu.be") {
+        if host == "youtu.be" {
             id = url.lastPathComponent
         } else if let value = URLComponents(url: url, resolvingAgainstBaseURL: false)?
             .queryItems?.first(where: { $0.name == "v" })?.value {
@@ -722,7 +740,9 @@ final class MainViewController: UIViewController, MTKViewDelegate {
                 id = url.lastPathComponent
             }
         }
-        guard let id, id.count >= 6 else { return nil }
+        guard let id, id.count == 11,
+              id.range(of: "^[A-Za-z0-9_-]{11}$", options: .regularExpression) != nil
+        else { return nil }
         var components = URLComponents(string: "https://www.youtube-nocookie.com/embed/\(id)")!
         components.queryItems = [
             URLQueryItem(name: "playsinline", value: "1"),
@@ -780,6 +800,9 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     }
 
     deinit {
+        cinemaProbeTimer?.invalidate()
+        cinemaPlayback.release()
+        tracking.pause()
         browserTimer?.invalidate()
         directVideoSyncTimer?.invalidate()
         removeDirectVideoMessageHandlers()
@@ -880,6 +903,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         )
         geometry.widthSegmentCount = 1
         geometry.heightSegmentCount = 1
+        geometry.cornerRadius = 0.045
 
         browserMaterial.lightingModel = .constant
         browserMaterial.isDoubleSided = true
@@ -889,6 +913,8 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         browserMaterial.diffuse.wrapS = .clamp
         browserMaterial.diffuse.wrapT = .clamp
         browserMaterial.shininess = 0
+        browserMaterial.blendMode = .alpha
+        browserMaterial.writesToDepthBuffer = false
         geometry.firstMaterial = browserMaterial
         browserPlaneGeometry = geometry
 
@@ -909,7 +935,9 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         frameMaterial.emission.contents = UIColor(white: 0.10, alpha: 1)
         frameGeometry.firstMaterial = frameMaterial
         browserFrameGeometry = frameGeometry
-        let frameNode = SCNNode(geometry: frameGeometry)
+        let frameNode = browserFrameNode
+        frameNode.geometry = frameGeometry
+        frameNode.isHidden = true
         frameNode.position = SCNVector3(0, 0, -0.005)
         browserPlaneNode.addChildNode(frameNode)
 
@@ -1002,11 +1030,11 @@ final class MainViewController: UIViewController, MTKViewDelegate {
 
         let gap: Float = 0.014
         let count = Float(items.count)
-        let buttonWidth = (browserWorldWidth - gap * (count - 1)) / count
-        toolbarCenterY = browserWorldHeight * 0.5 + 0.02 + toolbarButtonHeight * 0.5
+        let buttonWidth = min(0.32, (browserWorldWidth - gap * (count - 1)) / count)
+        toolbarCenterY = -browserWorldHeight * 0.5 - 0.085 - toolbarButtonHeight * 0.5
 
         for index in items.indices {
-            let minX = -browserWorldWidth * 0.5 + Float(index) * (buttonWidth + gap)
+            let minX = -(buttonWidth * count + gap * (count - 1)) * 0.5 + Float(index) * (buttonWidth + gap)
             items[index].minX = minX
             items[index].maxX = minX + buttonWidth
 
@@ -1045,14 +1073,14 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         let renderer = UIGraphicsImageRenderer(size: size)
         return renderer.image { context in
             let rect = CGRect(origin: .zero, size: size)
-            let path = UIBezierPath(roundedRect: rect.insetBy(dx: 4, dy: 4), cornerRadius: 30)
+            let path = UIBezierPath(roundedRect: rect.insetBy(dx: 4, dy: 4), cornerRadius: 54)
             let background = highlighted
-                ? UIColor(red: 0.30, green: 0.68, blue: 0.95, alpha: 1)
-                : UIColor(white: 0.14, alpha: 1)
+                ? UIColor(white: 0.92, alpha: 0.95)
+                : UIColor(white: 0.38, alpha: 0.78)
             background.setFill()
             path.fill()
 
-            UIColor(white: highlighted ? 1.0 : 0.42, alpha: 1).setStroke()
+            UIColor(white: highlighted ? 1.0 : 0.85, alpha: 0.45).setStroke()
             path.lineWidth = 4
             path.stroke()
 
@@ -1494,9 +1522,9 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         // WebInput.js следит за плеером страницы и шлёт сюда true/false,
         // когда видео на YouTube/TikTok разворачивается на весь экран —
         // это и включает кинорежим.
-        browser.configuration.userContentController.add(self, name: "handarVideo")
-        browser.configuration.userContentController.add(self, name: "handarApp")
-        browser.configuration.userContentController.add(self, name: "handarSystem")
+        browser.configuration.userContentController.add(WeakScriptMessageHandler(self), name: "handarVideo")
+        browser.configuration.userContentController.add(WeakScriptMessageHandler(self), name: "handarApp")
+        browser.configuration.userContentController.add(WeakScriptMessageHandler(self), name: "handarSystem")
         browser.loadHTMLString(Self.vrDesktopHTML, baseURL: URL(string: "https://handar.vision/") )
     }
 
@@ -1710,7 +1738,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
 
         updatePanelSize(width: browserWorldWidth)
         toolbarNode.opacity = 1
-        toolbarNode.isHidden = false
+        toolbarNode.isHidden = !browser.isOpaque
     }
 
     private func setVRVisible(_ visible: Bool) {
@@ -1783,6 +1811,9 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     /// Вход в 3D-кинозал. Браузерная панель становится экраном, вокруг неё
     /// строится зал с креслами и панелью управления за спиной.
     private func enterCinema(url: URL?) {
+        applySpatialSurface(home: false, transparent: false)
+        stopCinemaProbe()
+        cinemaPlayback.release()
         if !inVR {
             inVR = true
             didCreateInitialAnchor = false
@@ -1819,6 +1850,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         cinemaHall.onRestart = { [weak self] in self?.cinemaRestart() }
         cinemaPlayback.onProgress = { [weak self] current, duration in
             self?.cinemaHall.setTime(current: current, duration: duration)
+            if let self { self.cinemaHall.setPlayingState(self.cinemaPlayback.isPlaying) }
         }
         cinemaPlayback.onStarted = { [weak self] in
             self?.cinemaHall.setNotice("")
@@ -1826,7 +1858,13 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         cinemaPlayback.onFailed = { [weak self] message in
             guard let self else { return }
             NSLog("HandAR cinema playback failed: %@", message)
-            // Не вышли из зала: кадры снова пойдут снимками страницы.
+            guard self.cinemaActive else { return }
+            self.cinemaHall.setPlayingState(false)
+            self.cinemaHall.setNotice("Не удалось воспроизвести поток. Открой прямую ссылку MP4/HLS.")
+            self.browser.evaluateJavaScript(
+                "window.__handarCinemaCommand && window.__handarCinemaCommand('unmute');",
+                completionHandler: nil
+            )
             self.startBrowserCapture()
         }
         cinemaHall.start(in: worldScene, cameraOrigin: headNode.simdWorldPosition, cameraForward: forward)
@@ -1870,15 +1908,18 @@ final class MainViewController: UIViewController, MTKViewDelegate {
 
     private func startCinemaProbe() {
         cinemaProbeTimer?.invalidate()
+        cinemaProbeGeneration = UUID()
+        let generation = cinemaProbeGeneration
         var attempts = 0
         cinemaProbeTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
             guard let self else { return }
+            guard self.cinemaActive else { self.stopCinemaProbe(); return }
             attempts += 1
             guard attempts < 120 else {
                 // Поток так и не отдан. Экран уже рисует снимки страницы,
                 // но на случай, если и они чёрные — честная подпись.
                 self.stopCinemaProbe()
-                self.cinemaHall.setNotice("видео не отвечает — нажми 🔁 или вставь ссылку .mp4")
+                self.cinemaHall.setNotice("Нет доступного прямого потока. Открой ссылку MP4/HLS.")
                 return
             }
             guard !self.cinemaPlayback.isActive else {
@@ -1893,7 +1934,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
             self.browser.evaluateJavaScript(
                 "window.__handarVideoInfo ? window.__handarVideoInfo() : 'null';"
             ) { [weak self] raw, _ in
-                guard let self,
+                guard let self, self.cinemaActive, self.cinemaProbeGeneration == generation, !self.cinemaPlayback.isActive,
                       let raw = raw as? String, raw != "null",
                       let data = raw.data(using: .utf8),
                       let info = try? JSONSerialization.jsonObject(with: data),
@@ -1925,6 +1966,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     }
 
     private func stopCinemaProbe() {
+        cinemaProbeGeneration = UUID()
         cinemaProbeTimer?.invalidate()
         cinemaProbeTimer = nil
     }
@@ -1969,7 +2011,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     }
 
     private func cinemaVolume(_ delta: Float) {
-        guard cinemaPlayback.isActive else { return }
+        guard cinemaPlayback.isActive else { adjustCinemaVolume(delta); return }
         cinemaPlayback.volume += delta
     }
 
@@ -2197,6 +2239,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     }
 
     private func stopBrowserCapture() {
+        snapshotGeneration = UUID()
         browserTimer?.invalidate()
         browserTimer = nil
     }
@@ -2207,6 +2250,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         guard inVR, !directVideoActive, !snapshotInProgress, !cinemaPlayback.isActive else { return }
         guard browser.bounds.width > 1, browser.bounds.height > 1 else { return }
         snapshotInProgress = true
+        let generation = snapshotGeneration
 
         let configuration = WKSnapshotConfiguration()
         // Кинопанель почти вдвое шире обычной — тот же снимок на ней
@@ -2216,7 +2260,8 @@ final class MainViewController: UIViewController, MTKViewDelegate {
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.snapshotInProgress = false
-                guard let image else { return }
+                guard self.snapshotGeneration == generation, self.inVR, !self.directVideoActive, !self.cinemaPlayback.isActive,
+                      let image else { return }
                 self.browserMaterial.diffuse.contents = image
                 self.browserMaterial.emission.contents = image
             }
@@ -2461,7 +2506,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
 
         // Планка ссылок над браузером. Во время видео она скрыта —
         // пропускаем и зону попадания, иначе палец «щёлкал» бы по невидимке.
-        if !isCinemaMode, abs(hit.localY - toolbarCenterY) <= toolbarButtonHeight * 0.5 {
+        if !isCinemaMode, !toolbarNode.isHidden, abs(hit.localY - toolbarCenterY) <= toolbarButtonHeight * 0.5 {
             let index = linkItems.firstIndex { hit.localX >= $0.minX && hit.localX <= $0.maxX }
             highlightToolbar(index)
             releasePointer()
@@ -2536,10 +2581,10 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         let gap: Float = 0.014
         let count = Float(toolbarButtonNodes.count)
         if count > 0 {
-            let buttonWidth = max(0.06, (browserWorldWidth - gap * (count - 1)) / count)
-            toolbarCenterY = browserWorldHeight * 0.5 + 0.02 + toolbarButtonHeight * 0.5
+            let buttonWidth = min(0.32, max(0.06, (browserWorldWidth - gap * (count - 1)) / count))
+            toolbarCenterY = -browserWorldHeight * 0.5 - 0.085 - toolbarButtonHeight * 0.5
             for index in toolbarButtonNodes.indices {
-                let minX = -browserWorldWidth * 0.5 + Float(index) * (buttonWidth + gap)
+                let minX = -(buttonWidth * count + gap * (count - 1)) * 0.5 + Float(index) * (buttonWidth + gap)
                 linkItems[index].minX = minX
                 linkItems[index].maxX = minX + buttonWidth
                 if let plane = toolbarButtonNodes[index].geometry as? SCNPlane {
@@ -3042,10 +3087,11 @@ final class MainViewController: UIViewController, MTKViewDelegate {
             encoder.endEncoding()
         }
 
-        commandBuffer.addCompletedHandler { [weak self] _ in
-            DispatchQueue.main.async {
-                self?.retainedCameraTextures.removeAll()
-            }
+        // Each submitted frame owns its wrappers until that GPU command completes.
+        let frameTextures = retainedCameraTextures
+        retainedCameraTextures.removeAll()
+        commandBuffer.addCompletedHandler { [frameTextures] _ in
+            withExtendedLifetime(frameTextures) {}
         }
 
         commandBuffer.present(drawable)
@@ -3241,180 +3287,62 @@ extension MainViewController: WKScriptMessageHandler {
 
 extension MainViewController {
     private static let vrDesktopHTML = #"""
-<!doctype html>
-<html lang="ru">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
-<title>HandAR VR Desktop</title>
-<style>
-:root{
-  --text:#ffffff;
-  --muted:rgba(255,255,255,.62);
-  --faint:rgba(255,255,255,.38);
-  --glass:rgba(255,255,255,.07);
-  --stroke:rgba(255,255,255,.15);
-}
+<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><title>HandAR · Главный экран</title><style>:root{color-scheme:dark;--text:#fff;--muted:#ffffffa3;--glass:linear-gradient(150deg,#e5e5e54a,#7171713b 45%,#d6d6d633);--edge:#ffffff47}
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
-html,body{margin:0;width:100%;height:100%;overflow:hidden;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","SF Pro Text","Helvetica Neue",Arial,sans-serif;color:var(--text);
-  background:
-    radial-gradient(120% 90% at 18% 0%, #1b2a5e 0%, transparent 55%),
-    radial-gradient(120% 100% at 85% 15%, #3a1c5e 0%, transparent 55%),
-    linear-gradient(160deg,#070a18 0%,#0d1024 45%,#070918 100%);}
-body{user-select:none;-webkit-user-select:none}
-
-/* ---- Фон: аврора + звёзды + виньетка ---- */
-.scene{position:fixed;inset:0;overflow:hidden;pointer-events:none;z-index:0}
-.aurora{position:absolute;border-radius:50%;filter:blur(70px);opacity:.55;will-change:transform}
-.aurora.a1{width:52vmax;height:52vmax;left:-12vmax;top:-18vmax;background:radial-gradient(circle,#2f6bff 0%,transparent 62%);animation:drift1 26s ease-in-out infinite alternate}
-.aurora.a2{width:46vmax;height:46vmax;right:-14vmax;top:-10vmax;background:radial-gradient(circle,#b14bff 0%,transparent 62%);animation:drift2 32s ease-in-out infinite alternate}
-.aurora.a3{width:44vmax;height:44vmax;left:26vw;bottom:-24vmax;background:radial-gradient(circle,#18c8d8 0%,transparent 62%);opacity:.34;animation:drift3 38s ease-in-out infinite alternate}
-.stars{position:absolute;inset:0;opacity:.5;background-image:radial-gradient(1.3px 1.3px at 12% 24%,rgba(255,255,255,.5),transparent 55%),radial-gradient(1px 1px at 34% 12%,rgba(255,255,255,.4),transparent 55%),radial-gradient(1.4px 1.4px at 58% 30%,rgba(255,255,255,.35),transparent 55%),radial-gradient(1px 1px at 76% 16%,rgba(255,255,255,.45),transparent 55%),radial-gradient(1.3px 1.3px at 88% 44%,rgba(255,255,255,.3),transparent 55%),radial-gradient(1px 1px at 44% 58%,rgba(255,255,255,.3),transparent 55%),radial-gradient(1.2px 1.2px at 18% 72%,rgba(255,255,255,.3),transparent 55%),radial-gradient(1px 1px at 66% 78%,rgba(255,255,255,.28),transparent 55%)}
-.vignette{position:absolute;inset:0;background:radial-gradient(120% 120% at 50% 50%,transparent 55%,rgba(0,0,0,.55) 100%)}
-@keyframes drift1{from{transform:translate(0,0) scale(1)}to{transform:translate(9vw,6vh) scale(1.15)}}
-@keyframes drift2{from{transform:translate(0,0) scale(1.1)}to{transform:translate(-8vw,8vh) scale(.95)}}
-@keyframes drift3{from{transform:translate(0,0) scale(1)}to{transform:translate(-6vw,-5vh) scale(1.2)}}
-
-/* ---- Каркас ---- */
-.wall{position:relative;z-index:1;height:100%;padding:22px 34px 18px;display:flex;flex-direction:column;gap:15px}
-
-/* ---- Статусная строка ---- */
-.statusbar{display:flex;align-items:center;justify-content:space-between;height:44px}
-.clockwrap{display:flex;flex-direction:column;line-height:1}
-.clock{font-size:26px;font-weight:750;letter-spacing:.5px;font-variant-numeric:tabular-nums;text-shadow:0 2px 14px rgba(0,0,0,.4)}
-.date{font-size:12px;color:var(--muted);font-weight:550;margin-top:3px}
-.brand{font-size:12px;letter-spacing:3px;font-weight:700;color:var(--faint)}
-.brand b{color:var(--text)}
-.chips{display:flex;gap:8px;align-items:center}
-.chip{display:inline-flex;align-items:center;gap:6px;padding:7px 12px;border-radius:999px;background:var(--glass);border:1px solid var(--stroke);backdrop-filter:blur(18px) saturate(140%);font-size:12px;font-weight:600;color:var(--muted);white-space:nowrap}
-.chip.vr{color:#fff;background:linear-gradient(135deg,rgba(84,169,255,.35),rgba(180,75,255,.35));border-color:rgba(255,255,255,.28);text-shadow:0 1px 8px rgba(0,0,0,.3)}
-
-/* ---- Приветствие ---- */
-.greeting{display:flex;align-items:flex-end;justify-content:space-between;gap:16px}
-.greeting h1{margin:0;font-size:38px;font-weight:760;letter-spacing:-.5px;text-shadow:0 4px 24px rgba(0,0,0,.4)}
-.greeting p{margin:4px 0 0;font-size:14px;color:var(--muted);font-weight:500}
-
-/* ---- Поиск ---- */
-.search{position:relative;height:56px;border-radius:20px;background:var(--glass);border:1px solid var(--stroke);backdrop-filter:blur(26px) saturate(150%);display:flex;align-items:center;gap:13px;padding:0 19px;font-size:16px;color:#fff;box-shadow:inset 0 1px 0 rgba(255,255,255,.12),0 14px 34px rgba(0,0,0,.28);overflow:hidden;cursor:pointer}
-.searchIcon{font-size:21px;opacity:.95}
-.searchText{opacity:.82;font-weight:560}
-.searchHint{margin-left:auto;font-size:12px;opacity:.62;font-weight:650;padding:6px 11px;border-radius:10px;background:rgba(0,0,0,.2);border:1px solid rgba(255,255,255,.1)}
-.search .shine{position:absolute;top:0;bottom:0;width:120px;left:-160px;background:linear-gradient(105deg,transparent,rgba(255,255,255,.16),transparent);transform:skewX(-18deg);animation:shine 6.5s ease-in-out infinite}
-@keyframes shine{0%,55%{left:-160px}90%,100%{left:110%}}
-
-/* ---- Сетка приложений ---- */
-.grid{flex:1;display:grid;grid-template-columns:repeat(6,1fr);grid-auto-rows:minmax(86px,1fr);gap:10px 12px;align-items:start;padding:2px 4px 0;min-height:0}
-.app{min-width:0;display:flex;flex-direction:column;align-items:center;gap:7px;text-align:center;cursor:pointer;opacity:0;animation:rise .5s cubic-bezier(.2,.7,.3,1) both}
-@keyframes rise{from{opacity:0;transform:translateY(16px)}to{opacity:1;transform:translateY(0)}}
-.app:nth-child(1){animation-delay:.02s}.app:nth-child(2){animation-delay:.05s}.app:nth-child(3){animation-delay:.08s}.app:nth-child(4){animation-delay:.11s}.app:nth-child(5){animation-delay:.14s}.app:nth-child(6){animation-delay:.17s}.app:nth-child(7){animation-delay:.20s}.app:nth-child(8){animation-delay:.23s}.app:nth-child(9){animation-delay:.26s}.app:nth-child(10){animation-delay:.29s}.app:nth-child(11){animation-delay:.32s}.app:nth-child(12){animation-delay:.35s}.app:nth-child(13){animation-delay:.38s}.app:nth-child(14){animation-delay:.41s}.app:nth-child(15){animation-delay:.44s}.app:nth-child(16){animation-delay:.47s}.app:nth-child(17){animation-delay:.50s}.app:nth-child(18){animation-delay:.53s}.app:nth-child(19){animation-delay:.56s}
-
-/* ---- Иконки ---- */
-.icon{position:relative;width:62px;height:62px;border-radius:19px;display:flex;align-items:center;justify-content:center;overflow:hidden;background:linear-gradient(145deg,var(--a),var(--b));
-  box-shadow:inset 0 1px 1px rgba(255,255,255,.4),inset 0 -10px 16px rgba(0,0,0,.22),0 10px 22px -4px var(--glow);
-  border:1px solid rgba(255,255,255,.22);transition:transform .22s cubic-bezier(.2,.7,.3,1.4),box-shadow .22s ease}
-.icon:after{content:"";position:absolute;inset:0;border-radius:inherit;background:radial-gradient(120% 60% at 50% 0%,rgba(255,255,255,.4),transparent 55%)}
-.icon svg{width:33px;height:33px;fill:none;stroke:#fff;stroke-width:2.1;stroke-linecap:round;stroke-linejoin:round;filter:drop-shadow(0 1px 2px rgba(0,0,0,.35))}
-.icon .solid{fill:#fff;stroke:none}
-.app span{display:block;font-size:12.5px;line-height:15px;font-weight:600;max-width:96px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-shadow:0 1px 6px rgba(0,0,0,.5)}
-.app:hover .icon{transform:translateY(-4px) scale(1.07);box-shadow:inset 0 1px 1px rgba(255,255,255,.4),inset 0 -10px 16px rgba(0,0,0,.22),0 16px 34px -4px var(--glow),0 0 0 5px rgba(255,255,255,.07)}
-.app:hover span{color:#fff}
-.app:active .icon{transform:scale(.94)}
-
-/* Палитра приложений */
-.blue{--a:#54a9ff;--b:#1866e8;--glow:rgba(84,169,255,.5)}
-.red{--a:#ff5f6d;--b:#c8102e;--glow:rgba(255,95,109,.5)}
-.pink{--a:#ff5bb8;--b:#7d26ff;--glow:rgba(255,91,184,.5)}
-.teal{--a:#42d9ca;--b:#007d87;--glow:rgba(66,217,202,.5)}
-.indigo{--a:#7e82ff;--b:#4647b9;--glow:rgba(126,130,255,.5)}
-.green{--a:#55df76;--b:#159447;--glow:rgba(85,223,118,.5)}
-.cyan{--a:#55d8ff;--b:#1a74db;--glow:rgba(85,216,255,.5)}
-.orange{--a:#ffb657;--b:#e46710;--glow:rgba(255,182,87,.5)}
-.purple{--a:#a855f7;--b:#5b21b6;--glow:rgba(168,85,247,.5)}
-.gray{--a:#8b93a3;--b:#3c4350;--glow:rgba(139,147,163,.4)}
-.dark{--a:#2b3340;--b:#11151d;--glow:rgba(20,24,32,.6)}
-
-/* ---- Док ---- */
-.dockwrap{position:relative;display:flex;flex-direction:column;align-items:center}
-.dock{height:80px;border-radius:26px;background:rgba(235,240,255,.13);border:1px solid rgba(255,255,255,.24);backdrop-filter:blur(30px) saturate(160%);display:flex;align-items:center;justify-content:space-around;gap:10px;padding:9px 20px;box-shadow:inset 0 1px 0 rgba(255,255,255,.25),0 18px 40px rgba(0,0,0,.35)}
-.dock .app{flex-direction:row;gap:0;opacity:1;animation:none}
-.dock .app span{display:none}
-.dock .icon{width:56px;height:56px;border-radius:17px}
-.dock .icon svg{width:30px;height:30px}
-.dockglow{width:56%;height:26px;margin-top:-8px;border-radius:50%;background:radial-gradient(50% 50% at 50% 50%,rgba(140,170,255,.22),transparent 70%);filter:blur(10px)}
-
-.note{text-align:center;font-size:11px;color:var(--faint);margin-top:-2px;letter-spacing:.4px}
-
-.launch{animation:launch .22s ease-out}.launch .icon{box-shadow:0 0 0 6px rgba(255,255,255,.32),0 0 36px rgba(255,255,255,.3)}
-@keyframes launch{from{transform:scale(.96)}to{transform:scale(1)}}
-</style>
-</head>
-<body>
-<div class="scene">
-  <div class="aurora a1"></div><div class="aurora a2"></div><div class="aurora a3"></div>
-  <div class="stars"></div><div class="vignette"></div>
-</div>
-<div class="wall">
-  <header class="statusbar">
-    <div class="clockwrap"><div class="clock" id="time">--:--</div><div class="date" id="date">—</div></div>
-    <div class="brand">HANDAR <b>VISION</b></div>
-    <div class="chips">
-      <span class="chip" id="controllerState">VR BOX — нет</span>
-      <span class="chip" id="battery">🔋 —</span>
-      <span class="chip vr">VR</span>
-    </div>
-  </header>
-
-  <div class="greeting">
-    <div><h1>Добро пожаловать</h1><p>Твоё рабочее пространство в стерео‑VR</p></div>
-  </div>
-
-  <div class="search" onclick="post('google')"><span class="searchIcon">⌕</span><span class="searchText">Поиск в VR</span><span class="searchHint">Google</span><span class="shine"></span></div>
-
-  <div class="grid">
-    <div class="app" data-id="safari"><div class="icon blue"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M15.5 8.5 13 13l-4.5 2.5L11 11z"/></svg></div><span>Safari</span></div>
-    <div class="app" data-id="youtube"><div class="icon red"><svg viewBox="0 0 24 24"><path class="solid" d="M21 7.4a2.8 2.8 0 0 0-2-2C17.2 5 12 5 12 5s-5.2 0-7 .4a2.8 2.8 0 0 0-2 2A29 29 0 0 0 2.6 12 29 29 0 0 0 3 16.6a2.8 2.8 0 0 0 2 2c1.8.4 7 .4 7 .4s5.2 0 7-.4a2.8 2.8 0 0 0 2-2 29 29 0 0 0 .4-4.6A29 29 0 0 0 21 7.4Z"/><path d="m10 9 5 3-5 3z" fill="#e21c2a" stroke="none"/></svg></div><span>YouTube</span></div>
-    <div class="app" data-id="tiktok"><div class="icon dark"><svg viewBox="0 0 24 24"><path d="M14 5v9a4 4 0 1 1-3.2-3.9"/><path d="M14 5c1.2 2.2 2.8 3.4 5 3.6"/></svg></div><span>TikTok</span></div>
-    <div class="app" data-id="telegram"><div class="icon cyan"><svg viewBox="0 0 24 24"><path class="solid" d="M20.8 4.4 3.2 11.2c-1 .4-1 1.1-.2 1.4l4.5 1.4 1.7 5.1c.2.6.1.9.8.9.5 0 .8-.2 1.1-.5l2.1-2 4.4 3.3c.8.4 1.4.2 1.6-.7l3.1-14.4c.3-1.2-.5-1.8-1.5-1.3Z"/></svg></div><span>Telegram</span></div>
-    <div class="app" data-id="discord"><div class="icon indigo"><svg viewBox="0 0 24 24"><path d="M7 7.8c2.9-1.1 7.1-1.1 10 0 1.5 1.3 2.3 4.6 1.9 7.6-1.9 1.3-3.7 2-5.5 2.4l-.8-1.1"/><path d="M7 7.8c-1.5 1.3-2.3 4.6-1.9 7.6 1.9 1.3 3.7 2 5.5 2.4l.8-1.1"/><circle cx="9.2" cy="12.5" r="1"/><circle cx="14.8" cy="12.5" r="1"/></svg></div><span>Discord</span></div>
-    <div class="app" data-id="spotify"><div class="icon green"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M7 10.2c3.7-1.2 6.8-.9 10 .5"/><path d="M7.8 13c3.1-.8 5.6-.5 8.3.6"/><path d="M8.8 15.5c2.4-.4 4.3-.2 6.4.5"/></svg></div><span>Музыка</span></div>
-    <div class="app" data-id="maps"><div class="icon orange"><svg viewBox="0 0 24 24"><path d="M12 20s6-6 6-10a6 6 0 1 0-12 0c0 4 6 10 6 10Z"/><circle cx="12" cy="10" r="2"/></svg></div><span>Карты</span></div>
-    <div class="app" data-id="gmail"><div class="icon red"><svg viewBox="0 0 24 24"><path d="M4 6h16v12H4z"/><path d="m4 7 8 6 8-6"/></svg></div><span>Почта</span></div>
-    <div class="app" data-id="google"><div class="icon dark"><svg viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.2-5.5"/><path d="M20 7v5h-5"/></svg></div><span>Google</span></div>
-    <div class="app" data-id="wikipedia"><div class="icon gray"><svg viewBox="0 0 24 24"><path d="M4 6h4l4 10 4-10h4"/><path d="M9 18h6"/></svg></div><span>Wikipedia</span></div>
-    <div class="app" data-id="reddit"><div class="icon orange"><svg viewBox="0 0 24 24"><circle cx="12" cy="13" r="6.5"/><circle cx="9.5" cy="12.5" r=".9" fill="#fff" stroke="none"/><circle cx="14.5" cy="12.5" r=".9" fill="#fff" stroke="none"/><path d="M9 15c1.7 1.2 4.3 1.2 6 0"/><path d="m14.5 6 1.8-2.2"/><circle cx="17.2" cy="3.5" r="1"/></svg></div><span>Reddit</span></div>
-    <div class="app" data-id="notes"><div class="icon orange"><svg viewBox="0 0 24 24"><path d="M6 4h12v16H6z"/><path d="M9 8h6M9 12h6M9 16h4"/></svg></div><span>Заметки</span></div>
-    <div class="app" data-id="calculator"><div class="icon dark"><svg viewBox="0 0 24 24"><rect x="5" y="3" width="14" height="18" rx="2"/><path d="M8 7h8M8 11h2M12 11h2M16 11h0M8 15h2M12 15h2M8 18h8"/></svg></div><span>Калькулятор</span></div>
-    <div class="app" data-id="photos"><div class="icon pink"><svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="4"/><circle cx="12" cy="12" r="3"/><path d="M8 7h1"/></svg></div><span>Фото</span></div>
-    <div class="app" data-id="files"><div class="icon blue"><svg viewBox="0 0 24 24"><path d="M4 7h6l2 2h8v9H4z"/><path d="M4 10h16"/></svg></div><span>Файлы</span></div>
-    <div class="app" data-id="messages"><div class="icon green"><svg viewBox="0 0 24 24"><path d="M4 5h16v11H9l-5 4z"/></svg></div><span>Сообщения</span></div>
-    <div class="app" data-id="phone"><div class="icon green"><svg viewBox="0 0 24 24"><path d="M7 4c1.1 0 2 .9 2 2 0 1-.2 1.8-.6 2.6-.2.4-.1.8.2 1.1l2.1 2.1c.3.3.7.4 1.1.2.8-.4 1.6-.6 2.6-.6 1.1 0 2 .9 2 2v3c0 1.1-.9 2-2 2C9.8 18.4 5.6 14.2 4.6 9.1 4.4 8.1 5.2 7 6.3 6.7z"/></svg></div><span>Телефон</span></div>
-    <div class="app" data-id="games"><div class="icon purple"><svg viewBox="0 0 24 24"><rect x="4" y="7" width="16" height="11" rx="3"/><path d="M8 12h4M10 10v4"/><circle cx="16" cy="11.5" r="1" fill="#fff" stroke="none"/><circle cx="18" cy="14.5" r="1" fill="#fff" stroke="none"/></svg></div><span>Игры</span></div>
-    <div class="app" data-id="cinema"><div class="icon teal"><svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M7 5v14M17 5v14M3 9h4M3 15h4M17 9h4M17 15h4"/></svg></div><span>Кино</span></div>
-    <div class="app" data-id="settings"><div class="icon gray"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 0 0-.1-1.2l2-1.5-2-3.4-2.3.9a7 7 0 0 0-2-1.1L14.3 3h-4.6l-.4 2.7a7 7 0 0 0-2 1.1L5 5.9 3 9.3l2 1.5A7 7 0 0 0 5 12c0 .4 0 .8.1 1.2l-2 1.5 2 3.4 2.3-.9a7 7 0 0 0 2 1.1l.4 2.7h4.6l.4-2.7a7 7 0 0 0 2-1.1l2.3.9 2-3.4-2-1.5c.1-.4.1-.8.1-1.2Z"/></svg></div><span>Настройки</span></div>
-  </div>
-
-  <div class="dockwrap">
-    <div class="dock">
-      <div class="app" data-id="safari"><div class="icon blue"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M15.5 8.5 13 13l-4.5 2.5L11 11z"/></svg></div></div>
-      <div class="app" data-id="youtube"><div class="icon red"><svg viewBox="0 0 24 24"><path d="M5 5h14v14H5z"/><path d="m10 8 5 4-5 4z" fill="#fff" stroke="none"/></svg></div></div>
-      <div class="app" data-id="telegram"><div class="icon cyan"><svg viewBox="0 0 24 24"><path d="m5 12 13-6-4 12-3-4-4-1z"/></svg></div></div>
-      <div class="app" data-id="messages"><div class="icon green"><svg viewBox="0 0 24 24"><path d="M4 5h16v11H9l-5 4z"/></svg></div></div>
-      <div class="app" data-id="settings"><div class="icon gray"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 0 0-.1-1.2l2-1.5-2-3.4-2.3.9a7 7 0 0 0-2-1.1L14.3 3h-4.6l-.4 2.7a7 7 0 0 0-2 1.1L5 5.9 3 9.3l2 1.5A7 7 0 0 0 5 12c0 .4 0 .8.1 1.2l-2 1.5 2 3.4 2.3-.9a7 7 0 0 0 2 1.1l.4 2.7h4.6l.4-2.7a7 7 0 0 0 2-1.1l2.3.9 2-3.4-2-1.5c.1-.4.1-.8.1-1.2Z"/></svg></div></div>
-    </div>
-    <div class="dockglow"></div>
-  </div>
-
-  <div class="note">VR Desktop • рабочее пространство HandAR в стерео‑VR • рука / VR BOX</div>
-</div>
-<script>
+html,body{margin:0;width:100%;height:100%;overflow:hidden;background:transparent;color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display",sans-serif;-webkit-user-select:none;user-select:none}
+button{font:inherit;color:inherit;cursor:pointer;border:0;background:none}button:focus-visible{outline:3px solid #fff;outline-offset:5px}
+button,.app{touch-action:manipulation}.hidden,[hidden]{display:none!important}
+.workspace{position:relative;width:100%;height:100%;display:grid;place-items:center}
+.status{position:absolute;top:30px;left:50%;transform:translateX(-50%);display:flex;align-items:center;gap:10px;font-size:13px;font-weight:550;color:#ffffffbc;text-shadow:0 1px 8px #0008}
+.status .divider{width:3px;height:3px;border-radius:50%;background:#fff6}.status #controllerState{display:none}
+.glass{background:var(--glass);border:1px solid var(--edge);box-shadow:inset 0 1px 0 #ffffff2b,inset 0 -1px 0 #ffffff0a,0 12px 35px #00000029;-webkit-backdrop-filter:blur(30px) saturate(115%);backdrop-filter:blur(30px) saturate(115%)}
+.rail{position:absolute;left:10.5%;top:50%;transform:translateY(-50%);display:flex;flex-direction:column;gap:7px;padding:9px;border-radius:35px;z-index:4}
+.rail button{display:grid;place-items:center;width:46px;height:46px;border-radius:50%;color:#ffffffa8;transition:.18s}.rail button.active{background:#ffffff32;color:#fff;box-shadow:inset 0 1px 1px #ffffff38}.rail svg,.control svg,.ornament svg{width:23px;height:23px;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
+.rail button:hover,.rail button.handar-hover,.control:hover,.control.handar-hover{background:#ffffff38;color:#fff}
+.view{position:absolute;inset:90px 14% 95px 21%;display:flex;flex-direction:column;justify-content:center;align-items:center;gap:27px}
+.app-page{width:100%;display:flex;flex-direction:column;align-items:center;gap:26px;animation:appear .3s ease both}.app-row{display:flex;justify-content:center;gap:42px;width:100%}
+.app{width:104px;flex-shrink:0;display:flex;flex-direction:column;align-items:center;gap:12px;border-radius:24px;padding:0;cursor:pointer}
+.icon{position:relative;width:84px;height:84px;border-radius:50%;display:grid;place-items:center;background:linear-gradient(155deg,var(--a,#dedede),var(--b,#8b8b8b));box-shadow:inset 0 2px 3px #ffffff7a,inset 0 -3px 8px #00000028,0 9px 16px #00000030;transition:transform .2s,box-shadow .2s;isolation:isolate;overflow:hidden}
+.icon:after{content:"";position:absolute;inset:0;z-index:2;pointer-events:none;border-radius:50%;box-shadow:inset 0 0 0 1px #ffffff40;background:radial-gradient(ellipse at 28% 0%,#ffffff38,transparent 60%)}
+.icon svg{width:48px;height:48px;fill:none;stroke:#fff;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round;filter:drop-shadow(0 2px 1px #0002)}.icon .solid{fill:white;stroke:none}.app span{font-size:14px;font-weight:500;letter-spacing:.05px;text-shadow:0 2px 6px #000b;white-space:nowrap}
+.app:hover .icon,.app.handar-hover .icon,.app:focus-visible .icon{transform:scale(1.12);box-shadow:inset 0 2px 3px #ffffff8c,0 0 0 6px #ffffff21,0 12px 24px #0004}.app:active .icon,.app.launch .icon{transform:scale(.94)}
+.blue{--a:#5dbeff;--b:#0864ed}.red{--a:#ff5964;--b:#d20a24}.pink{--a:#ff72c2;--b:#b328ee}.teal{--a:#59d1d1;--b:#03869a}.indigo{--a:#8d93ff;--b:#4e50cb}.green{--a:#79ef81;--b:#08ab35}.cyan{--a:#54c5f9;--b:#0795d5}.orange{--a:#ffc55b;--b:#ed7d18}.purple{--a:#c17cff;--b:#7133cc}.gray{--a:#d8dbe0;--b:#858b93}.dark{--a:#44464d;--b:#111217}
+.app[data-id=photos] .icon,.app[data-id=safari] .icon,.app[data-id=notes] .icon,.app[data-id=maps] .icon{background:linear-gradient(145deg,#fff,#e6e7eb)}
+.app[data-id=notes] .icon svg{stroke:#a6a6a6}.app[data-id=notes] .icon:before{content:"";position:absolute;inset:0 0 65%;background:#ffd84c}
+.app[data-id=maps] .icon svg{stroke:#0989ff}.app[data-id=spotify] .icon{background:linear-gradient(150deg,#ff637c,#ee184a)}
+.pages{height:24px;display:flex;align-items:center;gap:12px}.page-dot{width:7px;height:7px;padding:10px;position:relative;opacity:.42}.page-dot:after{content:"";position:absolute;inset:7px;border-radius:50%;background:white}.page-dot.active{opacity:1}.page-dot.handar-hover{transform:scale(1.3)}
+.home-bottom{position:absolute;bottom:28px;left:50%;transform:translateX(-50%);display:flex;align-items:center;gap:14px}.control{width:44px;height:44px;border-radius:50%;display:grid;place-items:center}.grab{width:98px;height:5px;border-radius:5px;background:#ffffffb8;box-shadow:0 2px 8px #0003;pointer-events:none}
+.panel{width:100%;max-width:750px;border-radius:36px;padding:32px;animation:appear .25s ease}.panel h1{font-size:27px;font-weight:650;letter-spacing:-.6px;margin:0 0 9px}.panel p{font-size:15px;color:var(--muted);line-height:1.5;margin:0 0 24px}.panel .tiles{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}.tile{border-radius:23px;background:#ffffff15;border:1px solid #ffffff26;padding:22px 15px;text-align:left;font-weight:550;display:flex;flex-direction:column;gap:12px;min-height:130px}.tile:hover,.tile.handar-hover{background:#ffffff30}.tile svg{width:34px;height:34px;fill:none;stroke:currentColor;stroke-width:1.5}.tile small{color:var(--muted);font-size:12px;line-height:1.4;font-weight:400}
+.sheet{position:absolute;right:13%;top:90px;width:340px;padding:24px;border-radius:30px;z-index:9;animation:appear .2s ease}.sheet-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:20px}.sheet h2{font-size:19px;margin:0}.sheet .row{display:flex;gap:10px;margin-top:12px}.sheet .action{background:#ffffff1d;border:1px solid #ffffff24;border-radius:18px;padding:16px;text-align:left;width:100%;font-size:14px}.sheet .action:hover,.sheet .action.handar-hover{background:#ffffff38}.sheet .small{font-size:12px;color:var(--muted);line-height:1.5}.sheet #date{font-size:13px;color:var(--muted);margin-bottom:20px}.sheet .close{background:#ffffff1a;width:30px;height:30px;border-radius:50%}.sheet #battery{margin:20px 0 10px;font-size:14px}.notice{position:absolute;bottom:78px;left:50%;transform:translateX(-50%);padding:12px 22px;border-radius:30px;font-size:14px;z-index:10}
+@keyframes appear{from{opacity:0;transform:translateY(9px) scale(.98)}to{opacity:1;transform:none}}
+@media(max-width:1000px){.rail{left:5%}.view{inset:65px 7% 70px 16%;gap:15px}.app-row{gap:25px}.app{width:90px;gap:9px}.icon{width:70px;height:70px}.icon svg{width:41px;height:41px}.app-page{gap:20px}.app span{font-size:12px}.status{top:18px}.sheet{right:7%;top:65px}}
+@media(max-height:560px){.view{inset:48px 10% 50px 19%;gap:8px}.app-page{gap:13px}.icon{width:60px;height:60px}.icon svg{width:35px;height:35px}.app span{font-size:11px}.app{gap:6px}.status{top:12px}.home-bottom{bottom:12px}.rail{left:8%}.panel{padding:22px}.panel .tile{min-height:100px}.sheet{top:48px;max-height:calc(100% - 65px);overflow:auto}}
+@media(prefers-reduced-motion:reduce){*,*:before,*:after{animation:none!important;transition:none!important}}
+</style></head><body>
+<main class="workspace">
+<header class="status"><span id="time">--:--</span><span class="divider"></span><span>Главный экран</span><span id="controllerState"></span></header>
+<nav class="rail glass" aria-label="Разделы"><button data-view="people" aria-label="Люди"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8" r="3"/><path d="M3 20v-2a6 6 0 0 1 12 0v2M16 5a3 3 0 0 1 0 6M18 14a5 5 0 0 1 3 5"/></svg></button><button class="active" data-view="apps" aria-label="Приложения" aria-pressed="true"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="6" r="1.5"/><circle cx="12" cy="6" r="1.5"/><circle cx="18" cy="6" r="1.5"/><circle cx="6" cy="12" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="18" cy="12" r="1.5"/><circle cx="6" cy="18" r="1.5"/><circle cx="12" cy="18" r="1.5"/><circle cx="18" cy="18" r="1.5"/></svg></button><button data-view="environments" aria-label="Окружения"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m2 19 7-12 5 8 3-5 5 9ZM7 10l2 2 2-2"/><circle cx="17" cy="5" r="2"/></svg></button></nav>
+<section class="view" id="apps" aria-label="Приложения"><div class="app-page" data-page="0"><div class="app-row"><button class="app" data-id="cinema" aria-label="Кино"><div class="icon teal"><svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M7 5v14M17 5v14M3 9h4M3 15h4M17 9h4M17 15h4"/></svg></div><span>Кино</span></button><button class="app" data-id="spotify" aria-label="Музыка"><div class="icon red"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 17V6l9-2v11M10 8l9-2"/><ellipse cx="7" cy="17" rx="3" ry="2.3" fill="white" stroke="none"/><ellipse cx="16" cy="15" rx="3" ry="2.3" fill="white" stroke="none"/></svg></div><span>Музыка</span></button><button class="app" data-id="safari" aria-label="Safari"><div class="icon blue"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10" fill="#36a8f5" stroke="#b9e8ff"/><g stroke="#fff" stroke-width=".6"><path d="M12 3v1.6" transform="rotate(0 12 12)"/><path d="M12 3v1.6" transform="rotate(30 12 12)"/><path d="M12 3v1.6" transform="rotate(60 12 12)"/><path d="M12 3v1.6" transform="rotate(90 12 12)"/><path d="M12 3v1.6" transform="rotate(120 12 12)"/><path d="M12 3v1.6" transform="rotate(150 12 12)"/><path d="M12 3v1.6" transform="rotate(180 12 12)"/><path d="M12 3v1.6" transform="rotate(210 12 12)"/><path d="M12 3v1.6" transform="rotate(240 12 12)"/><path d="M12 3v1.6" transform="rotate(270 12 12)"/><path d="M12 3v1.6" transform="rotate(300 12 12)"/><path d="M12 3v1.6" transform="rotate(330 12 12)"/></g><path d="m16 7-3 6-2-2Z" fill="#ff5263" stroke="none"/><path d="m8 17 3-6 2 2Z" fill="white" stroke="none"/></svg></div><span>Safari</span></button><button class="app" data-id="photos" aria-label="Фото"><div class="icon pink"><svg viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="7" rx="3.4" ry="5.2" fill="#ffb92e" opacity=".82" transform="rotate(0 12 12)" stroke="none"/><ellipse cx="12" cy="7" rx="3.4" ry="5.2" fill="#ff7b28" opacity=".82" transform="rotate(45 12 12)" stroke="none"/><ellipse cx="12" cy="7" rx="3.4" ry="5.2" fill="#fc4267" opacity=".82" transform="rotate(90 12 12)" stroke="none"/><ellipse cx="12" cy="7" rx="3.4" ry="5.2" fill="#d758bb" opacity=".82" transform="rotate(135 12 12)" stroke="none"/><ellipse cx="12" cy="7" rx="3.4" ry="5.2" fill="#7c75d7" opacity=".82" transform="rotate(180 12 12)" stroke="none"/><ellipse cx="12" cy="7" rx="3.4" ry="5.2" fill="#49a3eb" opacity=".82" transform="rotate(225 12 12)" stroke="none"/><ellipse cx="12" cy="7" rx="3.4" ry="5.2" fill="#57c990" opacity=".82" transform="rotate(270 12 12)" stroke="none"/><ellipse cx="12" cy="7" rx="3.4" ry="5.2" fill="#c2d94c" opacity=".82" transform="rotate(315 12 12)" stroke="none"/></svg></div><span>Фото</span></button></div><div class="app-row"><button class="app" data-id="gmail" aria-label="Почта"><div class="icon red"><svg viewBox="0 0 24 24"><path d="M4 6h16v12H4z"/><path d="m4 7 8 6 8-6"/></svg></div><span>Почта</span></button><button class="app" data-id="messages" aria-label="Сообщения"><div class="icon green"><svg viewBox="0 0 24 24"><path d="M4 5h16v11H9l-5 4z"/></svg></div><span>Сообщения</span></button><button class="app" data-id="maps" aria-label="Карты"><div class="icon orange"><svg viewBox="0 0 24 24"><path d="M12 20s6-6 6-10a6 6 0 1 0-12 0c0 4 6 10 6 10Z"/><circle cx="12" cy="10" r="2"/></svg></div><span>Карты</span></button><button class="app" data-id="notes" aria-label="Заметки"><div class="icon orange"><svg viewBox="0 0 24 24"><path d="M6 4h12v16H6z"/><path d="M9 8h6M9 12h6M9 16h4"/></svg></div><span>Заметки</span></button><button class="app" data-id="settings" aria-label="Настройки"><div class="icon gray"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 0 0-.1-1.2l2-1.5-2-3.4-2.3.9a7 7 0 0 0-2-1.1L14.3 3h-4.6l-.4 2.7a7 7 0 0 0-2 1.1L5 5.9 3 9.3l2 1.5A7 7 0 0 0 5 12c0 .4 0 .8.1 1.2l-2 1.5 2 3.4 2.3-.9a7 7 0 0 0 2 1.1l.4 2.7h4.6l.4-2.7a7 7 0 0 0 2-1.1l2.3.9 2-3.4-2-1.5c.1-.4.1-.8.1-1.2Z"/></svg></div><span>Настройки</span></button></div><div class="app-row"><button class="app" data-id="files" aria-label="Файлы"><div class="icon blue"><svg viewBox="0 0 24 24"><path d="M4 7h6l2 2h8v9H4z"/><path d="M4 10h16"/></svg></div><span>Файлы</span></button><button class="app" data-id="telegram" aria-label="Telegram"><div class="icon cyan"><svg viewBox="0 0 24 24"><path class="solid" d="M20.8 4.4 3.2 11.2c-1 .4-1 1.1-.2 1.4l4.5 1.4 1.7 5.1c.2.6.1.9.8.9.5 0 .8-.2 1.1-.5l2.1-2 4.4 3.3c.8.4 1.4.2 1.6-.7l3.1-14.4c.3-1.2-.5-1.8-1.5-1.3Z"/></svg></div><span>Telegram</span></button><button class="app" data-id="games" aria-label="Игры"><div class="icon purple"><svg viewBox="0 0 24 24"><rect x="4" y="7" width="16" height="11" rx="3"/><path d="M8 12h4M10 10v4"/><circle cx="16" cy="11.5" r="1" fill="#fff" stroke="none"/><circle cx="18" cy="14.5" r="1" fill="#fff" stroke="none"/></svg></div><span>Игры</span></button><button class="app" data-id="calculator" aria-label="Калькулятор"><div class="icon dark"><svg viewBox="0 0 24 24"><rect x="5" y="3" width="14" height="18" rx="2"/><path d="M8 7h8M8 11h2M12 11h2M16 11h0M8 15h2M12 15h2M8 18h8"/></svg></div><span>Калькулятор</span></button></div></div><div class="app-page" data-page="1" hidden><div class="app-row"><button class="app" data-id="youtube" aria-label="YouTube"><div class="icon red"><svg viewBox="0 0 24 24"><path class="solid" d="M21 7.4a2.8 2.8 0 0 0-2-2C17.2 5 12 5 12 5s-5.2 0-7 .4a2.8 2.8 0 0 0-2 2A29 29 0 0 0 2.6 12 29 29 0 0 0 3 16.6a2.8 2.8 0 0 0 2 2c1.8.4 7 .4 7 .4s5.2 0 7-.4a2.8 2.8 0 0 0 2-2 29 29 0 0 0 .4-4.6A29 29 0 0 0 21 7.4Z"/><path d="m10 9 5 3-5 3z" fill="#e21c2a" stroke="none"/></svg></div><span>YouTube</span></button><button class="app" data-id="tiktok" aria-label="TikTok"><div class="icon dark"><svg viewBox="0 0 24 24"><path d="M14 5v9a4 4 0 1 1-3.2-3.9"/><path d="M14 5c1.2 2.2 2.8 3.4 5 3.6"/></svg></div><span>TikTok</span></button><button class="app" data-id="discord" aria-label="Discord"><div class="icon indigo"><svg viewBox="0 0 24 24"><path d="M7 7.8c2.9-1.1 7.1-1.1 10 0 1.5 1.3 2.3 4.6 1.9 7.6-1.9 1.3-3.7 2-5.5 2.4l-.8-1.1"/><path d="M7 7.8c-1.5 1.3-2.3 4.6-1.9 7.6 1.9 1.3 3.7 2 5.5 2.4l.8-1.1"/><circle cx="9.2" cy="12.5" r="1"/><circle cx="14.8" cy="12.5" r="1"/></svg></div><span>Discord</span></button><button class="app" data-id="google" aria-label="Google"><div class="icon dark"><svg viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.2-5.5"/><path d="M20 7v5h-5"/></svg></div><span>Google</span></button></div><div class="app-row"><button class="app" data-id="wikipedia" aria-label="Wikipedia"><div class="icon gray"><svg viewBox="0 0 24 24"><path d="M4 6h4l4 10 4-10h4"/><path d="M9 18h6"/></svg></div><span>Wikipedia</span></button><button class="app" data-id="reddit" aria-label="Reddit"><div class="icon orange"><svg viewBox="0 0 24 24"><circle cx="12" cy="13" r="6.5"/><circle cx="9.5" cy="12.5" r=".9" fill="#fff" stroke="none"/><circle cx="14.5" cy="12.5" r=".9" fill="#fff" stroke="none"/><path d="M9 15c1.7 1.2 4.3 1.2 6 0"/><path d="m14.5 6 1.8-2.2"/><circle cx="17.2" cy="3.5" r="1"/></svg></div><span>Reddit</span></button><button class="app" data-id="phone" aria-label="Телефон"><div class="icon green"><svg viewBox="0 0 24 24"><path d="M7 4c1.1 0 2 .9 2 2 0 1-.2 1.8-.6 2.6-.2.4-.1.8.2 1.1l2.1 2.1c.3.3.7.4 1.1.2.8-.4 1.6-.6 2.6-.6 1.1 0 2 .9 2 2v3c0 1.1-.9 2-2 2C9.8 18.4 5.6 14.2 4.6 9.1 4.4 8.1 5.2 7 6.3 6.7z"/></svg></div><span>Телефон</span></button></div></div><div class="pages" aria-label="Страницы"><button class="page-dot active" data-show-page="0" aria-label="Первая страница" aria-pressed="true"></button><button class="page-dot" data-show-page="1" aria-label="Вторая страница" aria-pressed="false"></button></div></section>
+<section class="view" id="people" hidden><div class="panel glass"><h1>Люди</h1><p>Выбери, где продолжить общение.</p><div class="tiles"><button class="tile" data-id="telegram"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8" r="3"/><path d="M3 20v-2a6 6 0 0 1 12 0v2M16 5a3 3 0 0 1 0 6M18 14a5 5 0 0 1 3 5"/></svg>Telegram<small>Открыть веб-приложение</small></button><button class="tile" data-id="discord"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8" r="3"/><path d="M3 20v-2a6 6 0 0 1 12 0v2M16 5a3 3 0 0 1 0 6M18 14a5 5 0 0 1 3 5"/></svg>Discord<small>Открыть веб-приложение</small></button><button class="tile" data-id="messages"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8" r="3"/><path d="M3 20v-2a6 6 0 0 1 12 0v2M16 5a3 3 0 0 1 0 6M18 14a5 5 0 0 1 3 5"/></svg>Сообщения<small>Локальный интерфейс HandAR</small></button></div></div></section>
+<section class="view" id="environments" hidden><div class="panel glass"><h1>Окружения</h1><p>Переключай пространство вокруг своих приложений.</p><div class="tiles"><button class="tile" data-system="environment-camera"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="2" y="6" width="20" height="14" rx="4"/><circle cx="12" cy="13" r="4"/><path d="m8 6 2-3h4l2 3"/></svg>Твоё пространство<small>Сквозное видео с камеры</small></button><button class="tile" data-system="environment-dark"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 15A9 9 0 0 1 9 3a9 9 0 1 0 11 12Z"/></svg>Тёмное пространство<small>Спокойный фон без камеры</small></button><button class="tile" data-id="cinema"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m2 19 7-12 5 8 3-5 5 9ZM7 10l2 2 2-2"/><circle cx="17" cy="5" r="2"/></svg>Кинотеатр<small>Объёмный зал HandAR</small></button></div></div></section>
+<div class="home-bottom"><div class="grab"></div><button class="control glass" id="control-toggle" aria-label="Пункт управления" aria-expanded="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5h14M5 12h14M5 19h14"/><circle cx="9" cy="5" r="2" fill="#aaa"/><circle cx="15" cy="12" r="2" fill="#aaa"/><circle cx="9" cy="19" r="2" fill="#aaa"/></svg></button></div>
+<aside class="sheet glass" id="control-center" aria-label="Пункт управления" hidden><div class="sheet-head"><h2>Пункт управления</h2><button class="close" id="control-close" aria-label="Закрыть">×</button></div><div id="date"></div><div class="row"><button class="action" data-system="center">Центрировать окно</button><button class="action" data-id="settings">Настройки</button></div><div class="row"><button class="action" data-system="environment-camera">Камера</button><button class="action" data-system="environment-dark">Тёмный фон</button></div><div id="battery">Батарея —</div><div class="row"><button class="action" data-system="controller-diagnostics">Проверить VR BOX</button></div><div class="row"><button class="action" data-system="exit">Выйти из VR</button></div></aside>
+<div class="notice glass" id="notice" role="status" hidden></div>
+</main><script>
 function post(id){try{window.webkit.messageHandlers.handarApp.postMessage({id:id});}catch(e){}}
-function clock(){const d=new Date();document.getElementById('time').textContent=d.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});document.getElementById('date').textContent=d.toLocaleDateString('ru-RU',{weekday:'long',day:'numeric',month:'long'});}
-setInterval(clock,1000);clock();
-document.querySelectorAll('.app').forEach(function(a){a.addEventListener('click',function(){a.classList.add('launch');post(a.dataset.id);setTimeout(()=>a.classList.remove('launch'),320);});});
-</script>
-</body>
-</html>
-
+function system(action){try{window.webkit.messageHandlers.handarSystem.postMessage({action:action});}catch(e){}}
+function showView(id){document.querySelectorAll('.view').forEach(v=>v.hidden=v.id!==id);document.querySelectorAll('[data-view]').forEach(b=>{b.classList.toggle('active',b.dataset.view===id);b.setAttribute('aria-pressed',String(b.dataset.view===id))});closeControl();}
+function showPage(page){document.querySelectorAll('[data-page]').forEach(p=>p.hidden=Number(p.dataset.page)!==page);document.querySelectorAll('[data-show-page]').forEach(b=>{b.classList.toggle('active',Number(b.dataset.showPage)===page);b.setAttribute('aria-pressed',String(Number(b.dataset.showPage)===page))});}
+function closeControl(){document.getElementById('control-center').hidden=true;document.getElementById('control-toggle').setAttribute('aria-expanded','false');}
+document.getElementById('control-toggle').onclick=()=>{const p=document.getElementById('control-center');p.hidden=!p.hidden;document.getElementById('control-toggle').setAttribute('aria-expanded',String(!p.hidden));};
+document.getElementById('control-close').onclick=closeControl;
+document.querySelectorAll('[data-view]').forEach(b=>b.onclick=()=>showView(b.dataset.view));
+document.querySelectorAll('[data-show-page]').forEach(b=>b.onclick=()=>showPage(Number(b.dataset.showPage)));
+document.querySelectorAll('[data-id]').forEach(b=>b.onclick=()=>{b.classList.add('launch');post(b.dataset.id);setTimeout(()=>b.classList.remove('launch'),250);});
+document.querySelectorAll('[data-system]').forEach(b=>b.onclick=()=>{system(b.dataset.system);if(b.dataset.system.startsWith('environment-')){const n=document.getElementById('notice');n.textContent=b.dataset.system==='environment-camera'?'Сквозное видео включено':'Тёмное пространство';n.hidden=false;clearTimeout(window.noticeTimer);window.noticeTimer=setTimeout(()=>n.hidden=true,2200);}});
+function clock(){const d=new Date();document.getElementById('time').textContent=d.toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit'});document.getElementById('date').textContent=d.toLocaleDateString('ru-RU',{weekday:'long',day:'numeric',month:'long'});}clock();setInterval(clock,1000);
+document.addEventListener('keydown',e=>{if(e.key==='Escape'){closeControl();showView('apps');}if(e.key==='ArrowRight')showPage(1);if(e.key==='ArrowLeft')showPage(0);});
+</script></body></html>
 """#
 
     private static func htmlPage(title: String, icon: String, accent: String, body: String, scripts: String = "") -> String {
@@ -3425,10 +3353,23 @@ document.querySelectorAll('.app').forEach(function(a){a.addEventListener('click'
 <style>
 :root{--accent:%ACCENT%}
 *{box-sizing:border-box}html,body{margin:0;width:100%%;height:100%%;overflow:hidden;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","Helvetica Neue",Arial,sans-serif;background:linear-gradient(135deg,#0d1118,#1a2030);color:#fff}body:before{content:"";position:fixed;inset:0;background:radial-gradient(circle at 70%% 20%%,var(--accent),transparent 42%%);opacity:.28}.wrap{position:relative;height:100%%;padding:22px 34px;display:flex;flex-direction:column;gap:18px}.top{height:44px;display:flex;align-items:center;justify-content:space-between}.brand{display:flex;align-items:center;gap:12px}.back{border:1px solid rgba(255,255,255,.2);background:rgba(255,255,255,.1);color:#fff;border-radius:15px;padding:10px 15px;font-size:15px}.title{font-size:22px;font-weight:700}.card{flex:1;border:1px solid rgba(255,255,255,.15);background:rgba(255,255,255,.07);backdrop-filter:blur(25px);border-radius:28px;padding:26px;overflow:auto}.hero{display:flex;align-items:center;gap:18px}.bigicon{width:74px;height:74px;border-radius:22px;background:var(--accent);display:flex;align-items:center;justify-content:center;font-size:34px;box-shadow:0 10px 30px rgba(0,0,0,.24)}h1{margin:0;font-size:32px}p{color:rgba(255,255,255,.7);line-height:1.45}.row{display:flex;gap:12px;flex-wrap:wrap}.btn{border:1px solid rgba(255,255,255,.2);background:rgba(255,255,255,.12);color:#fff;border-radius:17px;padding:13px 18px;font-size:15px}.btn.primary{background:var(--accent);border-color:transparent}.small{font-size:12px;color:rgba(255,255,255,.48)}textarea{width:100%%;height:58%%;resize:none;border:1px solid rgba(255,255,255,.18);background:rgba(0,0,0,.2);color:#fff;border-radius:18px;padding:16px;font:inherit;outline:none}.display{font-size:48px;text-align:right;padding:18px;background:rgba(0,0,0,.25);border-radius:20px;margin-bottom:14px}.keys{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}.key{padding:20px 10px;border:0;border-radius:16px;background:rgba(255,255,255,.1);color:#fff;font-size:22px}.key.op{background:var(--accent)}.photo-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-top:22px}.photo{aspect-ratio:1.25;border-radius:22px;display:flex;align-items:flex-end;padding:14px;font-weight:700;background:linear-gradient(145deg,var(--accent),rgba(255,255,255,.1)),radial-gradient(circle at 70% 25%,#fff5,transparent 35%);border:1px solid rgba(255,255,255,.14)}.p2{filter:saturate(.75)}.p3{filter:hue-rotate(28deg)}.p4{filter:hue-rotate(90deg)}.p5{filter:hue-rotate(145deg)}.p6{filter:hue-rotate(220deg)}.file-list,.chat-list{display:flex;flex-direction:column;gap:10px;margin-top:24px}.file-row,.chat{border:1px solid rgba(255,255,255,.13);background:rgba(255,255,255,.06);color:#fff;border-radius:18px;padding:15px 17px;text-align:left}.file-row{display:grid;grid-template-columns:34px 1fr;gap:3px 10px}.file-row span{grid-row:1/3;font-size:22px}.file-row small{color:rgba(255,255,255,.48)}.chat{display:grid;grid-template-columns:1fr auto;gap:4px 12px}.chat span{color:rgba(255,255,255,.68)}.chat time{grid-column:2;grid-row:1/3;color:rgba(255,255,255,.38);font-size:12px}.phone-display{font-size:36px;letter-spacing:2px;text-align:center;padding:18px;border-radius:18px;background:rgba(0,0,0,.22);margin:22px 0 14px}.phone-keys{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
-</style></head><body><div class="wrap">
-<div class="top"><div class="brand"><button class="back" onclick="post('home')">‹ Домой</button><div class="title">%TITLE%</div></div><div class="small">HandAR VR</div></div>
-<div class="card">%BODY%</div></div>
-<script>function post(id){try{window.webkit.messageHandlers.handarApp.postMessage({id:id});}catch(e){}}%SCRIPTS%</script>
+html,body{background:transparent!important;color:#fff;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display",sans-serif}
+body:before{display:none}.wrap{padding:28px 38px 75px 148px;gap:0;position:relative}
+.top{height:64px;flex-shrink:0;padding:0 25px;background:linear-gradient(130deg,#bcbcbc65,#64646475);border:1px solid #ffffff40;border-bottom:0;border-radius:28px 28px 0 0;backdrop-filter:blur(30px);-webkit-backdrop-filter:blur(30px)}
+.title{font-size:21px;font-weight:650;letter-spacing:-.4px}.brand{gap:14px}.back{border:0;background:#ffffff1d;border-radius:50%;width:35px;height:35px;padding:0;font-size:0}.back:before{content:"‹";font-size:30px;line-height:30px}.top>.small{font-size:12px;color:#ffffff80}
+.card{border-radius:0 0 28px 28px;border-top:0;padding:28px;background:linear-gradient(135deg,#87878780,#4242429c);border-color:#ffffff36;backdrop-filter:blur(35px) saturate(110%);-webkit-backdrop-filter:blur(35px) saturate(110%);box-shadow:0 18px 45px #0002;scrollbar-width:thin}
+h1{font-size:28px;font-weight:650;letter-spacing:-.6px}.hero{gap:16px}.hero p{font-size:14px}.bigicon{width:58px;height:58px;border-radius:50%;font-size:27px;box-shadow:inset 0 1px 2px #fff5,0 6px 12px #0002}
+.btn,.key,.file-row,.chat{border-color:#ffffff27;background:#ffffff17;border-radius:18px;box-shadow:inset 0 1px 0 #ffffff10}.btn{border-radius:30px;padding:12px 22px}.btn.primary{background:#ffffffdf;color:#202020;font-weight:600}.btn:hover,.key:hover,.file-row:hover,.handar-hover{background:#ffffff35}.btn.primary:hover{background:#fff}.key.op{background:#ffffff45}.key{padding:15px 10px}.display{background:#00000015;font-weight:300}.file-row,.chat{padding:17px}.photo{border-radius:20px}textarea{border-radius:20px;background:#00000012;border-color:#ffffff25}.small{color:#ffffff90}p{color:#ffffffb5}
+.spatial-sidebar{position:absolute;top:50%;left:34px;transform:translateY(-50%);display:flex;flex-direction:column;gap:8px;padding:9px;background:linear-gradient(145deg,#d1d1d14d,#67676766);border:1px solid #ffffff40;border-radius:34px;backdrop-filter:blur(25px);-webkit-backdrop-filter:blur(25px)}
+.spatial-sidebar button{width:47px;height:47px;display:grid;place-items:center;color:#fff;background:transparent;border:0;border-radius:50%;cursor:pointer}.spatial-sidebar button:hover,.spatial-sidebar button.handar-hover{background:#ffffff38}.spatial-sidebar svg{width:23px;height:23px;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
+.window-ornament{position:absolute;bottom:15px;left:calc(50% + 55px);transform:translateX(-50%);display:flex;gap:5px;align-items:center;padding:7px;background:linear-gradient(145deg,#c5c5c54f,#60606075);border:1px solid #ffffff40;border-radius:35px;box-shadow:0 8px 25px #0002;backdrop-filter:blur(25px);-webkit-backdrop-filter:blur(25px)}.window-ornament button{padding:9px 18px;border-radius:22px;background:none;color:#fff;border:0;font:inherit;font-size:13px;cursor:pointer}.window-ornament button:hover,.window-ornament button.handar-hover{background:#ffffff2b}.window-ornament .separator{width:1px;height:20px;background:#ffffff30}
+button:focus-visible,a:focus-visible{outline:2px solid white;outline-offset:3px}button{touch-action:manipulation}
+@media(max-height:560px){.wrap{padding:14px 22px 65px 115px}.spatial-sidebar{left:22px}.top{height:54px}.card{padding:20px}.hero p{margin:8px 0 16px}.window-ornament{bottom:10px}}
+
+</style></head><body><div class="wrap"><nav class="spatial-sidebar" aria-label="Навигация"><button onclick="post('home')" aria-label="Главный экран"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="6" r="1.5"/><circle cx="12" cy="6" r="1.5"/><circle cx="18" cy="6" r="1.5"/><circle cx="6" cy="12" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="18" cy="12" r="1.5"/><circle cx="6" cy="18" r="1.5"/><circle cx="12" cy="18" r="1.5"/><circle cx="18" cy="18" r="1.5"/></svg></button><button onclick="post('safari')" aria-label="Safari"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m3 11 9-8 9 8M5 10v10h5v-6h4v6h5V10"/></svg></button><button onclick="post('photos')" aria-label="Фото"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="2" y="6" width="20" height="14" rx="4"/><circle cx="12" cy="13" r="4"/><path d="m8 6 2-3h4l2 3"/></svg></button><button onclick="post('settings')" aria-label="Настройки"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5h14M5 12h14M5 19h14"/><circle cx="9" cy="5" r="2" fill="#aaa"/><circle cx="15" cy="12" r="2" fill="#aaa"/><circle cx="9" cy="19" r="2" fill="#aaa"/></svg></button></nav>
+<div class="top"><div class="brand"><button class="back" aria-label="Главный экран" onclick="post('home')"></button><div class="title">%TITLE%</div></div><div class="small">HandAR</div></div>
+<div class="card">%BODY%</div><div class="window-ornament" aria-label="Панель окна"><button onclick="post('home')">Приложения</button><span class="separator"></span><button onclick="sys('center')">Центрировать</button><button onclick="post('settings')">Настройки</button></div></div>
+<script>function sys(action){try{window.webkit.messageHandlers.handarSystem.postMessage({action:action});}catch(e){}}function post(id){try{window.webkit.messageHandlers.handarApp.postMessage({id:id});}catch(e){}}%SCRIPTS%</script>
 </body></html>
 """#
         return template
@@ -3614,12 +3555,23 @@ addEventListener('resize',()=>{if(current==='fruit')[fruitW,fruitH]=fitCanvas(fc
 """
     )
 
+    private func applySpatialSurface(home: Bool, transparent: Bool) {
+        spatialHomeVisible = home
+        browser.isOpaque = !transparent
+        browser.backgroundColor = transparent ? .clear : .white
+        browser.scrollView.backgroundColor = transparent ? .clear : .white
+        browserFrameNode.isHidden = transparent
+        browserPlaneGeometry.cornerRadius = home ? 0 : 0.045
+        toolbarNode.isHidden = transparent || cinemaActive || isCinemaMode
+    }
+
     private func openVRDesktop() {
         isCinemaMode = false
         browserWorldWidth = Self.defaultPanelWidth
         browserWorldHeight = Self.defaultPanelHeight
         updatePanelSize(width: browserWorldWidth)
-        toolbarNode.isHidden = false
+        toolbarNode.isHidden = true
+        applySpatialSurface(home: true, transparent: true)
         browser.loadHTMLString(Self.vrDesktopHTML, baseURL: URL(string: "https://handar.vision/"))
     }
 
@@ -3629,6 +3581,7 @@ addEventListener('resize',()=>{if(current==='fruit')[fruitW,fruitH]=fitCanvas(fc
         browserWorldHeight = Self.defaultPanelHeight
         updatePanelSize(width: browserWorldWidth)
         toolbarNode.isHidden = false
+        applySpatialSurface(home: false, transparent: true)
         switch id {
         case "home":
             openVRDesktop()
@@ -3680,6 +3633,10 @@ addEventListener('resize',()=>{if(current==='fruit')[fruitW,fruitH]=fitCanvas(fc
     private func handleVRSystemAction(_ action: String) {
         switch action {
         case "home": openVRDesktop()
+        case "environment-camera", "environment-dark":
+            profile.passthrough = action == "environment-camera"
+            profile.save()
+            menu?.setProfile(profile)
         case "center": resetBrowserAnchor()
         case "exit": leaveVRToMenu()
         case "controller-diagnostics": showVRBoxDiagnostics()
@@ -3781,6 +3738,23 @@ private extension MainViewController {
 }
 
 extension MainViewController: WKNavigationDelegate, WKUIDelegate {
+    func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
+                 decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+        if webView === browser, navigationAction.targetFrame?.isMainFrame == true,
+           let url = navigationAction.request.url,
+           ["http", "https"].contains(url.scheme?.lowercased() ?? ""), url.host != "handar.vision" {
+            applySpatialSurface(home: false, transparent: false)
+            toolbarNode.isHidden = cinemaActive || isCinemaMode
+        }
+        decisionHandler(.allow)
+    }
+
+    func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+        if webView === browser {
+            snapshotGeneration = UUID()
+        }
+    }
+
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         if directVideoActive, webView === directVideoLeft || webView === directVideoRight {
             webView.evaluateJavaScript("window.__handarTuneDirectVideo ? window.__handarTuneDirectVideo() : null;", completionHandler: nil)
@@ -4262,7 +4236,7 @@ final class MainMenuView: UIView {
     init(frame: CGRect, profile: VRProfile) {
         self.profile = profile
         super.init(frame: frame)
-        backgroundColor = .black
+        backgroundColor = UIColor(white: 0.18, alpha: 1)
         build()
         applyProfile()
     }
@@ -4273,6 +4247,11 @@ final class MainMenuView: UIView {
 
     private func build() {
         titleLabel.text = "HandAR Vision"
+        let glass = UIVisualEffectView(effect: UIBlurEffect(style: .systemUltraThinMaterialDark))
+        glass.frame = bounds
+        glass.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        glass.isUserInteractionEnabled = false
+        insertSubview(glass, at: 0)
         titleLabel.textColor = .white
         titleLabel.font = .systemFont(ofSize: 26, weight: .medium)
         titleLabel.textAlignment = .center
@@ -4283,9 +4262,9 @@ final class MainMenuView: UIView {
         subtitleLabel.textAlignment = .center
 
         var config = UIButton.Configuration.filled()
-        config.title = "ВОЙТИ В VR"
-        config.baseForegroundColor = .white
-        config.baseBackgroundColor = UIColor(white: 0.16, alpha: 1)
+        config.title = "Открыть пространство"
+        config.baseForegroundColor = UIColor(white: 0.12, alpha: 1)
+        config.baseBackgroundColor = UIColor(white: 0.95, alpha: 1)
         config.cornerStyle = .capsule
         config.contentInsets = NSDirectionalEdgeInsets(top: 0, leading: 34, bottom: 0, trailing: 34)
         enterButton.configuration = config
@@ -4322,15 +4301,15 @@ final class MainMenuView: UIView {
 
         // 3D-кинотеатр: поле для ссылки на YouTube + кнопка входа.
         let cinemaTitle = UILabel()
-        cinemaTitle.text = "🎬 3D-КИНОТЕАТР"
-        cinemaTitle.textColor = UIColor(red: 0.55, green: 0.82, blue: 1.0, alpha: 1)
+        cinemaTitle.text = "Кинотеатр"
+        cinemaTitle.textColor = UIColor.white.withAlphaComponent(0.85)
         cinemaTitle.font = .systemFont(ofSize: 14, weight: .semibold)
 
-        cinemaField.placeholder = "Вставь ссылку на YouTube видео…"
+        cinemaField.placeholder = "Ссылка на видео или прямой поток…"
         cinemaField.textColor = .white
         cinemaField.tintColor = .white
-        cinemaField.backgroundColor = UIColor(white: 0.13, alpha: 1)
-        cinemaField.layer.cornerRadius = 12
+        cinemaField.backgroundColor = UIColor.white.withAlphaComponent(0.10)
+        cinemaField.layer.cornerRadius = 22
         cinemaField.borderStyle = .none
         cinemaField.keyboardType = .URL
         cinemaField.returnKeyType = .go
@@ -4341,10 +4320,10 @@ final class MainMenuView: UIView {
         cinemaField.leftViewMode = .always
 
         var cinemaConfig = UIButton.Configuration.filled()
-        cinemaConfig.title = "ВОЙТИ В КИНОЗАЛ"
+        cinemaConfig.title = "Открыть кинотеатр"
         cinemaConfig.baseForegroundColor = .white
-        cinemaConfig.baseBackgroundColor = UIColor(red: 0.42, green: 0.30, blue: 0.92, alpha: 1)
-        cinemaConfig.cornerStyle = .large
+        cinemaConfig.baseBackgroundColor = UIColor(white: 0.32, alpha: 0.8)
+        cinemaConfig.cornerStyle = .capsule
         cinemaButton.configuration = cinemaConfig
         cinemaButton.titleLabel?.font = .systemFont(ofSize: 16, weight: .semibold)
         cinemaButton.addAction(UIAction { [weak self] _ in
@@ -4411,6 +4390,11 @@ final class MainMenuView: UIView {
             diagnosticsButton.heightAnchor.constraint(equalToConstant: 36),
             diagnosticsButton.bottomAnchor.constraint(equalTo: safeAreaLayoutGuide.bottomAnchor, constant: -10)
         ])
+    }
+
+    func setProfile(_ updated: VRProfile) {
+        profile = updated
+        applyProfile()
     }
 
     private func applyProfile() {

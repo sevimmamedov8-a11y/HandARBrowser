@@ -336,13 +336,14 @@
     const v=playbackVideo();if(!v||!Number.isFinite(seconds))return;
     const target=absolute?seconds:(v.currentTime||0)+seconds;
     const end=Number.isFinite(v.duration)?v.duration:Number.MAX_VALUE;
-    try{v.currentTime=Math.max(0,Math.min(end,target));if(absolute){const p=v.play();if(p&&p.catch)p.catch(function(){});}}catch(e){}
+    try{v.currentTime=Math.max(0,Math.min(end,target));if(absolute){if(window.__handarSetPlaybackIntent)window.__handarSetPlaybackIntent(true);const p=v.play();if(p&&p.catch)p.catch(function(){});}}catch(e){}
   };
   window.__handarTogglePlay = function () {
     var v = playbackVideo();
     if (!v) return 'none';
     try {
-      if (v.paused) { v.play(); return 'play'; }
+      if(window.__handarSetPlaybackIntent)window.__handarSetPlaybackIntent(v.paused);
+      if (v.paused) { const p=v.play(); if(p&&p.catch)p.catch(function(){}); return 'play'; }
       v.pause(); return 'pause';
     } catch (e) { return 'none'; }
   };

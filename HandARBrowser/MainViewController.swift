@@ -1,6 +1,6 @@
 //
 //  MainViewController.swift
-//  HandAR Vision — V76
+//  HandAR Vision — V77
 //
 //  Стереоконвейер
 //  Передний план: реальные пиксели рук из камеры по узкой маске свежих суставов Vision.
@@ -629,6 +629,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     private var directVideoURL: URL?
     private var directVideoGeneration = UUID()
     private var directVideoSyncTimer: Timer?
+    private var directVideoSyncInFlight = false
     private var mediaAudioSessionActive = false
 
     // Metal
@@ -1477,7 +1478,8 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         let config = WKWebViewConfiguration()
         config.defaultWebpagePreferences.allowsContentJavaScript = true
         config.allowsInlineMediaPlayback = true
-        config.mediaTypesRequiringUserActionForPlayback = []
+        // The silent eye must never start an audible player before its script runs.
+        config.mediaTypesRequiringUserActionForPlayback = role == "right" ? .audio : []
         config.allowsPictureInPictureMediaPlayback = false
         config.preferences.isElementFullscreenEnabled = false
         config.websiteDataStore = browser.configuration.websiteDataStore
@@ -1490,7 +1492,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         }
         ucc.addUserScript(WKUserScript(
             source: Self.directVideoRoleScript(role: role),
-            injectionTime: .atDocumentEnd,
+            injectionTime: .atDocumentStart,
             forMainFrameOnly: true
         ))
         ucc.add(WeakScriptMessageHandler(self), name: "handarFeedback")
@@ -1518,42 +1520,106 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         (function(){
           window.__handarDirectRole = '\(role)';
           window.__handarDirectMuted = \(muted);
+          var wanted=true, blocked=false, pending=false, lastPlay=-Infinity, lastSeek=-Infinity;
+          var configured=new WeakSet();
           function video(){
             var all=[].slice.call(document.querySelectorAll('video'));
             all.sort(function(a,b){return (b.clientWidth*b.clientHeight)-(a.clientWidth*a.clientHeight);});
             return all[0]||null;
           }
+          function configure(v){
+            if(!v)return;
+            if(!configured.has(v)){
+              configured.add(v);
+              v.setAttribute('playsinline','');v.setAttribute('webkit-playsinline','');v.playsInline=true;
+              if(!window.__handarDirectMuted&&v.muted)v.muted=false;
+            }
+            // Muting the slave is mandatory before play(). Never repeatedly unmute
+            // the master: WebKit can pause playback when mute changes without a gesture.
+            if(window.__handarDirectMuted){
+              if(!v.muted)v.muted=true;
+              if(!v.defaultMuted)v.defaultMuted=true;
+              if(v.volume!==0)v.volume=0;
+            }
+          }
+          window.__handarSetPlaybackIntent=function(playing){
+            wanted=!!playing;blocked=false;
+            if(wanted)lastPlay=-Infinity;
+          };
+          function ensurePlaying(v){
+            if(!v||!wanted||blocked||document.hidden||v.ended||v.error||pending||!v.paused)return;
+            var now=Date.now();if(now-lastPlay<1500)return;lastPlay=now;
+            configure(v);pending=true;
+            function failed(e){pending=false;if(e&&e.name==='NotAllowedError')blocked=true;}
+            try{var p=v.play();if(p&&p.then)p.then(function(){pending=false;},failed);else pending=false;}catch(e){failed(e)}
+          }
           window.__handarTuneDirectVideo=function(){
             var v=video(); if(!v) return;
-            try{v.setAttribute('playsinline','');v.setAttribute('webkit-playsinline','');v.playsInline=true;}catch(e){}
-            try{v.muted=window.__handarDirectMuted;if(window.__handarDirectMuted){v.volume=0;}}catch(e){}
+            configure(v);
             if(window.__handarCinemaSurface && v.readyState>=2 && (!v.paused || v.currentTime>0)){
               document.documentElement.classList.add('handar-cinema-surface');
             }
           };
           window.__handarDirectPlay=function(){
             var v=video(); if(!v) return;
-            try{v.muted=window.__handarDirectMuted;v.volume=window.__handarDirectMuted?0:1;}catch(e){}
-            try{
-              v.style.setProperty('display','block','important');
-              v.style.setProperty('visibility','visible','important');
-              v.style.setProperty('opacity','1','important');
-              v.style.setProperty('background-color','#000','important');
-              v.style.setProperty('object-fit','contain','important');
-              v.style.setProperty('transform','translateZ(0)','important');
-            }catch(e){}
-            try{var p=v.play();if(p&&p.catch){p.catch(function(){})}}catch(e){}
+            window.__handarSetPlaybackIntent(true);configure(v);
+            if(!window.__handarDirectMuted && v.muted)v.muted=false;
+            ensurePlaying(v);
           };
+          window.__handarEnsureDirectVideo=function(){
+            window.__handarTuneDirectVideo();ensurePlaying(video());
+          };
+          window.__handarDirectState=function(){
+            var v=video();if(!v)return 'null';
+            return JSON.stringify({t:v.currentTime||0,p:v.paused,w:wanted&&!v.ended,b:blocked,
+              s:v.playbackRate||1,r:v.readyState,d:Number.isFinite(v.duration)?v.duration:0,
+              q:!!v.seeking,e:v.error?v.error.message:null});
+          };
+          window.__handarSyncDirectVideo=function(master){
+            var v=video();if(!v||!master)return;configure(v);
+            wanted=!!master.w&&!master.b;
+            if(!wanted){if(!v.paused)v.pause();return;}
+            if(Number.isFinite(master.s)&&master.s>0&&v.playbackRate!==master.s)v.playbackRate=master.s;
+            var now=Date.now();
+            // Independent pages can be in different ads or buffer windows. Seek
+            // only matching loaded timelines and allow the previous seek to settle.
+            var sameTimeline=master.d>0&&Number.isFinite(v.duration)&&Math.abs(v.duration-master.d)<2;
+            if(sameTimeline&&master.r>=3&&v.readyState>=3&&!master.p&&!master.q&&!v.seeking&&
+               Number.isFinite(master.t)&&Math.abs(v.currentTime-master.t)>0.8&&now-lastSeek>=2000){
+              var ranges=v.seekable,available=false;
+              for(var i=0;ranges&&i<ranges.length;i++)if(master.t>=ranges.start(i)&&master.t<=ranges.end(i))available=true;
+              if(available){try{v.currentTime=master.t;lastSeek=now;}catch(e){}}
+            }
+            ensurePlaying(v);
+          };
+          // Preserve explicit pauses from the site's own play/pause button too.
+          document.addEventListener('click',function(event){
+            if(!event.isTrusted&&!event.handarConfirmed)return;
+            var target=event.target&&event.target.closest?event.target.closest('.ytp-play-button,button[aria-label],button[title]'):null;
+            if(!target)return;
+            var label=(target.getAttribute('aria-label')||target.getAttribute('title')||'');
+            if(target.matches('.ytp-play-button')||/^(play|pause|воспроизвести|приостановить|пауза)/i.test(label)){
+              var v=video();if(v)window.__handarSetPlaybackIntent(v.paused);
+            }
+          },true);
+          var observer=new MutationObserver(function(changes){
+            changes.forEach(function(change){change.addedNodes.forEach(function(node){
+              if(node.nodeName==='VIDEO')configure(node);
+              if(node.querySelectorAll)node.querySelectorAll('video').forEach(configure);
+            });});
+          });
+          observer.observe(document,{childList:true,subtree:true});
           var style=document.createElement('style');
           style.textContent='html,body{background:#000!important;margin:0!important;} video{display:block!important;visibility:visible!important;opacity:1!important;transform:translateZ(0)!important;}' +
             'html.handar-cinema-surface,html.handar-cinema-surface body{overflow:hidden!important;}' +
-            '.handar-cinema-surface body *{visibility:hidden!important;}' +
             '.handar-cinema-surface video{visibility:visible!important;position:fixed!important;inset:0!important;width:100vw!important;height:100vh!important;object-fit:contain!important;z-index:2147483646!important;}' +
             '.handar-cinema-surface .html5-video-player,.handar-cinema-surface .html5-video-container{position:fixed!important;inset:0!important;width:100vw!important;height:100vh!important;}';
-          (document.head||document.documentElement).appendChild(style);
-          setInterval(window.__handarTuneDirectVideo,800);
-          setTimeout(window.__handarTuneDirectVideo,50);
-          setTimeout(window.__handarDirectPlay,600);
+          function installStyle(){var parent=document.head||document.documentElement;if(parent)parent.appendChild(style);else requestAnimationFrame(installStyle);}
+          installStyle();
+          setInterval(window.__handarEnsureDirectVideo,1000);
+          setTimeout(window.__handarEnsureDirectVideo,50);
+          setTimeout(window.__handarEnsureDirectVideo,600);
+          window.addEventListener('pagehide',function(){wanted=false;observer.disconnect();});
         })();
         """
     }
@@ -1795,6 +1861,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
 
     private func presentDirectVideoStage(url: URL) {
         directVideoGeneration = UUID()
+        directVideoSyncInFlight = false
         stopBrowserCapture()
         // The hall keeps rendering behind the projected live screen.
         vrView?.isPaused = !cinemaActive
@@ -1813,13 +1880,15 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         directVideoRight.load(request)
 
         directVideoSyncTimer?.invalidate()
-        directVideoSyncTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
+        directVideoSyncTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
             self?.syncDirectVideoEyes()
         }
+        if let timer = directVideoSyncTimer { RunLoop.main.add(timer, forMode:.common) }
     }
 
     private func hideDirectVideoStage() {
         directVideoGeneration = UUID()
+        directVideoSyncInFlight = false
         vrView?.isPaused = !inVR
         directVideoClickGate.cancel()
         directVideoActive = false
@@ -1860,48 +1929,39 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     }
 
     private func pauseAndMute(_ webView: WKWebView?) {
-        webView?.evaluateJavaScript("document.querySelectorAll('video,audio').forEach(function(v){try{v.muted=true;v.pause();}catch(e){}});", completionHandler: nil)
+        webView?.evaluateJavaScript("if(window.__handarSetPlaybackIntent)window.__handarSetPlaybackIntent(false);document.querySelectorAll('video,audio').forEach(function(v){try{v.muted=true;v.pause();}catch(e){}});", completionHandler: nil)
     }
 
     private func activateDirectVideoAudio() {
         if !mediaAudioSessionActive { activateMediaAudioSession() }
-        directVideoLeft?.evaluateJavaScript("window.__handarDirectPlay ? window.__handarDirectPlay() : null;", completionHandler: nil)
     }
 
     private func syncDirectVideoEyes() {
-        guard directVideoActive else { return }
+        guard directVideoActive, !directVideoSyncInFlight else { return }
         let generation = directVideoGeneration
-        let stateJS = """
-        (function(){
-          var all=[].slice.call(document.querySelectorAll('video'));
-          all.sort(function(a,b){return (b.clientWidth*b.clientHeight)-(a.clientWidth*a.clientHeight);});
-          var v=all[0];
-          if(!v) return 'null';
-          return JSON.stringify({t:v.currentTime||0,p:v.paused,s:v.playbackRate||1,r:v.readyState,e:v.error ? v.error.message : null});
-        })();
-        """
+        directVideoSyncInFlight = true
+        let stateJS = "window.__handarDirectState ? window.__handarDirectState() : 'null';"
         directVideoLeft.evaluateJavaScript(stateJS) { [weak self] result, _ in
-            guard let self, let raw = result as? String, raw != "null",
+            guard let self, self.directVideoActive, self.directVideoGeneration == generation else { return }
+            var awaitingRight = false
+            defer { if !awaitingRight { self.directVideoSyncInFlight = false } }
+            guard let raw = result as? String, raw != "null",
                   let data = raw.data(using: .utf8),
                   let object = try? JSONSerialization.jsonObject(with: data),
                   let state = object as? [String: Any],
-                  let t = state["t"] as? Double,
+                  let t = state["t"] as? Double, t.isFinite,
                   let paused = state["p"] as? Bool else { return }
-            guard self.directVideoActive, self.directVideoGeneration == generation else { return }
             if let error = state["e"] as? String { self.setDirectVideoNotice("Ошибка видео: " + error) }
+            else if state["b"] as? Bool == true { self.setDirectVideoNotice("Нажми ▶ для продолжения видео") }
             else if !paused, (state["r"] as? Int ?? 0) >= 2 { self.setDirectVideoNotice("") }
-            let rate = state["s"] as? Double ?? 1.0
-            let rightJS = """
-            (function(){
-              var all=[].slice.call(document.querySelectorAll('video'));
-              all.sort(function(a,b){return (b.clientWidth*b.clientHeight)-(a.clientWidth*a.clientHeight);});
-              var v=all[0]; if(!v) return;
-              try{if(Math.abs((v.currentTime||0)-\(t))>0.35){v.currentTime=\(t);}}catch(e){}
-              try{v.playbackRate=\(rate);}catch(e){}
-              try{if(\(paused ? "true" : "false")){v.pause();}else{var p=v.play();if(p&&p.catch){p.catch(function(){})}}}catch(e){}
-            })();
-            """
-            self.directVideoRight.evaluateJavaScript(rightJS, completionHandler: nil)
+            self.cinemaHall.setPlayingState(!paused)
+            self.cinemaHall.setTime(current:t,duration:state["d"] as? Double ?? 0)
+            let rightJS = "window.__handarSyncDirectVideo && window.__handarSyncDirectVideo(\(raw));"
+            awaitingRight = true
+            self.directVideoRight.evaluateJavaScript(rightJS) { [weak self] _, _ in
+                guard let self, self.directVideoGeneration == generation else { return }
+                self.directVideoSyncInFlight = false
+            }
         }
     }
 

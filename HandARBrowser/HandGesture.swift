@@ -21,6 +21,13 @@ struct StablePinchGesture {
     private(set) var isOpenConfirmed = false
     private(set) var generation: UInt64 = 0
 
+    var isEngaged: Bool {
+        switch phase {
+        case .closing, .down, .opening: return true
+        case .blocked, .ready: return false
+        }
+    }
+
     init(configuration: Configuration = Configuration()) { self.configuration = configuration }
 
     mutating func cancel() {
@@ -121,6 +128,47 @@ struct StableFistGesture {
             since = nil
         }
         return isClosed
+    }
+}
+
+// Bending the index to touch the thumb is not evidence of a panel grab.
+enum HandGestureIntent {
+    static func allowsFist(indexCurled: Bool?, curled: Int, known: Int,
+                           pinchRatio: Double?, pinchEngaged: Bool, indexFoldedIntoPalm: Bool = false) -> Bool {
+        guard indexCurled == true, known >= 3, curled >= 3 else { return false }
+        // A fully folded fist remains usable even if the thumb rests on the index.
+        if known == 4, curled == 4, indexFoldedIntoPalm { return true }
+        guard !pinchEngaged else { return false }
+        if let pinchRatio { return pinchRatio >= StablePinchGesture.Configuration().openRatio }
+        return true // Occluded tips may still form a reliably observed fist.
+    }
+}
+
+// Keep the pre-pinch aim while the fingers bend. Actual palm translation still
+// moves the pointer, so scrolling and dragging do not require fingertip motion.
+struct PinchAimStabilizer {
+    private var previousIndex: SIMD2<Double>?
+    private var previousPalm: SIMD2<Double>?
+    private var origin: SIMD2<Double>?
+    private var palmOrigin: SIMD2<Double>?
+
+    mutating func reset() { self = PinchAimStabilizer() }
+
+    mutating func update(index: SIMD2<Double>, palm: SIMD2<Double>, engaged: Bool,
+                         released: Bool = false) -> SIMD2<Double> {
+        defer { previousIndex = index; previousPalm = palm }
+        if engaged || released {
+            if origin == nil {
+                origin = previousIndex ?? index
+                palmOrigin = previousPalm ?? palm
+            }
+            let point = origin! + (palm - palmOrigin!)
+            if released { origin = nil; palmOrigin = nil }
+            return point
+        }
+        origin = nil
+        palmOrigin = nil
+        return index
     }
 }
 

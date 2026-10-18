@@ -132,6 +132,76 @@ struct HandGestureTests {
         _ = click.update(target:1,down:true,allowBegin:true)
         _ = click.update(target:nil,down:true,allowBegin:false)
         check(click.update(target:1,down:false,allowBegin:false) == nil,"missing native target cancels")
+
+        check(!HandGestureIntent.allowsFist(indexCurled:true,curled:4,known:4,pinchRatio:0.16,pinchEngaged:false),
+              "curled fingers with thumb/index contact remain a pinch")
+        check(!HandGestureIntent.allowsFist(indexCurled:true,curled:4,known:4,pinchRatio:0.6,pinchEngaged:true),
+              "opening a pinch cannot turn it into a fist before release")
+        check(HandGestureIntent.allowsFist(indexCurled:true,curled:4,known:4,pinchRatio:0.6,pinchEngaged:false),
+              "separated thumb/index and curled fingers can grab")
+        check(HandGestureIntent.allowsFist(indexCurled:true,curled:4,known:4,pinchRatio:nil,pinchEngaged:false),
+              "occluded tips do not disable a confident fist")
+        check(!HandGestureIntent.allowsFist(indexCurled:nil,curled:3,known:3,pinchRatio:nil,pinchEngaged:false),
+              "unknown index cannot start a fist")
+        check(HandGestureIntent.allowsFist(indexCurled:true,curled:4,known:4,pinchRatio:0.1,
+              pinchEngaged:true,indexFoldedIntoPalm:true),"fully folded fist cancels a pinch even with thumb/index contact")
+
+        // Real closing/holding/opening traces with a bending fingertip and a
+        // stationary palm must stay on a 12 px button hit target throughout.
+        for fps in [15.0,20,30,60] {
+            var gesture = StablePinchGesture(), aim = PinchAimStabilizer()
+            var time = 0.0
+            let palm = SIMD2<Double>(0.45,0.5), target = SIMD2<Double>(0.5,0.4)
+            var began: SIMD2<Double>?, ended: SIMD2<Double>?
+            var maxDrift = 0.0
+            for (ratio,offset) in [(0.6,0.0),(0.35,0.03),(0.15,0.06),(0.15,0.08),(0.6,-0.03)] {
+                for _ in 0..<Int(fps*0.2) {
+                    time += 1/fps
+                    let event = gesture.update(ratio:ratio,confident:true,at:time)
+                    let approaching = gesture.isOpenConfirmed && ratio < gesture.configuration.openRatio
+                    let point = aim.update(index:target+SIMD2(offset,0),palm:palm,
+                        engaged:gesture.isEngaged || approaching,released:event == .released)
+                    if event == .pressed { began = point }
+                    if gesture.isDown { maxDrift = max(maxDrift,HandPinchGeometry.distance(point,target)) }
+                    if event == .released { ended = point }
+                }
+            }
+            check(began == target && ended == target && maxDrift < 1e-12,
+                  "finger articulation cannot scroll or move a click off Safari")
+            let next = aim.update(index:SIMD2(0.8,0.4),palm:palm,engaged:false)
+            check(next == SIMD2(0.8,0.4),"hover resumes after release")
+            _ = aim.update(index:target,palm:palm,engaged:false)
+            _ = aim.update(index:target,palm:palm,engaged:true)
+            let dragged = aim.update(index:target,palm:palm+SIMD2(0,0.1),engaged:true)
+            check(HandPinchGeometry.distance(dragged,target+SIMD2(0,0.1)) < 1e-12,
+                  "deliberate palm movement still scrolls/drags")
+            aim.reset()
+            check(aim.update(index:target,palm:palm,engaged:false) == target,"loss clears captured aim")
+        }
+
+        let fingerBases = [SIMD2<Double>(144,172),SIMD2(130,120),SIMD2(107,113),SIMD2(84,119),SIMD2(65,130)]
+        let fingers: [[SIMD2<Double>?]] = fingerBases.enumerated().map { n,p in
+            (0..<4).map { p+SIMD2(Double(n == 0 ? $0*12 : 0),Double(-$0*24)) }
+        }
+        let silhouette = HandSilhouette.make(wrist:SIMD2(105,200),fingers:fingers)!
+        let doubled = HandSilhouette.make(wrist:SIMD2(210,400),fingers:fingers.map { $0.map { $0.map { $0*2 } } })!
+        check(silhouette.segments.count == 15,"all five complete fingers have bounded segments")
+        check(zip(silhouette.segments,doubled.segments).allSatisfy {
+            abs($0.startRadius*2-$1.startRadius)<1e-12 && $0.start*2 == $1.start
+        },"mask scales exactly with camera-space hand size")
+        check(silhouette.segments.allSatisfy { $0.endRadius < $0.startRadius },"all fingers taper toward their tips")
+        check(silhouette.segments[3].startRadius < 10,"normal 90 px palm cannot create a 100 px wide cutout")
+        let indexEdge = silhouette.segments[3].start.x-silhouette.segments[3].startRadius
+        let middleEdge = silhouette.segments[6].start.x+silhouette.segments[6].startRadius
+        check(indexEdge > middleEdge,"open index/middle finger gap stays visible")
+        var partial = fingers
+        partial[1][2] = nil
+        let missing = HandSilhouette.make(wrist:SIMD2(105,200),fingers:partial)!
+        check(missing.segments.count == 13,"missing joint cannot leave a cached bridge or disc")
+        partial[4][0] = nil
+        check(HandSilhouette.make(wrist:SIMD2(105,200),fingers:partial) == nil,"missing palm anchors cannot cut a broad hole")
+        check(HandSilhouette.make(wrist:SIMD2(10.5,20),fingers:fingers.map { $0.map { $0.map { $0*0.1 } } }) == nil,
+              "tiny uncertain hand does not expand to a fixed minimum width")
         print("PASS: \(checks) native hand gesture checks")
     }
 }

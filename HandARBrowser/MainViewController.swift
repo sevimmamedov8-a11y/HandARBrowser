@@ -1,9 +1,9 @@
 //
 //  MainViewController.swift
-//  HandAR Vision — V50
+//  HandAR Vision — V76
 //
 //  Стереоконвейер
-//  Передний план: реальные пиксели рук из камеры композятся поверх браузера по маске Vision.
+//  Передний план: реальные пиксели рук из камеры по узкой маске свежих суставов Vision.
 //  --------------
 //    ARKit (поза головы)
 //        └─► одна SCNScene, две камеры на реальном IPD
@@ -42,6 +42,9 @@ struct HandSample {
     let middleTip: CGPoint
     let thumbTip: CGPoint
     let joints: [VNHumanHandPoseObservation.JointName: CGPoint]
+    /// Only current, confident landmarks may cut holes in the virtual surface.
+    let maskJoints: [VNHumanHandPoseObservation.JointName: CGPoint]
+    let imageSize: SIMD2<Double>
     /// Confirmed thumb + index contact, held until confirmed opening.
     let clickPinch: Bool
     let clickBegan: Bool
@@ -55,7 +58,7 @@ struct HandSample {
     }
     func routed(down: Bool, began: Bool) -> HandSample {
         HandSample(hand:hand,timestamp:timestamp,generation:generation,indexTip:indexTip,
-            middleTip:middleTip,thumbTip:thumbTip,joints:joints,clickPinch:down,
+            middleTip:middleTip,thumbTip:thumbTip,joints:joints,maskJoints:maskJoints,imageSize:imageSize,clickPinch:down,
             clickBegan:began,clickOpenConfirmed:clickOpenConfirmed,grabPinch:grabPinch,isFist:isFist)
     }
 }
@@ -641,13 +644,14 @@ final class MainViewController: UIViewController, MTKViewDelegate {
 
     // CPU-маска кисти. Шейдер использует её только как альфа-маттинг для
     // настоящего изображения камеры, поэтому руки выглядят натурально.
-    private let handMaskWidth = 320
-    private let handMaskHeight = 320
+    private let handMaskWidth = 512
+    private let handMaskHeight = 384
     private var handMaskTexture: MTLTexture?
     private let handMaskLock = NSLock()
     private var pendingHandMaskBytes = [UInt8]()
     private var pendingHandMaskActive = false
     private var handMaskNeedsUpload = false
+    private var handMaskTimestamp: Double = -.infinity
 
     // Сцена: одна на оба глаза
     private let worldScene = SCNScene()
@@ -3103,24 +3107,12 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         }
     }
 
-    /// Пересечение луча с плоскостью панели. Считаем напрямую: это дешевле
-    /// и честнее, чем гонять точку через вьюпорты.
-    /// Скелет кладём прямо на мировую плоскость браузера и сдвигаем на 18 мм
-    /// к камере. Поэтому при движении браузера скелет остаётся совмещённым
-    /// с рукой, но не проваливается под текстуру страницы.
-    private static let handMaskBonePairs: [(VNHumanHandPoseObservation.JointName, VNHumanHandPoseObservation.JointName)] = [
-        (.wrist, .thumbCMC), (.thumbCMC, .thumbMP), (.thumbMP, .thumbIP), (.thumbIP, .thumbTip),
-        (.wrist, .indexMCP), (.indexMCP, .indexPIP), (.indexPIP, .indexDIP), (.indexDIP, .indexTip),
-        (.wrist, .middleMCP), (.middleMCP, .middlePIP), (.middlePIP, .middleDIP), (.middleDIP, .middleTip),
-        (.wrist, .ringMCP), (.ringMCP, .ringPIP), (.ringPIP, .ringDIP), (.ringDIP, .ringTip),
-        (.wrist, .littleMCP), (.littleMCP, .littlePIP), (.littlePIP, .littleDIP), (.littleDIP, .littleTip)
-    ]
-
     /// Создаёт маску кисти в координатах сырого кадра камеры. В ней нет
     /// графики скелета — она только определяет, какие настоящие пиксели камеры
     /// нужно показать поверх браузера.
     private func queueHandForegroundMask(left: HandSample?, right: HandSample?) {
-        let activeSamples = [left, right].compactMap { $0 }
+        let now = CACurrentMediaTime()
+        let activeSamples = [left, right].compactMap { $0 }.filter { now-$0.timestamp <= 0.12 }
         if activeSamples.isEmpty {
             handMaskLock.lock()
             let alreadyClear = !pendingHandMaskActive
@@ -3156,75 +3148,67 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         context.setLineCap(.round)
         context.setLineJoin(.round)
 
-        for sample in activeSamples {
-            drawHandMask(sample, in: context)
-        }
+        var active = false
+        for sample in activeSamples { if drawHandMask(sample, in: context) { active = true } }
 
         handMaskLock.lock()
         pendingHandMaskBytes = bytes
-        pendingHandMaskActive = true
+        pendingHandMaskActive = active
+        handMaskTimestamp = activeSamples.map(\.timestamp).min() ?? -.infinity
         handMaskNeedsUpload = true
         handMaskLock.unlock()
     }
 
-    private func drawHandMask(_ sample: HandSample, in context: CGContext) {
+    private func drawHandMask(_ sample: HandSample, in context: CGContext) -> Bool {
         let landscapeLeft = currentInterfaceOrientation() == .landscapeLeft
-        let width = CGFloat(handMaskWidth - 1)
-        let height = CGFloat(handMaskHeight - 1)
-
-        func toRawCameraPoint(_ visionPoint: CGPoint) -> CGPoint {
-            var u = visionPoint.x
-            var v = visionPoint.y
-            if landscapeLeft {
-                u = 1 - u
-            } else {
-                v = 1 - v
-            }
-            return CGPoint(
-                x: min(max(u, 0), 1) * width,
-                y: min(max(v, 0), 1) * height
-            )
+        // Build in real camera pixels: a square UV texture must not widen fingers
+        // along the long side of a landscape camera frame.
+        func point(_ name: VNHumanHandPoseObservation.JointName) -> SIMD2<Double>? {
+            guard let p = sample.maskJoints[name], p.x.isFinite, p.y.isFinite,
+                  (0...1).contains(p.x), (0...1).contains(p.y) else { return nil }
+            return SIMD2(landscapeLeft ? 1-Double(p.x) : Double(p.x),
+                         landscapeLeft ? Double(p.y) : 1-Double(p.y)) * sample.imageSize
         }
-
-        let palmNames: [VNHumanHandPoseObservation.JointName] = [
-            .wrist, .littleMCP, .ringMCP, .middleMCP, .indexMCP
+        let chains: [[VNHumanHandPoseObservation.JointName]] = [
+            [.thumbCMC,.thumbMP,.thumbIP,.thumbTip], [.indexMCP,.indexPIP,.indexDIP,.indexTip],
+            [.middleMCP,.middlePIP,.middleDIP,.middleTip], [.ringMCP,.ringPIP,.ringDIP,.ringTip],
+            [.littleMCP,.littlePIP,.littleDIP,.littleTip]
         ]
-        let palmPoints = palmNames.compactMap { sample.joints[$0].map(toRawCameraPoint) }
-        if palmPoints.count >= 3 {
+        guard let shape = HandSilhouette.make(wrist:point(.wrist), fingers:chains.map { $0.map(point) }) else { return false }
+        context.saveGState()
+        defer { context.restoreGState() }
+        context.scaleBy(x:CGFloat(Double(handMaskWidth)/sample.imageSize.x),
+                        y:CGFloat(Double(handMaskHeight)/sample.imageSize.y))
+        func cg(_ p: SIMD2<Double>) -> CGPoint { CGPoint(x:p.x,y:p.y) }
+        func fill(_ points: [SIMD2<Double>]) {
+            guard let first = points.first else { return }
             let path = CGMutablePath()
-            path.move(to: palmPoints[0])
-            for point in palmPoints.dropFirst() { path.addLine(to: point) }
+            path.move(to:cg(first))
+            for p in points.dropFirst() { path.addLine(to:cg(p)) }
             path.closeSubpath()
             context.addPath(path)
             context.fillPath()
         }
-
-        let fingerWidth = max(CGFloat(8), min(CGFloat(28), CGFloat(handMaskHeight) * 0.055))
-        let palmWidth = fingerWidth * 1.35
-        for (a, b) in Self.handMaskBonePairs {
-            guard let pa = sample.joints[a].map(toRawCameraPoint),
-                  let pb = sample.joints[b].map(toRawCameraPoint) else { continue }
-            context.setLineWidth((a == .wrist || b == .wrist) ? palmWidth : fingerWidth)
-            context.move(to: pa)
-            context.addLine(to: pb)
-            context.strokePath()
+        func disc(_ p: SIMD2<Double>, _ r: Double) {
+            context.fillEllipse(in:CGRect(x:p.x-r,y:p.y-r,width:r*2,height:r*2))
         }
-
-        let jointRadius = fingerWidth * 0.58
-        for point in sample.joints.values.map(toRawCameraPoint) {
-            context.fillEllipse(in: CGRect(
-                x: point.x - jointRadius,
-                y: point.y - jointRadius,
-                width: jointRadius * 2,
-                height: jointRadius * 2
-            ))
+        fill(shape.palm)
+        for segment in shape.segments {
+            let delta = segment.end-segment.start
+            let normal = SIMD2(-delta.y,delta.x)/HandPinchGeometry.distance(segment.start,segment.end)
+            let a = normal*segment.startRadius, b = normal*segment.endRadius
+            fill([segment.start+a,segment.end+b,segment.end-b,segment.start-a])
+            disc(segment.start,segment.startRadius)
+            disc(segment.end,segment.endRadius)
         }
+        return true
     }
 
     private func syncHandMaskTexture() -> Bool {
         guard let texture = handMaskTexture else { return false }
         handMaskLock.lock()
-        let active = pendingHandMaskActive
+        // Never leave an old cutout over a newer live camera image after a stall.
+        let active = pendingHandMaskActive && CACurrentMediaTime()-handMaskTimestamp <= 0.12
         guard handMaskNeedsUpload else {
             handMaskLock.unlock()
             return active
@@ -4473,6 +4457,7 @@ final class HandTracker {
         var jointAges: [VNHumanHandPoseObservation.JointName: Int] = [:]
         var pinch = StablePinchGesture()
         var fist = StableFistGesture()
+        var aim = PinchAimStabilizer()
         var previousWrist: SIMD2<Double>?
         var previousPalm: Double?
 
@@ -4481,6 +4466,7 @@ final class HandTracker {
             jointAges.removeAll(keepingCapacity: true)
             pinch.cancel() // Keep the generation monotonic across loss/reacquisition.
             fist.reset()
+            aim.reset()
             previousWrist = nil
             previousPalm = nil
         }
@@ -4585,29 +4571,46 @@ final class HandTracker {
         // A pinch with the other three fingers curled is not a fist: the index
         // itself must be observably curled before panel grabbing is possible.
         let indexCurl = fingerCurled(mcp:curlPoint(.indexMCP),pip:curlPoint(.indexPIP),dip:curlPoint(.indexDIP))
-        let fist = state.fist.update(curled:indexCurl == true ? curled : 0,
-                                    known:indexCurl == nil ? 0 : known,at:time)
         var measurement: HandPinchMeasurement?
         if let index, let thumb, let indexBase {
             measurement = HandPinchGeometry.measure(thumb:pixel(thumb),index:pixel(index),wrist:pixel(wrist),
                 indexBase:pixel(indexBase),middleBase:pixel(middleBase),littleBase:fresh(.littleMCP).map(pixel))
         }
+        let foldedIndex = index.flatMap { tip in indexBase.map { base in
+            HandPinchGeometry.distance(pixel(wrist),pixel(tip)) < HandPinchGeometry.distance(pixel(wrist),pixel(base))*0.85
+        } } ?? false
+        let allowsFist = HandGestureIntent.allowsFist(indexCurled:indexCurl,curled:curled,known:known,
+            pinchRatio:measurement?.ratio,pinchEngaged:state.pinch.isEngaged,indexFoldedIntoPalm:foldedIndex)
+        let fist = state.fist.update(curled:allowsFist ? curled : 0,
+                                    known:indexCurl == nil ? 0 : known,at:time)
         var discontinuity = false
         if let palm = measurement?.palmSpan, let previousPalm = state.previousPalm,
            let previousWrist = state.previousWrist {
             let scale = palm / previousPalm
             discontinuity = scale < 0.55 || scale > 1.8 || HandPinchGeometry.distance(pixel(wrist),previousWrist) > palm*0.9
         }
-        state.pinch.update(ratio:measurement?.ratio,confident:measurement != nil && !discontinuity && indexCurl != nil,
-                           grabbing:fist || (indexCurl == true && known >= 3 && curled >= 2),at:time)
+        let transition = state.pinch.update(ratio:measurement?.ratio,confident:measurement != nil && !discontinuity,
+                                            grabbing:fist || allowsFist,at:time)
+        if transition == .cancelled { state.aim.reset() }
         state.previousWrist = pixel(wrist)
         state.previousPalm = measurement?.palmSpan
         state.joints = filtered
         // A fist may occlude fingertips. Aim it using a fresh palm joint.
-        let pointer = index.map { filtered[.indexTip] ?? $0 } ?? (filtered[.middleMCP] ?? middleBase)
+        let fingerPoint = index.map { filtered[.indexTip] ?? $0 } ?? (filtered[.middleMCP] ?? middleBase)
+        let stableWrist = filtered[.wrist] ?? wrist, stableBase = filtered[.middleMCP] ?? middleBase
+        let palmPoint = CGPoint(x:(stableWrist.x+stableBase.x)*0.5,y:(stableWrist.y+stableBase.y)*0.5)
+        let approaching = state.pinch.isOpenConfirmed && (measurement?.ratio ?? .infinity) < state.pinch.configuration.openRatio
+        let stablePoint = state.aim.update(index:SIMD2(Double(fingerPoint.x),Double(fingerPoint.y)),
+            palm:SIMD2(Double(palmPoint.x),Double(palmPoint.y)),engaged:state.pinch.isEngaged || approaching,
+            released:transition == .released)
+        let pointer = CGPoint(x:stablePoint.x,y:stablePoint.y)
+        let maskJoints = points.reduce(into: [VNHumanHandPoseObservation.JointName: CGPoint]()) { result, entry in
+            if entry.value.confidence >= 0.55 { result[entry.key] = entry.value.location }
+        }
         return HandSample(hand:side,timestamp:time,generation:state.pinch.generation,
             indexTip:pointer,middleTip:middle.map {filtered[.middleTip] ?? $0} ?? pointer,
             thumbTip:thumb.map {filtered[.thumbTip] ?? $0} ?? pointer,joints:filtered,
+            maskJoints:maskJoints,imageSize:size,
             clickPinch:state.pinch.isDown,clickBegan:false,clickOpenConfirmed:state.pinch.isOpenConfirmed,
             grabPinch:fist,isFist:fist)
     }

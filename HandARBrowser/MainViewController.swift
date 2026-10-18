@@ -1,6 +1,6 @@
 //
 //  MainViewController.swift
-//  HandAR Vision — V79
+//  HandAR Vision — V80
 //
 //  Стереоконвейер
 //  Передний план: реальные пиксели рук из камеры по узкой маске свежих суставов Vision.
@@ -1431,11 +1431,13 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         directVideoRight = makeDirectVideoWebView(role: "right")
         for (eye, webView) in [directVideoLeft!, directVideoRight!].enumerated() {
             cinemaEyeContainers[eye].backgroundColor = .clear
+            cinemaEyeContainers[eye].isOpaque = false
             directVideoStage.addSubview(cinemaEyeContainers[eye])
             cinemaEyeContainers[eye].addSubview(webView)
         }
 
         directVideoLensMask.backgroundColor = .clear
+        directVideoLensMask.isOpaque = false
         directVideoLensMask.isUserInteractionEnabled = false
         directVideoStage.addSubview(directVideoLensMask)
 
@@ -1582,23 +1584,34 @@ final class MainViewController: UIViewController, MTKViewDelegate {
             var v=video();if(!v)return 'null';
             return JSON.stringify({t:v.currentTime||0,p:v.paused,w:wanted&&!v.ended,b:blocked,
               s:v.playbackRate||1,r:v.readyState,d:Number.isFinite(v.duration)?v.duration:0,
-              q:!!v.seeking,e:v.error?v.error.message:null});
+              q:!!v.seeking,a:Date.now(),e:v.error?v.error.message:null});
           };
           window.__handarSyncDirectVideo=function(master){
             var v=video();if(!v||!master)return;configure(v);
             wanted=!!master.w&&!master.b;
-            if(!wanted){if(!v.paused)v.pause();return;}
-            if(Number.isFinite(master.s)&&master.s>0&&v.playbackRate!==master.s)v.playbackRate=master.s;
+            var baseRate=Number.isFinite(master.s)&&master.s>0?master.s:1;
+            if(!wanted){if(v.playbackRate!==baseRate)v.playbackRate=baseRate;if(!v.paused)v.pause();return;}
             var now=Date.now();
             // Independent pages can be in different ads or buffer windows. Seek
             // only matching loaded timelines and allow the previous seek to settle.
             var sameTimeline=master.d>0&&Number.isFinite(v.duration)&&Math.abs(v.duration-master.d)<2;
-            if(sameTimeline&&master.r>=3&&v.readyState>=3&&!master.p&&!master.q&&!v.seeking&&
-               Number.isFinite(master.t)&&Math.abs(v.currentTime-master.t)>0.8&&now-lastSeek>=2000){
+            // Both WebKit processes use the same wall clock. Compensate for the
+            // JS/native/JS round trip instead of chasing an already old position.
+            var age=Number.isFinite(master.a)?(now-master.a)/1000:0;
+            var ready=sameTimeline&&master.r>=3&&v.readyState>=3&&!master.p&&!master.q&&!v.seeking&&age>=0&&age<0.75;
+            var target=master.t+(ready?age*baseRate:0), rate=baseRate;
+            if(ready&&Number.isFinite(target)){
               var ranges=v.seekable,available=false;
-              for(var i=0;ranges&&i<ranges.length;i++)if(master.t>=ranges.start(i)&&master.t<=ranges.end(i))available=true;
-              if(available){try{v.currentTime=master.t;lastSeek=now;}catch(e){}}
+              for(var i=0;ranges&&i<ranges.length;i++)if(target>=ranges.start(i)&&target<=ranges.end(i))available=true;
+              var drift=target-v.currentTime;
+              if(available&&Math.abs(drift)>0.45&&now-lastSeek>=2000){
+                try{v.currentTime=target;lastSeek=now;}catch(e){}
+              }else if(available&&Math.abs(drift)>0.035){
+                // Small drift is corrected without repeatedly flushing buffers.
+                rate=baseRate*(1+Math.max(-0.10,Math.min(0.10,drift*0.6)));
+              }
             }
+            if(Math.abs(v.playbackRate-rate)>0.001)v.playbackRate=rate;
             ensurePlaying(v);
           };
           // Preserve explicit pauses from the site's own play/pause button too.
@@ -1636,6 +1649,9 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     private func layoutDirectVideoStage() {
         let bounds = view.bounds
         directVideoStage.frame = bounds
+        // The hall has its own Home button below the screen. Keep the floating
+        // exit only for the separate flat-video stage.
+        for button in directVideoExitButtons { button.isHidden = cinemaWebScreenActive }
         if cinemaWebScreenActive {
             updateCinemaWebScreen()
             return
@@ -1856,7 +1872,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     }
 
     private func handleDirectVideoExit(at point: CGPoint, pinch: Bool, allowBegin: Bool = true, dwell: Bool = false) -> Bool {
-        let selected = directVideoExitButtons.firstIndex { $0.frame.contains(point) }
+        let selected = directVideoExitButtons.firstIndex { !$0.isHidden && $0.frame.contains(point) }
         for (index,button) in directVideoExitButtons.enumerated() { button.isHighlighted = index == selected }
         let confirmed = directVideoClickGate.update(target:selected,down:pinch,allowBegin:allowBegin,dwell:dwell,at:CACurrentMediaTime())
         directDwellRing.isHidden = directVideoClickGate.dwellProgress <= 0
@@ -1884,6 +1900,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         // The hall keeps rendering behind the projected live screen.
         vrView?.isPaused = !cinemaActive
         directVideoStage.backgroundColor = cinemaActive ? .clear : .black
+        directVideoStage.isOpaque = !cinemaActive
         directVideoClickGate.cancel()
         directVideoURL = url
         setDirectVideoNotice("Загружаю страницу…")
@@ -1898,7 +1915,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         directVideoRight.load(request)
 
         directVideoSyncTimer?.invalidate()
-        directVideoSyncTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+        directVideoSyncTimer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in
             self?.syncDirectVideoEyes()
         }
         if let timer = directVideoSyncTimer { RunLoop.main.add(timer, forMode:.common) }
@@ -2287,7 +2304,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     // MARK: Кинотеатр
 
     /// Вход в 3D-кинозал. Браузерная панель становится экраном, вокруг неё
-    /// строится зал с креслами и панелью управления за спиной.
+    /// строится зал с креслами и панелью управления под экраном.
     private func enterCinema(url: URL?) {
         cancelHandInteraction()
         handOwnership.suppressUntilOpen()
@@ -2952,7 +2969,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         let freshRight = rawRight.flatMap { now-$0.timestamp <= 0.2 && now >= $0.timestamp && tracking.acceptsHand(timestamp:$0.timestamp) ? $0 : nil }
         lastHandDeliveryTime = max(freshLeft?.timestamp ?? -.infinity, freshRight?.timestamp ?? -.infinity)
         if freshLeft != nil || freshRight != nil { lastHandSeenTime = now }
-        if !directVideoActive { queueHandForegroundMask(left:freshLeft,right:freshRight) }
+        if !directVideoActive && !cinemaActive { queueHandForegroundMask(left:freshLeft,right:freshRight) }
         // Resizing consumes both pinches; neither may turn into a click afterward.
         if !cinemaActive, !securityGameActive, !directVideoActive,
            let left = freshLeft, let right = freshRight, left.clickPinch, right.clickPinch {
@@ -3703,9 +3720,9 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         // Радиус ограничен и по высоте, и по ширине, поэтому окружность
         // не превращается в овал и одинакова для обоих глаз.
         uniforms.rClip = 0.497
-        uniforms.passthrough = (profile.passthrough && hasCamera) ? 1 : 0
+        uniforms.passthrough = (profile.passthrough && hasCamera && !cinemaActive) ? 1 : 0
 
-        guard let frame, profile.passthrough, hasCamera else { return uniforms }
+        guard let frame, profile.passthrough, hasCamera, !cinemaActive else { return uniforms }
 
         guard let projection = frame.projection else {
             uniforms.passthrough = 0
@@ -4292,8 +4309,8 @@ addEventListener('resize',()=>{if(current==='fruit')[fruitW,fruitH]=fitCanvas(fc
 /// Black overlay with two transparent circular holes. It creates the VR-lens
 /// silhouette without applying a Core Animation mask to the WKWebView layers,
 /// which can interfere with hardware-decoded HTML5 video presentation.
-/// Виртуальная рука поверх настоящей: рисуем ладонь плюс батарею пальцев
-/// с сужением к кончикам, используя те же суставы, что и трекер.
+/// Each eye owns its half of the display. Clear its aperture independently:
+/// even-odd filling two overlapping circles produces an opaque central lens.
 final class DirectVideoLensMaskView: UIView {
     var leftCircle: CGRect = .zero { didSet { if oldValue != leftCircle { setNeedsDisplay() } } }
     var rightCircle: CGRect = .zero { didSet { if oldValue != rightCircle { setNeedsDisplay() } } }
@@ -4301,14 +4318,16 @@ final class DirectVideoLensMaskView: UIView {
     override func draw(_ rect: CGRect) {
         guard let context = UIGraphicsGetCurrentContext() else { return }
         context.setFillColor(UIColor.black.cgColor)
-        context.addRect(bounds)
-        if leftCircle.width > 1 && leftCircle.height > 1 {
-            context.addEllipse(in: leftCircle)
+        context.fill(bounds)
+        for (eye,circle) in [leftCircle,rightCircle].enumerated() {
+            guard circle.width > 1, circle.height > 1 else { continue }
+            context.saveGState()
+            context.clip(to:CGRect(x:bounds.minX+CGFloat(eye)*bounds.width*0.5,
+                                   y:bounds.minY,width:bounds.width*0.5,height:bounds.height))
+            context.setBlendMode(.clear)
+            context.fillEllipse(in:circle)
+            context.restoreGState()
         }
-        if rightCircle.width > 1 && rightCircle.height > 1 {
-            context.addEllipse(in: rightCircle)
-        }
-        context.drawPath(using: .eoFill)
     }
 }
 

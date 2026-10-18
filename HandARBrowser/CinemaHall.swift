@@ -49,17 +49,6 @@ private extension SCNMaterial {
     }
 }
 
-private func raySphereHit(ray: WorldRay, center: SIMD3<Float>, radius: Float) -> Float? {
-    let oc = ray.origin - center
-    let a = simd_dot(ray.direction, ray.direction)
-    let b = 2 * simd_dot(oc, ray.direction)
-    let c = simd_dot(oc, oc) - radius * radius
-    let discriminant = b * b - 4 * a * c
-    guard discriminant >= 0 else { return nil }
-    let t = (-b - discriminant.squareRoot()) / (2 * a)
-    return t > 0 ? t : nil
-}
-
 private func renderTextImage(
     _ value: String,
     color: UIColor,
@@ -135,7 +124,6 @@ private final class CineText: SCNNode {
 /// 3D-кнопка на панели управления.
 private final class CineButton {
     let node = SCNNode()
-    let hitRadius: Float
     private let plate: SCNNode
     private let textNode = SCNNode()
     private var currentTitle: String?
@@ -143,9 +131,8 @@ private final class CineButton {
     private let width: Float
     private let height: Float
 
-    init(title: String, color: UIColor, width: Float = 0.34, height: Float = 0.168, hitRadius: Float = 0.2) {
+    init(title: String, color: UIColor, width: Float = 0.46, height: Float = 0.22) {
         self.base = color
-        self.hitRadius = hitRadius
         self.width = width
         self.height = height
 
@@ -184,13 +171,21 @@ private final class CineButton {
     }
 
     func hitTest(ray: WorldRay) -> Bool {
-        raySphereHit(ray: ray, center: node.presentation.simdWorldPosition, radius: hitRadius) != nil
+        // Hit the visible plate, not overlapping spheres around neighboring buttons.
+        let inverse=node.presentation.simdWorldTransform.inverse
+        let origin=inverse * SIMD4<Float>(ray.origin,1)
+        let direction=inverse * SIMD4<Float>(ray.direction,0)
+        guard abs(direction.z)>0.00001 else { return false }
+        let t = -origin.z/direction.z
+        guard t>0 else { return false }
+        let hit=origin+direction*t
+        return abs(hit.x)<=width*0.5+0.025 && abs(hit.y)<=height*0.5+0.025
     }
 
     func setHighlight(_ highlighted: Bool) {
         let material = plate.geometry?.firstMaterial
         material?.diffuse.contents = highlighted
-            ? UIColor(white: 0.58, alpha: 0.95)
+            ? UIColor(red:0.24,green:0.34,blue:0.37,alpha:1)
             : base.withAlphaComponent(0.95)
         material?.emission.contents = highlighted
             ? base.withAlphaComponent(0.9)
@@ -200,8 +195,8 @@ private final class CineButton {
 
 // MARK: - Кинотеатр ----------------------------------------------------------
 
-/// Полноценный 3D-кинозал IMAX: широкий экран, кресла с подлокотниками,
-/// кресло зрителя, потолочный свет, неон, шторы и компактный пульт за спиной.
+/// Объёмный 3D-кинозал: широкий экран, кресла с подлокотниками,
+/// кресло зрителя, потолочный свет, неон, шторы и компактный пульт под экраном.
 final class CinemaHall {
 
     /// Размер экрана. 4.55 × 2.56 м на 4 м — почти как в IMAX.
@@ -210,6 +205,7 @@ final class CinemaHall {
     static let screenDistance: Float = 4.0
     /// Высота глаз сидящего зрителя.
     static let seatedEyeHeight: Float = 1.18
+    static let screenCenterHeight: Float = 1.85
 
     var onExitRequested: (() -> Void)?
     var onToggleLights: ((Bool) -> Void)?
@@ -220,7 +216,7 @@ final class CinemaHall {
     var onRestart: (() -> Void)?
 
     private(set) var isRunning = false
-    private(set) var lightsOn = true
+    private(set) var lightsOn = false
     /// Мировая позиция и ориентация экрана — сюда MainViewController ставит
     /// браузерную панель/плеер.
     private(set) var screenWorldTransform = matrix_identity_float4x4
@@ -236,16 +232,15 @@ final class CinemaHall {
     /// Подпись под экраном: загрузка либо подсказка, если поток не отдан.
     private let noticeLabel = CineText()
 
-    private let lightButton = CineButton(title: "Свет", color: UIColor(white: 0.36, alpha: 1))
-    private let playButton = CineButton(title: "Пауза", color: UIColor(white: 0.36, alpha: 1))
-    private let backButton = CineButton(title: "⏪ −10с", color: UIColor(white: 0.34, alpha: 1))
-    private let fwdButton = CineButton(title: "⏩ +10с", color: UIColor(white: 0.34, alpha: 1))
-    private let volDownButton = CineButton(title: "🔉", color: UIColor(white: 0.36, alpha: 1))
-    private let volUpButton = CineButton(title: "🔊", color: UIColor(white: 0.36, alpha: 1))
-    private let restartButton = CineButton(title: "🔁", color: UIColor(white: 0.34, alpha: 1))
-    private let exitButton = CineButton(title: "Закрыть", color: UIColor(white: 0.36, alpha: 1))
+    private let lightButton = CineButton(title: "Свет", color: UIColor(white: 0.17, alpha: 1))
+    private let playButton = CineButton(title: "Пауза", color: UIColor(red:0.10,green:0.26,blue:0.27,alpha:1))
+    private let backButton = CineButton(title: "⏪ −10с", color: UIColor(white: 0.15, alpha: 1))
+    private let fwdButton = CineButton(title: "⏩ +10с", color: UIColor(white: 0.15, alpha: 1))
+    private let volDownButton = CineButton(title: "− звук", color: UIColor(white: 0.17, alpha: 1))
+    private let volUpButton = CineButton(title: "+ звук", color: UIColor(white: 0.17, alpha: 1))
+    private let restartButton = CineButton(title: "Сначала", color: UIColor(white: 0.15, alpha: 1))
+    private let exitButton = CineButton(title: "Домой", color: UIColor(white: 0.17, alpha: 1))
     private let panelTitle = CineText()
-    private let panelHint = CineText()
 
     private var buttonClickGate = ReleaseClickGate<ObjectIdentifier>()
     private let dwellRing = DwellProgressRing()
@@ -263,7 +258,8 @@ final class CinemaHall {
         isRunning = true
         self.scene = scene
 
-        let forward = simd_normalize(SIMD3<Float>(cameraForward.x, 0, cameraForward.z))
+        let flatForward=SIMD3<Float>(cameraForward.x,0,cameraForward.z)
+        let forward=simd_length(flatForward)>0.0001 ? simd_normalize(flatForward) : SIMD3<Float>(0,0,-1)
         let right = simd_normalize(simd_cross(SIMD3<Float>(0, 1, 0), forward))
 
         // Пол зала — на высоте сидящего зрения, ось -Z смотрит на экран.
@@ -288,7 +284,7 @@ final class CinemaHall {
 
         ambientLight.type = .ambient
         // Тёплый, а не белый: холодный свет выдаёт «сахар» и режет глаза.
-        ambientLight.color = UIColor(red: 1, green: 0.93, blue: 0.82, alpha: 1)
+        ambientLight.color = UIColor(red: 0.88, green: 0.92, blue: 1, alpha: 1)
         let lightNode = SCNNode()
         lightNode.light = ambientLight
         root.addChildNode(lightNode)
@@ -298,7 +294,7 @@ final class CinemaHall {
 
         // Экран впереди, нормаль смотрит на зрителя.
         var localScreen = matrix_identity_float4x4
-        localScreen.columns.3 = SIMD4<Float>(0, Self.seatedEyeHeight, -Self.screenDistance, 1)
+        localScreen.columns.3 = SIMD4<Float>(0, Self.screenCenterHeight, -Self.screenDistance, 1)
         screenWorldTransform = simd_mul(root.simdTransform, localScreen)
 
     }
@@ -320,7 +316,8 @@ final class CinemaHall {
             timeLabel.setText("")
             return
         }
-        timeLabel.setText("⏱ \(clock(current)) / \(clock(duration))")
+        timeLabel.setText("\(clock(current)) / \(clock(duration))")
+        timeLabel.fitWidth(0.92)
     }
 
     /// Подпись под экраном: «загружаю…» или подсказка при сбое.
@@ -354,13 +351,13 @@ final class CinemaHall {
         // Светящийся периметр потолка — тянется по кромке зала.
         let ledEdgeMat = SCNMaterial()
         ledEdgeMat.lightingModel = .constant
-        let edgeColor = UIColor(red: 0.52, green: 0.79, blue: 1, alpha: 1)
+        let edgeColor = UIColor(red:0.32,green:0.24,blue:0.15,alpha:1)
         ledEdgeMat.diffuse.contents = edgeColor
-        ledEdgeMat.emission.contents = edgeColor
+        ledEdgeMat.emission.contents = UIColor.black
 
         let perimeter: [(Float, Float, Float, CGFloat, CGFloat, CGFloat)] = [
-            (-6.6, 4.15, -1.0, 13.2, 0.05, 0.05),
-            (6.6, 4.15, -1.0, 13.2, 0.05, 0.05),
+            (-6.6, 4.08, -1.0, 0.035, 0.035, 17.7),
+            (6.6, 4.08, -1.0, 0.035, 0.035, 17.7),
             (0.0, 4.15, 7.86, 13.3, 0.05, 0.05),
             (0.0, 4.15, -9.86, 13.3, 0.05, 0.05)
         ]
@@ -380,13 +377,14 @@ final class CinemaHall {
 
         var starIndex: Float = 0
         while starIndex < 44 {
-            let row = (starIndex / 11.0).rounded()
+            let row = (starIndex / 11.0).rounded(.down)
             let col = starIndex.truncatingRemainder(dividingBy: 11.0)
             let jitter = (starIndex * 0.37).truncatingRemainder(dividingBy: 1.0)
             let x: Float = -6.0 + col * 1.2 + jitter * 0.5
             let y: Float = 4.11
             let z: Float = -9.4 + row * 1.9
-            let dot = SCNSphere(radius: 0.030)
+            let dot = SCNSphere(radius: 0.012)
+            dot.segmentCount=6
             dot.materials = [starMat]
             let node = SCNNode(geometry: dot)
             node.position = SCNVector3(x, y, z)
@@ -397,7 +395,7 @@ final class CinemaHall {
 
         // Акустические панели по боковым стенам.
         let acousticMat = SCNMaterial()
-        acousticMat.cineLit(UIColor(red: 0.11, green: 0.10, blue: 0.18, alpha: 1))
+        acousticMat.cineLit(UIColor(red: 0.11, green: 0.13, blue: 0.16, alpha: 1))
         for side in [-1.0, 1.0] {
             let sideX: Float = Float(side) * 6.72
             var row = 0
@@ -466,11 +464,11 @@ final class CinemaHall {
     // MARK: Постройка зала
 
     private func buildRoom() {
-        let floorMat = SCNMaterial(); floorMat.cineLit(UIColor(red: 0.09, green: 0.08, blue: 0.15, alpha: 1))
-        let wallMat = SCNMaterial(); wallMat.cineLit(UIColor(red: 0.15, green: 0.11, blue: 0.22, alpha: 1))
-        let wainscotMat = SCNMaterial(); wainscotMat.cineLit(UIColor(red: 0.24, green: 0.10, blue: 0.16, alpha: 1))
-        let ceilMat = SCNMaterial(); ceilMat.cineLit(UIColor(red: 0.05, green: 0.05, blue: 0.10, alpha: 1))
-        let carpetMat = SCNMaterial(); carpetMat.cineLit(UIColor(red: 0.34, green: 0.07, blue: 0.10, alpha: 1))
+        let floorMat = SCNMaterial(); floorMat.cineLit(UIColor(red: 0.10, green: 0.12, blue: 0.16, alpha: 1))
+        let wallMat = SCNMaterial(); wallMat.cineLit(UIColor(red: 0.16, green: 0.19, blue: 0.23, alpha: 1))
+        let wainscotMat = SCNMaterial(); wainscotMat.cineLit(UIColor(red: 0.23, green: 0.15, blue: 0.10, alpha: 1))
+        let ceilMat = SCNMaterial(); ceilMat.cineLit(UIColor(red: 0.06, green: 0.07, blue: 0.09, alpha: 1))
+        let carpetMat = SCNMaterial(); carpetMat.cineLit(UIColor(red: 0.09, green: 0.17, blue: 0.18, alpha: 1))
         roomMaterials = [floorMat, wallMat, wainscotMat, ceilMat, carpetMat]
 
         func box(_ w: CGFloat, _ h: CGFloat, _ l: CGFloat, _ mat: SCNMaterial) -> SCNNode {
@@ -500,12 +498,12 @@ final class CinemaHall {
         // Неоновая подсветка по бокам.
         let neonCyan = SCNMaterial()
         neonCyan.lightingModel = .constant
-        neonCyan.diffuse.contents = UIColor(white: 0.46, alpha: 1)
-        neonCyan.emission.contents = UIColor(white: 0.46, alpha: 1)
+        neonCyan.diffuse.contents = UIColor(red:0.30,green:0.22,blue:0.12,alpha:1)
+        neonCyan.emission.contents = UIColor(red:0.30,green:0.22,blue:0.12,alpha:1)
         let neonMagenta = SCNMaterial()
         neonMagenta.lightingModel = .constant
-        neonMagenta.diffuse.contents = UIColor(white: 0.46, alpha: 1)
-        neonMagenta.emission.contents = UIColor(white: 0.46, alpha: 1)
+        neonMagenta.diffuse.contents = UIColor(red:0.30,green:0.22,blue:0.12,alpha:1)
+        neonMagenta.emission.contents = UIColor(red:0.30,green:0.22,blue:0.12,alpha:1)
         neonNodes = [neonCyan, neonMagenta]
         for (index, side) in [-1.0, 1.0].enumerated() {
             let strip = box(0.07, 0.09, 16, index == 0 ? neonCyan : neonMagenta)
@@ -521,9 +519,9 @@ final class CinemaHall {
         frameEdgeMat.diffuse.contents = frameColor
         frameEdgeMat.emission.contents = frameColor
         let posters: [(Float, String)] = [
-            (-3.4, "🎬 ЛУЧШИЕ ФИЛЬМЫ"),
-            (0.0, "🍿 БЕСПЛАТНЫЙ ПОПКОРН"),
-            (3.4, "🎟 БИЛЕТЫ ПРОДАНЫ")
+            (-3.4, "HANDAR CINEMA"),
+            (0.0, "ПРИЯТНОГО ПРОСМОТРА"),
+            (3.4, "ЛИЧНЫЙ ЗАЛ")
         ]
         for (x, text) in posters {
             let poster = CineText()
@@ -546,8 +544,8 @@ final class CinemaHall {
         let bezelMat = SCNMaterial(); bezelMat.cineConstant(UIColor(white: 0.04, alpha: 1))
         let ledMat = SCNMaterial()
         ledMat.lightingModel = .constant
-        ledMat.diffuse.contents = UIColor(white: 0.68, alpha: 1)
-        ledMat.emission.contents = UIColor(white: 0.68, alpha: 1)
+        ledMat.diffuse.contents = UIColor(red:0.22,green:0.16,blue:0.09,alpha:1)
+        ledMat.emission.contents = UIColor.black
 
         let screenZ = -Self.screenDistance
         let bezel = SCNBox(
@@ -558,13 +556,13 @@ final class CinemaHall {
         )
         bezel.materials = [bezelMat]
         let bezelNode = SCNNode(geometry: bezel)
-        bezelNode.position = SCNVector3(0, Self.seatedEyeHeight, screenZ - 0.02)
+        bezelNode.position = SCNVector3(0, Self.screenCenterHeight, screenZ - 0.02)
         root.addChildNode(bezelNode)
 
         // Светодиодная окантовка экрана.
         let ledPositions: [(Float, Float, Float)] = [
-            (0, Self.seatedEyeHeight + (Self.screenHeight + 0.10) * 0.5, screenZ - 0.09),
-            (0, Self.seatedEyeHeight - (Self.screenHeight + 0.10) * 0.5, screenZ - 0.09)
+            (0, Self.screenCenterHeight + (Self.screenHeight + 0.10) * 0.5, screenZ - 0.09),
+            (0, Self.screenCenterHeight - (Self.screenHeight + 0.10) * 0.5, screenZ - 0.09)
         ]
         for (x, y, z) in ledPositions {
             let strip = SCNBox(
@@ -585,25 +583,19 @@ final class CinemaHall {
             strip.materials = [ledMat]
             let node = SCNNode(geometry: strip)
             let edgeX: Float = Float(side) * (Self.screenWidth + 0.10) * 0.5
-            node.position = SCNVector3(edgeX, Self.seatedEyeHeight, screenZ - 0.09)
+            node.position = SCNVector3(edgeX, Self.screenCenterHeight, screenZ - 0.09)
             root.addChildNode(node)
         }
 
-        // Мягкое свечение вокруг экрана.
-        let glowPlane = SCNPlane(
-            width: CGFloat(Self.screenWidth) + 2.2,
-            height: CGFloat(Self.screenHeight) + 1.6
-        )
-        let glowMat = SCNMaterial()
-        glowMat.cineConstant(UIColor(red: 0.20, green: 0.42, blue: 0.95, alpha: 1), emissive: 0.30)
-        glowMat.isDoubleSided = true
-        glowPlane.materials = [glowMat]
-        let glow = SCNNode(geometry: glowPlane)
-        glow.position = SCNVector3(0, Self.seatedEyeHeight, screenZ - 0.16)
-        root.addChildNode(glow)
+        // Matte surround: the former opaque blue "glow" plane filled the view.
+        let surroundMat=SCNMaterial()
+        surroundMat.cineConstant(UIColor(red:0.025,green:0.032,blue:0.042,alpha:1))
+        let surround=boxNode(CGFloat(Self.screenWidth)+1.25,CGFloat(Self.screenHeight)+0.65,0.08,surroundMat)
+        surround.position=SCNVector3(0,Self.screenCenterHeight,screenZ-0.18)
+        root.addChildNode(surround)
 
         // Шторы по бокам экрана.
-        let curtainMat = SCNMaterial(); curtainMat.cineLit(UIColor(red: 0.36, green: 0.06, blue: 0.11, alpha: 1))
+        let curtainMat = SCNMaterial(); curtainMat.cineLit(UIColor(red:0.16,green:0.065,blue:0.085,alpha:1))
         for side in [-1.0, 1.0] {
             let curtain = SCNBox(width: 0.75, height: 4.0, length: 0.22, chamferRadius: 0.04)
             curtain.materials = [curtainMat]
@@ -615,18 +607,14 @@ final class CinemaHall {
         // Вывеска и время сеанса под экраном.
         let sign = CineText()
         sign.setText("HandAR Cinema", color: UIColor(red: 0.92, green: 0.82, blue: 1, alpha: 1))
-        sign.position = SCNVector3(0, Self.seatedEyeHeight + Self.screenHeight * 0.5 + 0.55, screenZ + 0.05)
-        sign.fitWidth(3.2)
+        sign.position = SCNVector3(0, Self.screenCenterHeight + Self.screenHeight * 0.5 + 0.55, screenZ + 0.05)
+        sign.fitWidth(1.8)
         root.addChildNode(sign)
-
-        timeLabel.position = SCNVector3(0, 0.42, screenZ + 0.55)
-        timeLabel.fitWidth(1.9)
-        root.addChildNode(timeLabel)
 
         // Подпись-предупреждение — строкой под картинкой, как субтитры.
         noticeLabel.position = SCNVector3(
             0,
-            Self.seatedEyeHeight - Self.screenHeight * 0.5 - 0.42,
+            Self.screenCenterHeight - Self.screenHeight * 0.5 - 0.42,
             screenZ + 0.08
         )
         noticeLabel.isHidden = true
@@ -634,7 +622,7 @@ final class CinemaHall {
     }
 
     private func buildSeats() {
-        let cushionMat = SCNMaterial(); cushionMat.cineLit(UIColor(red: 0.44, green: 0.08, blue: 0.12, alpha: 1))
+        let cushionMat = SCNMaterial(); cushionMat.cineLit(UIColor(red: 0.10, green: 0.25, blue: 0.25, alpha: 1))
         let frameMat = SCNMaterial(); frameMat.cineLit(UIColor(red: 0.17, green: 0.15, blue: 0.20, alpha: 1))
 
         func makeSeat(x: Float, z: Float, wide: Bool) {
@@ -694,76 +682,58 @@ final class CinemaHall {
     }
 
     private func buildCeilingLights() {
-        let stripMat = SCNMaterial()
-        stripMat.cineConstant(UIColor(white: 1, alpha: 1), emissive: 0.9)
-        for z in [-1.5, 0.5, 2.5, 4.5] as [Float] {
-            let strip = SCNBox(width: 0.26, height: 0.07, length: 6.0, chamferRadius: 0.02)
-            strip.materials = [stripMat]
-            let node = SCNNode(geometry: strip)
-            node.position = SCNVector3(0, 4.02, z)
-            root.addChildNode(node)
-            ceilingStrips.append(node)
-        }
-        // Тёплые боконцы у экрана.
-        for side in [-1.0, 1.0] {
-            let lamp = SCNBox(width: 0.18, height: 0.10, length: 0.6, chamferRadius: 0.03)
-            lamp.materials = [stripMat]
-            let node = SCNNode(geometry: lamp)
-            node.position = SCNVector3(4.4 * Float(side), 3.1, -Self.screenDistance + 0.4)
-            root.addChildNode(node)
-            ceilingStrips.append(node)
+        let material=SCNMaterial()
+        material.cineConstant(UIColor(red:0.42,green:0.30,blue:0.18,alpha:1))
+        for side in [-1.0,1.0] {
+            let strip=boxNode(0.045,0.035,14,material)
+            strip.position=SCNVector3(Float(side)*5.8,4.04,-0.8)
+            root.addChildNode(strip);ceilingStrips.append(strip)
         }
     }
 
     private func buildControlPanel() {
-        // Компактная панель сразу за креслом зрителя.
-        let z: Float = 1.62
+        // In front, below the raised screen. Buttons have separated hit areas
+        // and are large enough to keep a dwell on a single target.
+        let z: Float = -2.6
+        let panelMat=SCNMaterial()
+        panelMat.cineConstant(UIColor(red:0.035,green:0.045,blue:0.055,alpha:1))
+        let plate=SCNBox(width:2.38,height:0.86,length:0.035,chamferRadius:0.07)
+        plate.firstMaterial=panelMat
+        let panel=SCNNode(geometry:plate)
+        panel.position=SCNVector3(0,0.32,z-0.05);root.addChildNode(panel)
 
-        panelTitle.setText("Управление", color: UIColor(red: 0.72, green: 0.86, blue: 1, alpha: 1))
-        panelTitle.position = SCNVector3(0, 1.74, z)
-        panelTitle.scale = SCNVector3(0.0026, 0.0026, 0.0026)
+        panelTitle.setText("УПРАВЛЕНИЕ",color:UIColor(white:0.60,alpha:1))
+        panelTitle.position=SCNVector3(-0.65,0.68,z+0.015);panelTitle.fitWidth(0.77)
         root.addChildNode(panelTitle)
+        timeLabel.position=SCNVector3(0.63,0.68,z+0.015)
+        timeLabel.fitWidth(0.92);root.addChildNode(timeLabel)
 
-        panelHint.setText("повернись и укажи пальцем", color: UIColor(white: 0.78, alpha: 1))
-        panelHint.position = SCNVector3(0, 1.58, z)
-        panelHint.scale = SCNVector3(0.0016, 0.0016, 0.0016)
-        root.addChildNode(panelHint)
-
-        let columns: [Float] = [-0.51, -0.17, 0.17, 0.51]
-        let rows: [Float] = [1.38, 1.14]
-
+        let columns: [Float] = [-0.87,-0.29,0.29,0.87]
+        let rows: [Float] = [0.44,0.11]
         func place(_ button: CineButton, column: Int, row: Int) {
-            button.node.position = SCNVector3(columns[column], rows[row], z)
+            button.node.position=SCNVector3(columns[column],rows[row],z)
             root.addChildNode(button.node)
         }
-
-        place(lightButton, column: 0, row: 0)
-        place(playButton, column: 1, row: 0)
-        place(backButton, column: 2, row: 0)
-        place(fwdButton, column: 3, row: 0)
-        place(volDownButton, column: 0, row: 1)
-        place(volUpButton, column: 1, row: 1)
-        place(restartButton, column: 2, row: 1)
-        place(exitButton, column: 3, row: 1)
+        place(backButton,column:0,row:0)
+        place(playButton,column:1,row:0)
+        place(fwdButton,column:2,row:0)
+        place(lightButton,column:3,row:0)
+        place(volDownButton,column:0,row:1)
+        place(volUpButton,column:1,row:1)
+        place(restartButton,column:2,row:1)
+        place(exitButton,column:3,row:1)
     }
 
     // MARK: Управление
 
     func setLights(_ on: Bool) {
         lightsOn = on
-        ambientLight.intensity = on ? 900 : 130
-        for strip in ceilingStrips {
-            let material = strip.geometry?.firstMaterial
-            material?.diffuse.contents = on ? UIColor(white: 1, alpha: 1) : UIColor(white: 0.14, alpha: 1)
-            material?.emission.contents = on
-                ? UIColor(white: 1, alpha: 0.9)
-                : UIColor(white: 0.08, alpha: 1)
-        }
-        for material in neonNodes {
-            material.emission.contents = on
-                ? (material.diffuse.contents as? UIColor ?? UIColor.white)
-                : ((material.diffuse.contents as? UIColor)?.withAlphaComponent(0.18) ?? UIColor.white)
-        }
+        ambientLight.intensity = on ? 400 : 180
+        lightButton.setTitle(on ? "Свет: ярче" : "Свет: мягко")
+        // Preserve each lamp's designed color. Never replace every material
+        // with white, and use node opacity rather than multiplying shared colors.
+        for strip in ceilingStrips { strip.opacity = on ? 0.7 : 0.25 }
+        for material in neonNodes { material.emission.contents = UIColor.black }
     }
 
     func setPlayingState(_ playing: Bool) {

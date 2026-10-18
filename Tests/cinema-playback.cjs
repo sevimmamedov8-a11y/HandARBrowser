@@ -25,7 +25,7 @@ function fixture(role='left'){
  return {v:video,w:context.window,doc:context.document,listeners,styles,mutingAtPlay,
   tick(ms=1600){now+=ms;intervals.forEach(fn=>fn())},
   run(script){vm.runInContext(script,context)},runTimeouts(){timeouts.splice(0).forEach(fn=>fn())},
-  get starts(){return starts},get pauses(){return pauses},get seeks(){return seeks},
+  get now(){return now},get starts(){return starts},get pauses(){return pauses},get seeks(){return seeks},
   failure(value){failure=value},state(){return JSON.parse(context.window.__handarDirectState())},
   master(overrides={}){return {t:20,p:false,w:true,s:1,r:4,d:100,q:false,...overrides}}};
 }
@@ -100,6 +100,42 @@ for(const kind of ['master-buffer','slave-buffer','seeking','master-seeking','ad
  assert(stop,'native stop script must be available');f.run(stop[1]);f.runTimeouts();
  for(let i=0;i<5;i++)f.tick();
  check(f.v.paused&&f.v.muted&&!f.state().w&&f.starts===1,'exiting cinema cancels recovery and delayed autoplay');
+}
+{
+ const f=fixture('right');f.v.currentTime=19.8;
+ let seeks=f.seeks;f.w.__handarSyncDirectVideo(f.master());
+ check(f.v.playbackRate>1&&f.v.playbackRate<=1.1&&f.seeks===seeks,'small lag speeds up silently without a buffer-flushing seek');
+ f.v.currentTime=20.2;f.w.__handarSyncDirectVideo(f.master());
+ check(f.v.playbackRate<1&&f.v.playbackRate>=0.9,'eye ahead of master slows down');
+ f.v.currentTime=20.02;f.w.__handarSyncDirectVideo(f.master());
+ check(f.v.playbackRate===1,'aligned eye returns to exact user speed');
+ f.v.currentTime=19.8;f.w.__handarSyncDirectVideo(f.master({s:1.5}));
+ check(f.v.playbackRate>1.5&&f.v.playbackRate<=1.65+1e-9,'correction respects user-selected speed');
+ f.w.__handarSyncDirectVideo(f.master({s:1.5,p:true,w:false}));
+ check(f.v.paused&&f.v.playbackRate===1.5,'pause stops correction and preserves selected speed');
+}
+{
+ const f=fixture('right');f.tick(1000);f.w.__handarSyncDirectVideo(f.master({a:800}));
+ check(Math.abs(f.v.currentTime-20.2)<1e-9,'transport latency is included in target position');
+ const count=f.seeks;f.w.__handarSyncDirectVideo(f.master({t:80,a:0}));
+ check(f.seeks===count&&f.v.playbackRate===1,'stale master sample cannot seek or change speed');
+ f.w.__handarSyncDirectVideo(f.master({t:80,a:2000}));
+ check(f.seeks===count,'future clock sample cannot seek');
+}
+for(const condition of ['buffer','ad','seek']){
+ const f=fixture('right');f.v.currentTime=19.8;f.w.__handarSyncDirectVideo(f.master());
+ const master=f.master();if(condition==='buffer')master.r=2;if(condition==='ad')master.d=30;if(condition==='seek')master.q=true;
+ f.w.__handarSyncDirectVideo(master);
+ check(f.v.playbackRate===1,condition+' cancels speed adjustment');
+}
+{
+ const f=fixture('right');let masterTime=5.25,corrections=0;
+ for(let i=0;i<40;i++){
+  const before=f.seeks;f.w.__handarSyncDirectVideo(f.master({t:masterTime,a:f.now}));corrections+=f.seeks-before;
+  masterTime+=0.2;f.v.currentTime+=0.2*f.v.playbackRate;f.tick(200);
+ }
+ check(Math.abs(masterTime-f.v.currentTime)<0.04,'250 ms simulated lag converges below 40 ms');
+ check(corrections===0,'small-drift convergence never seeks');
 }
 console.log(`PASS: ${checks} cinema playback continuity, intent, visibility and synchronization checks`);
 

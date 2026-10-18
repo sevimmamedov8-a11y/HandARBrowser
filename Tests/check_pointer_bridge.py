@@ -9,6 +9,10 @@ start=source.index('final class WebInputBridge {')
 end=source.index('// MARK: - Меню и калибровка',start)
 stubs='''
 import Foundation
+#if canImport(CoreGraphics)
+// Apple's CGRect convenience initializers are supplied by the CoreGraphics overlay.
+import CoreGraphics
+#endif
 typealias CFTimeInterval = Double
 var clock = 1.0
 func CACurrentMediaTime() -> Double { clock += 0.04; return clock }

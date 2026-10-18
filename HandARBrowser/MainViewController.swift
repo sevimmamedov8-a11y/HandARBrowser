@@ -1,6 +1,6 @@
 //
 //  MainViewController.swift
-//  HandAR Vision — V78
+//  HandAR Vision — V79
 //
 //  Стереоконвейер
 //  Передний план: реальные пиксели рук из камеры по узкой маске свежих суставов Vision.
@@ -16,7 +16,7 @@
 //  ----------
 //    • Луч выходит из кончика указательного пальца. Где он встречает панель,
 //      там горит точка с кольцом — видно, куда наведён.
-//    • Нажатие: УКАЗАТЕЛЬНЫЙ + большой, с подтверждённым отпусканием.
+//    • Нажатие: удержание курсора 1 с или щипок с подтверждённым отпусканием.
 //    • Перетаскивание панели: устойчивый кулак, луч направлен на панель.
 //    • Масштаб: две руки, указательный + большой на каждой; двигаем указательные
 //      дальше друг от друга — окно увеличивается, ближе — уменьшается.
@@ -720,6 +720,10 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     private var dragDistance: Float = 1.55
     private var dragOffset = SIMD3<Float>(repeating: 0)
 
+    private var handClickMode = HandClickMode.load()
+    private var usesDwell: Bool { handClickMode == .dwell }
+    private let toolbarDwellRing = DwellProgressRing()
+    private let directDwellRing = CAShapeLayer()
     private var handOwnership = HandInputOwnership()
     private var handInputWatchdog: Timer?
     private var backgroundObserver: NSObjectProtocol?
@@ -1779,13 +1783,13 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         if let frame = tracking.latestFrameCopy {
             let oriented = sample.indexTip.applying(frame.displayTransform(for: currentInterfaceOrientation(), viewportSize: view.bounds.size))
             let point = CGPoint(x: oriented.x * view.bounds.width, y: oriented.y * view.bounds.height)
-            if handleDirectVideoExit(at: point, pinch: sample.clickPinch, allowBegin:sample.clickBegan) {
+            if handleDirectVideoExit(at: point, pinch: sample.clickPinch, allowBegin:sample.clickBegan, dwell:usesDwell) {
                 updateCinemaWebPointers(nil)
                 return
             }
         }
         directVideoPointer.isHidden = true
-        if cinemaHall.update(ray: ray, pinch: sample.clickPinch, allowBegin:sample.clickBegan) {
+        if cinemaHall.update(ray: ray, pinch: sample.clickPinch, allowBegin:sample.clickBegan, dwell:usesDwell) {
             updateCinemaWebPointers(nil)
             directLeftInput.release(webView: directVideoLeft)
             directRightInput.release(webView: directVideoRight)
@@ -1806,7 +1810,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
             return
         }
         updateCinemaWebPointers(uv)
-        updateDirectVideoInput(normalizedPoint: uv, pinch: sample.clickPinch, allowBegin:sample.clickBegan)
+        updateDirectVideoInput(normalizedPoint: uv, pinch: sample.clickPinch, allowBegin:sample.clickBegan, dwell:usesDwell)
     }
 
     private func directVideoTarget(for point: CGPoint) -> (WKWebView, CGPoint)? {
@@ -1851,10 +1855,19 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         }
     }
 
-    private func handleDirectVideoExit(at point: CGPoint, pinch: Bool, allowBegin: Bool = true) -> Bool {
+    private func handleDirectVideoExit(at point: CGPoint, pinch: Bool, allowBegin: Bool = true, dwell: Bool = false) -> Bool {
         let selected = directVideoExitButtons.firstIndex { $0.frame.contains(point) }
         for (index,button) in directVideoExitButtons.enumerated() { button.isHighlighted = index == selected }
-        let confirmed = directVideoClickGate.update(target:selected,down:pinch,allowBegin:allowBegin)
+        let confirmed = directVideoClickGate.update(target:selected,down:pinch,allowBegin:allowBegin,dwell:dwell,at:CACurrentMediaTime())
+        directDwellRing.isHidden = directVideoClickGate.dwellProgress <= 0
+        if !directDwellRing.isHidden {
+            if directDwellRing.superlayer == nil { directVideoStage.layer.addSublayer(directDwellRing) }
+            CATransaction.begin();CATransaction.setDisableActions(true)
+            directDwellRing.path=UIBezierPath(arcCenter:point,radius:18,startAngle:-.pi/2,endAngle:1.5 * .pi,clockwise:true).cgPath
+            directDwellRing.fillColor=UIColor.clear.cgColor;directDwellRing.strokeColor=UIColor.cyan.cgColor
+            directDwellRing.lineWidth=3;directDwellRing.strokeEnd=CGFloat(directVideoClickGate.dwellProgress)
+            CATransaction.commit()
+        }
         guard selected != nil else { return false }
         directVideoPointer.isHidden = false
         directVideoPointer.center = point
@@ -2161,6 +2174,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         handOwnership.reset()
         hands.reset()
         inVR = true
+        handClickMode = HandClickMode.load()
         headNode.simdTransform=matrix_identity_float4x4
         didCreateInitialAnchor = false
         browserAnchor = nil
@@ -2220,6 +2234,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         handOwnership.suppressUntilOpen()
         if !inVR {
             inVR = true
+            handClickMode = HandClickMode.load()
             headNode.simdTransform=matrix_identity_float4x4
             applyEyeGeometry()
             requestLandscapeMode()
@@ -2281,6 +2296,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         cinemaPlayback.release()
         if !inVR {
             inVR = true
+            handClickMode = HandClickMode.load()
             headNode.simdTransform=matrix_identity_float4x4
             didCreateInitialAnchor = false
             browserAnchor = nil
@@ -2882,10 +2898,10 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         input.update(normalizedPoint: CGPoint(x: x, y: y), pinch: controllerButtonDown, webView: browser)
     }
 
-    private func updateDirectVideoInput(normalizedPoint: CGPoint, pinch: Bool, allowBegin: Bool = true) {
+    private func updateDirectVideoInput(normalizedPoint: CGPoint, pinch: Bool, allowBegin: Bool = true, dwell: Bool = false) {
         // Both eyes must accept the same play/consent controls.
-        directLeftInput.update(normalizedPoint: normalizedPoint, pinch: pinch, webView: directVideoLeft, allowBegin:allowBegin)
-        directRightInput.update(normalizedPoint: normalizedPoint, pinch: pinch, webView: directVideoRight, allowBegin:allowBegin)
+        directLeftInput.update(normalizedPoint: normalizedPoint, pinch: pinch, webView: directVideoLeft, allowBegin:allowBegin, dwell:dwell)
+        directRightInput.update(normalizedPoint: normalizedPoint, pinch: pinch, webView: directVideoRight, allowBegin:allowBegin, dwell:dwell)
     }
 
     private func handleDirectVideoHands(left: HandSample?, right: HandSample?) {
@@ -2899,7 +2915,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
             frame.displayTransform(for: currentInterfaceOrientation(), viewportSize: view.bounds.size)
         )
         let screenPoint = CGPoint(x: oriented.x * view.bounds.width, y: oriented.y * view.bounds.height)
-        if handleDirectVideoExit(at: screenPoint, pinch: sample.clickPinch, allowBegin:sample.clickBegan) { return }
+        if handleDirectVideoExit(at: screenPoint, pinch: sample.clickPinch, allowBegin:sample.clickBegan, dwell:usesDwell) { return }
         guard let (_, local) = directVideoTarget(for: screenPoint) else {
             directVideoPointer.isHidden = true
             if !sample.clickPinch {
@@ -2912,7 +2928,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         directVideoPointer.center = screenPoint
         directVideoPointer.backgroundColor = sample.clickPinch ? UIColor(red: 0.35, green: 0.85, blue: 1, alpha: 0.9) : .white
         lastBrowserInteractionTime = CACurrentMediaTime()
-        updateDirectVideoInput(normalizedPoint: local, pinch: sample.clickPinch, allowBegin:sample.clickBegan)
+        updateDirectVideoInput(normalizedPoint: local, pinch: sample.clickPinch, allowBegin:sample.clickBegan, dwell:usesDwell)
         if sample.clickPinch { activateDirectVideoAudio() }
 
     }
@@ -2924,6 +2940,8 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         cinemaHall.cancelInput()
         securityGame.cancelInput()
         toolbarClickGate.cancel()
+        toolbarDwellRing.isHidden=true
+        directDwellRing.isHidden=true
         directVideoClickGate.cancel()
     }
 
@@ -2949,16 +2967,31 @@ final class MainViewController: UIViewController, MTKViewDelegate {
             cancelHandInteraction()
             handOwnership.suppressUntilOpen()
         }
-        let decision = handOwnership.select(left:freshLeft?.routing,right:freshRight?.routing)
+        // Dwell needs a fresh index and palm, not thumb contact or its generation.
+        // A missing fingertip must not redirect a dwell to a cached palm cursor.
+        func eligible(_ sample: HandSample?) -> HandSample? {
+            guard let sample else { return nil }
+            return !usesDwell || sample.isFist || sample.maskJoints[.indexTip] != nil ? sample : nil
+        }
+        let inputLeft=eligible(freshLeft), inputRight=eligible(freshRight)
+        func route(_ sample: HandSample?) -> HandRoutingState? {
+            guard let sample else { return nil }
+            return usesDwell ? HandRoutingState(hand:sample.hand,generation:0,down:sample.clickPinch,openConfirmed:!sample.clickPinch) : sample.routing
+        }
+        let decision = handOwnership.select(left:route(inputLeft),right:route(inputRight))
         if decision.cancel { cancelHandInteraction() }
         if decision.changedHand { endDrag() }
-        let selected = decision.hand == .left ? freshLeft : (decision.hand == .right ? freshRight : nil)
+        let selected = decision.hand == .left ? inputLeft : (decision.hand == .right ? inputRight : nil)
         let routed = selected?.routed(down:decision.down,began:decision.began)
         let left = decision.hand == .left ? routed : nil
         let right = decision.hand == .right ? routed : nil
         // Empty Vision updates must not cancel a controller's active press.
         if routed == nil, controllerConnected, now-lastHandSeenTime > 0.45 {
             updateControllerHand()
+            return
+        }
+        if let sample=routed, sample.isFist, cinemaActive || directVideoActive || securityGameActive {
+            cancelHandInteraction()
             return
         }
         if cinemaWebScreenActive {
@@ -2972,7 +3005,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         if securityGameActive {
             if let sample = right ?? left,
                let ray = tracking.worldRay(visionPoint: sample.indexTip) {
-                securityGame.update(ray: ray, pinch: sample.clickPinch, allowBegin:sample.clickBegan)
+                securityGame.update(ray: ray, pinch: sample.clickPinch, allowBegin:sample.clickBegan, dwell:usesDwell)
             } else {
                 securityGame.update(ray: nil, pinch: false)
             }
@@ -2987,7 +3020,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
             // проваливаемся дальше — экран (браузер) продолжает принимать ввод.
             if let sample = right ?? left,
                let ray = tracking.worldRay(visionPoint: sample.indexTip) {
-                let consumed = cinemaHall.update(ray: ray, pinch: sample.clickPinch, allowBegin:sample.clickBegan)
+                let consumed = cinemaHall.update(ray: ray, pinch: sample.clickPinch, allowBegin:sample.clickBegan, dwell:usesDwell)
                 lastHandSeenTime = CACurrentMediaTime()
                 controllerHandRoot.isHidden = true
                 if consumed {
@@ -3024,8 +3057,10 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         // A fist grabs the panel under its ray; it never shares the click pinch.
         let grabHit = browserWorldTransform.flatMap { planeHit(ray:ray,transform:$0) }
         let inDragZone = grabHit.map { abs($0.localX) <= browserWorldWidth*0.5 && abs($0.localY) <= browserWorldHeight*0.5+0.06 } ?? false
-        if sample.isFist && (isDragging || inDragZone) {
-            updateDrag(with: ray)
+        if sample.isFist {
+            cancelHandInteraction()
+            if isDragging || inDragZone { updateDrag(with: ray) }
+            else { endDrag() }
             releasePointer()
             highlightToolbar(nil)
             pointerNode.isHidden = true
@@ -3059,7 +3094,9 @@ final class MainViewController: UIViewController, MTKViewDelegate {
             let index = linkItems.firstIndex { hit.localX >= $0.minX && hit.localX <= $0.maxX }
             highlightToolbar(index)
             releasePointer()
-            if let index = toolbarClickGate.update(target:index,down:sample.clickPinch,allowBegin:sample.clickBegan) {
+            let committed=toolbarClickGate.update(target:index,down:sample.clickPinch,allowBegin:sample.clickBegan,dwell:usesDwell,at:now)
+            toolbarDwellRing.show(on:index.map { toolbarButtonNodes[$0] },progress:toolbarClickGate.dwellProgress)
+            if let index = committed {
                 perform(item:linkItems[index])
                 UIImpactFeedbackGenerator(style:.rigid).impactOccurred()
             }
@@ -3079,7 +3116,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         input.update(
             normalizedPoint: CGPoint(x: CGFloat(normalizedX), y: CGFloat(normalizedY)),
             pinch: sample.clickPinch,
-            webView: browser, allowBegin: sample.clickBegan
+            webView: browser, allowBegin: sample.clickBegan, dwell:usesDwell
         )
     }
 
@@ -3512,6 +3549,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     }
 
     private func highlightToolbar(_ index: Int?) {
+        if index == nil { toolbarDwellRing.isHidden=true }
         guard highlightedToolbarIndex != index else { return }
         let previous = highlightedToolbarIndex
         highlightedToolbarIndex = index
@@ -4633,8 +4671,8 @@ final class HandTracker {
         }
         guard let wrist = fresh(.wrist), let middleBase = fresh(.middleMCP) else { return nil }
         let indexBase = fresh(.indexMCP)
-        let index = fresh(.indexTip,confidence:0.65)
-        let thumb = fresh(.thumbTip,confidence:0.65)
+        let index = fresh(.indexTip,confidence:0.55)
+        let thumb = fresh(.thumbTip,confidence:0.55)
         let middle = fresh(.middleTip)
         var filtered: [VNHumanHandPoseObservation.JointName: CGPoint] = [:]
         for (joint,point) in points where point.confidence >= 0.40 {
@@ -4759,18 +4797,27 @@ final class WebInputBridge {
     private var lastHoverTime: CFTimeInterval = -.infinity
     private weak var pressedWebView: WKWebView?
     private var pointerDown = false
+    private weak var dwellWebView: WKWebView?
 
-    func update(normalizedPoint: CGPoint, pinch: Bool, webView: WKWebView, allowBegin: Bool = true) {
+    func update(normalizedPoint: CGPoint, pinch: Bool, webView: WKWebView, allowBegin: Bool = true, dwell: Bool = false) {
         let x = normalizedPoint.x * webView.bounds.width
         let y = normalizedPoint.y * webView.bounds.height
         guard x.isFinite, y.isFinite else { release(webView:webView); return }
+        if let previous=dwellWebView, previous !== webView || !dwell || pinch {
+            dispatch("window.__handarCancelDwell && window.__handarCancelDwell();",to:previous)
+            dwellWebView=nil
+        }
+        if dwell && !pinch && !pointerDown {
+            dwellWebView=webView
+            dispatch("window.__handarDwell && window.__handarDwell(\(x),\(y));",to:webView)
+        }
         if pointerDown, let previous = pressedWebView, previous !== webView { release(webView:previous) }
         if pinch && !pointerDown {
             guard allowBegin else { return }
             pointerDown = true
             pressedWebView = webView
             let slop = max(8,min(18,webView.bounds.width*0.012))
-            dispatch("window.__handarPointerDown(\(x),\(y),1,\(slop));",to:webView)
+            dispatch("window.__handarPointerDown(\(x),\(y),1,\(slop),\(dwell ? "true" : "false"));",to:webView)
         } else if pinch && pointerDown {
             dispatch("window.__handarPointerMove(\(x),\(y),1);",to:webView)
         } else if !pinch && pointerDown {
@@ -4790,6 +4837,10 @@ final class WebInputBridge {
     }
 
     func release(webView: WKWebView) {
+        if dwellWebView === webView {
+            dispatch("window.__handarCancelDwell && window.__handarCancelDwell();",to:webView)
+            dwellWebView=nil
+        }
         if lastHoverWebView === webView, lastHoverPoint != nil {
             dispatch("window.__handarClearHover && window.__handarClearHover();",to:webView)
             lastHoverPoint = nil
@@ -4821,6 +4872,7 @@ final class MainMenuView: UIView {
     private let passthroughSwitch = UISwitch()
     private let cameraSelector = UISegmentedControl(items:["0,5× · широкий","AR 1×"])
     private let cameraNote = UILabel()
+    private let clickSelector = UISegmentedControl(items:["Удержание · 1 сек", "Щипок"])
     private let cinemaField = UITextField()
     private let cinemaButton = UIButton(type: .system)
     private var profile: VRProfile
@@ -4912,6 +4964,17 @@ final class MainMenuView: UIView {
         updateCameraNote()
         stack.addArrangedSubview(cameraSelector)
         stack.addArrangedSubview(cameraNote)
+        clickSelector.selectedSegmentIndex=HandClickMode.load() == .dwell ? 0 : 1
+        clickSelector.addAction(UIAction { [weak self] _ in
+            guard let self else { return }
+            let mode: HandClickMode=self.clickSelector.selectedSegmentIndex == 0 ? .dwell : .pinch
+            mode.save()
+        },for:.valueChanged)
+        stack.addArrangedSubview(clickSelector)
+        let clickNote=UILabel()
+        clickNote.text="Удержание: наведи указательный палец на кнопку на 1 секунду. Для повтора отведи курсор. Щипок с движением — прокрутка, кулак — захват панели."
+        clickNote.font = .systemFont(ofSize:12);clickNote.textColor=UIColor.white.withAlphaComponent(0.65);clickNote.numberOfLines=0
+        stack.addArrangedSubview(clickNote)
 
         // 3D-кинотеатр: поле для ссылки на YouTube + кнопка входа.
         let cinemaTitle = UILabel()

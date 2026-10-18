@@ -52,7 +52,17 @@ bridge.update(normalizedPoint:point,pinch:true,webView:b)
 bridge.update(normalizedPoint:CGPoint(x:Double.nan,y:0),pinch:true,webView:b)
 bridge.update(normalizedPoint:point,pinch:false,webView:b)
 precondition(b.count("__handarPointerUp")==1)
-print("PASS: 9 native bridge lifecycle checks (including controller defaults)")
+let c=WKWebView()
+for _ in 0..<5 { bridge.update(normalizedPoint:point,pinch:false,webView:c,dwell:true) }
+precondition(c.scripts.filter{$0.contains("__handarDwell(")}.count==5,"stationary pointer still supplies fresh dwell hits")
+bridge.release(webView:c)
+precondition(c.scripts.last!.contains("__handarClearHover") && c.scripts.contains{$0.contains("__handarCancelDwell")},"loss cancels dwell")
+bridge.update(normalizedPoint:point,pinch:true,webView:c,dwell:true)
+precondition(c.scripts.last!.contains(",true);"),"scroll press in dwell mode suppresses pinch click")
+bridge.update(normalizedPoint:point,pinch:false,webView:c,dwell:true)
+bridge.update(normalizedPoint:point,pinch:false,webView:c)
+precondition(c.scripts.filter{$0.contains("__handarDwell(")}.count==5,"controller defaults never activate dwell")
+print("PASS: 13 native bridge lifecycle checks (including dwell and controller defaults)")
 '''
 with tempfile.TemporaryDirectory(prefix='handar-bridge-') as directory:
     script=Path(directory)/'bridge.swift'

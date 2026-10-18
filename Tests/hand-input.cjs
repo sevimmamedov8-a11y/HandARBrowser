@@ -1,7 +1,7 @@
 const fs=require('fs'),vm=require('vm'),assert=require('assert'),path=require('path');
 const source=fs.readFileSync(path.resolve(__dirname,'../HandARBrowser/WebInput.js'),'utf8').split('  // --- Кинорежим:')[0]+'})();';
 function fixture(){
-  const listeners={},pending=[],root={scrollTop:0};let current,feedbacks=0;
+  const listeners={},pending=[],root={scrollTop:0};let current,feedbacks=0,now=0,timerID=0;const timers=new Map(),rings=[];
   class Node {
     constructor(name,clickable=true){this.name=name;this.clickable=clickable;this.parentElement=null;this.disabled=false;this.isConnected=true;this.scrollHeight=0;this.clientHeight=0;this.scrollTop=0;this.overflowY='visible';this.events=[];this.classes=new Set();this.classList={add:c=>this.classes.add(c),remove:c=>this.classes.delete(c)};}
     closest(){for(let n=this;n;n=n.parentElement)if(n.clickable)return n;return null;}
@@ -10,9 +10,9 @@ function fixture(){
     get clicks(){return this.events.filter(e=>e==='click').length;}
   }
   class Event {constructor(type,options){this.type=type;Object.assign(this,options)}}
-  const context={window:{webkit:{messageHandlers:{handarFeedback:{postMessage(){feedbacks++}}}}},document:{elementFromPoint(){return current},scrollingElement:root,addEventListener(type,fn){listeners[type]=fn}},getComputedStyle:n=>({overflowY:n.overflowY}),PointerEvent:Event,MouseEvent:Event,setTimeout(fn){pending.push(fn)}};
+  const context={window:{webkit:{messageHandlers:{handarFeedback:{postMessage(){feedbacks++}}}}},performance:{now:()=>now},document:{documentElement:{appendChild(n){rings.push(n)}},createElement(){return {style:{},setAttribute(){}}},elementFromPoint(){return current},scrollingElement:root,addEventListener(type,fn){listeners[type]=fn}},getComputedStyle:n=>({overflowY:n.overflowY}),PointerEvent:Event,MouseEvent:Event,setTimeout(fn,ms){const id=++timerID;timers.set(id,{fn,at:now+ms});return id},clearTimeout(id){timers.delete(id)}};
   vm.createContext(context);vm.runInContext(source,context);
-  return {w:context.window,Node,root,select(n){current=n},get sounds(){return feedbacks}};
+  return {w:context.window,Node,root,rings,select(n){current=n},tick(ms){now+=ms;for(const [id,t] of timers){if(t.at<=now){timers.delete(id);t.fn()}}},get sounds(){return feedbacks}};
 }
 let checks=0;function check(value,msg){checks++;assert(value,msg)}
 {
@@ -63,5 +63,21 @@ let checks=0;function check(value,msg){checks++;assert(value,msg)}
  f.w.__handarPointerMove(100,100,1);f.w.__handarPointerUp(100,100,1);
  check(a.clicks===0&&f.root.scrollTop===0,'post-cancel moves cannot revive a gesture');
  f.w.__handarPointerDown(0,0,1);f.w.__handarPointerUp(0,0,1);check(a.clicks===1&&f.sounds===1,'next confirmed cycle works after cancellation');
+}
+{
+ const f=fixture(),a=new f.Node('Safari'),b=new f.Node('neighbor');f.select(a);
+ function frames(n){for(let i=0;i<n;i++){f.w.__handarDwell(30,30);f.tick(50)}}
+ frames(20);check(a.clicks===0,'dwell cannot click before one second');
+ frames(2);check(a.clicks===1&&f.sounds===1,'one-second dwell uses confirmed feedback');
+ frames(35);check(a.clicks===1,'continued hover cannot repeat');
+ f.select(b);frames(12);f.select(a);frames(22);check(a.clicks===2&&b.clicks===0,'switching targets restarts full dwell');
+ f.w.__handarCancelDwell();frames(10);f.tick(350);frames(12);check(a.clicks===2,'missing fresh hand frames cancels incomplete dwell');
+ check(f.rings.length===1,'progress ring is reused');
+ f.w.__handarCancelDwell();check(f.rings[0].style.display==='none','hand loss hides progress ring');
+ frames(15);f.w.__handarPointerDown(30,30,1,12,true);frames(10);f.w.__handarPointerUp(30,30,1);
+ check(a.clicks===2,'pinch in dwell mode cannot finish dwell or synthesize a second click');
+ f.w.__handarClearHover();a.disabled=true;frames(30);check(a.clicks===2,'disabled button cannot dwell-click');
+ a.disabled=false;a.isConnected=false;frames(30);check(a.clicks===2,'removed target cannot dwell-click');
+ a.isConnected=true;f.select(new f.Node('blank',false));frames(30);check(a.clicks===2,'blank page has no dwell action');
 }
 console.log(`PASS: ${checks} web gesture lifecycle checks`);

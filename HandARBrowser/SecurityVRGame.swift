@@ -881,6 +881,7 @@ final class SecurityVRGame {
 
     private var previousPinch = false
     private var uiClickGate = ReleaseClickGate<ObjectIdentifier>()
+    private let dwellRing = DwellProgressRing()
     private var lastFrameTime = CACurrentMediaTime()
 
     private static let guestNames = [
@@ -1494,11 +1495,12 @@ final class SecurityVRGame {
 
     func cancelInput() {
         uiClickGate.cancel()
+        dwellRing.isHidden=true
         previousPinch = false
         if isRunning { releaseHold() }
     }
 
-    func update(ray: WorldRay?, pinch requestedPinch: Bool, allowBegin: Bool = true) {
+    func update(ray: WorldRay?, pinch requestedPinch: Bool, allowBegin: Bool = true, dwell: Bool = false) {
         guard isRunning else { return }
         let pinch = requestedPinch && (previousPinch || allowBegin)
         let now = CACurrentMediaTime()
@@ -1526,7 +1528,9 @@ final class SecurityVRGame {
         }
 
         let uiTarget = ray.flatMap { ray in allButtons.first { $0.hitTest(ray:ray) } }
-        if let committed = uiClickGate.update(target:uiTarget.map {ObjectIdentifier($0)},down:pinch,allowBegin:allowBegin),
+        let committed=uiClickGate.update(target:uiTarget.map {ObjectIdentifier($0)},down:pinch,allowBegin:allowBegin,dwell:dwell,at:now)
+        dwellRing.show(on:uiTarget?.node,progress:uiClickGate.dwellProgress)
+        if let committed,
            let uiTarget, ObjectIdentifier(uiTarget) == committed {
             if let tool = toolButtons.first(where: {$0.1 === uiTarget})?.0 {
                 selectedTool = tool

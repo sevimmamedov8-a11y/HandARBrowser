@@ -70,6 +70,32 @@ struct HandGestureTests {
         check(t.presses == 3 && !t.gesture.isDown,"duplicate timestamps cannot confirm contact")
         t.gesture.update(ratio:0.1,confident:true,at:time-0.1)
         check(!t.gesture.isDown && !t.gesture.isOpenConfirmed,"time reversal cancels")
+        var noisy = Trace()
+        noisy.hold(0.6,frames:6)
+        for ratio in [0.29,0.32,0.28,0.33] { noisy.step(ratio) }
+        check(noisy.presses == 1,"small contact jitter above close threshold must not reset press confirmation")
+        noisy.hold(0.6,frames:4)
+        check(noisy.releases == 1,"noisy contact still requires a confirmed release")
+        var dwell = DwellClickGate<Int>()
+        var clicks = 0
+        for i in 0...60 { if dwell.update(target:1,at:Double(i)/30) != nil { clicks += 1 } }
+        check(clicks == 1,"two seconds over one button fires once")
+        _ = dwell.update(target:nil,at:2.1)
+        for i in 0...30 { if dwell.update(target:1,at:2.2+Double(i)/30) != nil { clicks += 1 } }
+        check(clicks == 2,"leaving and returning rearms dwell")
+        dwell.cancel()
+        for i in 0...25 { _ = dwell.update(target:1,at:4+Double(i)/30) }
+        check(dwell.update(target:1,at:6) == nil && dwell.progress == 0,"lost frames cannot finish a dwell")
+        _ = dwell.update(target:2,at:6.1)
+        check(dwell.progress == 0,"moving to another target resets progress")
+        dwell.cancel()
+        check(dwell.update(target:2,at:6.2) == nil,"hand switch/cancel requires a complete new dwell")
+        check(dwell.update(target:2,at:.nan) == nil && dwell.progress == 0,"invalid dwell timestamp cancels")
+        var modeGate=ReleaseClickGate<Int>()
+        _ = modeGate.update(target:1,down:true,allowBegin:true)
+        check(modeGate.update(target:1,down:false,allowBegin:false,dwell:true,at:0) == nil,"mode switch cannot release an old pinch as a click")
+        for i in 1...20 { _ = modeGate.update(target:1,down:false,allowBegin:false,dwell:true,at:Double(i)/30) }
+        check(modeGate.update(target:1,down:true,allowBegin:true,dwell:true,at:0.7) == nil && modeGate.dwellProgress == 0,"scroll pinch cancels dwell progress")
         var invalid = StablePinchGesture()
         invalid.update(ratio:.nan,confident:true,at:1)
         check(!invalid.isDown,"NaN ratio cannot press")

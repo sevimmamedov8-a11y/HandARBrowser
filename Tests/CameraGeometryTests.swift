@@ -70,10 +70,21 @@ import Foundation
         check(run.accepts(mode:.worldTracking,timestamp:12.1),"current AR stream accepted")
         check(!run.accepts(mode:.worldTracking,timestamp:.nan),"invalid frame clock rejected")
 
-        let right=CameraOrientationMath.rawCameraBasis(referenceToDevice:[SIMD3(0,0,-1),SIMD3(1,0,0),SIMD3(0,-1,0)])!
+        let right=CameraOrientationMath.rawCameraBasis(referenceToDevice:[SIMD3(0,0,1),SIMD3(-1,0,0),SIMD3(0,-1,0)])!
         check(right == [SIMD3(1,0,0),SIMD3(0,1,0),SIMD3(0,0,1)],"upright landscape-right pose has right-handed Y-up camera axes")
-        let left=CameraOrientationMath.rawCameraBasis(referenceToDevice:[SIMD3(0,0,1),SIMD3(-1,0,0),SIMD3(0,-1,0)])!
+        let left=CameraOrientationMath.rawCameraBasis(referenceToDevice:[SIMD3(0,0,-1),SIMD3(1,0,0),SIMD3(0,-1,0)])!
         check(left == [SIMD3(-1,0,0),SIMD3(0,-1,0),SIMD3(0,0,1)],"landscape-left raw sensor rotates 180 degrees without reversing forward")
+        // Physical device axes: camera right = -device Y, up = device X.
+        // Check gravity with tilted, orthonormal motion matrices as well as upright.
+        for angle in [0.0,0.2,0.8,1.5,2.6] {
+            let c=cos(angle),s=sin(angle)
+            let rows=[SIMD3(c,0,s),SIMD3(0,1,0),SIMD3(-s,0,c)]
+            let basis=CameraOrientationMath.rawCameraBasis(referenceToDevice:rows)!
+            let deviceGravity=SIMD3(-rows[0].z,-rows[1].z,-rows[2].z)
+            let sensorGravity=SIMD3(-deviceGravity.y,deviceGravity.x,deviceGravity.z)
+            let gravity=basis[0]*sensorGravity.x+basis[1]*sensorGravity.y+basis[2]*sensorGravity.z
+            check(abs(gravity.x)<1e-10 && abs(gravity.y+1)<1e-10 && abs(gravity.z)<1e-10,"sensor gravity always points down in world, including a tilted phone")
+        }
         check(CameraOrientationMath.rawCameraBasis(referenceToDevice:[])==nil,"missing motion matrix rejected")
         check(CameraOrientationMath.rawCameraBasis(referenceToDevice:[SIMD3(.nan,0,0),SIMD3(0,1,0),SIMD3(0,0,1)])==nil,"nonfinite motion matrix rejected")
         check(abs(CameraOrientationMath.initialHeading(basis:right))<1e-10,"initial upright camera looks forward")

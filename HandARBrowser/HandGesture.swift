@@ -1,3 +1,13 @@
+import Foundation
+
+enum HandClickMode: String {
+    case dwell, pinch
+    static func load() -> HandClickMode {
+        UserDefaults.standard.string(forKey:"handar.click.mode.v1").flatMap(Self.init(rawValue:)) ?? .dwell
+    }
+    func save() { UserDefaults.standard.set(rawValue,forKey:"handar.click.mode.v1") }
+}
+
 // Pure, time-based gesture rules. No Vision, UIKit or device dependencies.
 enum TrackedHand: Int, Hashable { case left, right }
 
@@ -5,7 +15,7 @@ enum PinchTransition { case none, pressed, released, cancelled }
 
 struct StablePinchGesture {
     struct Configuration {
-        var closeRatio = 0.25
+        var closeRatio = 0.30
         var openRatio = 0.42
         var pressSeconds = 0.045
         var releaseSeconds = 0.060
@@ -72,7 +82,7 @@ struct StablePinchGesture {
                 isOpenConfirmed = false
             }
         case .closing:
-            if ratio > configuration.closeRatio {
+            if ratio >= configuration.openRatio {
                 phase = .ready
                 candidateSince = nil
                 isOpenConfirmed = ratio >= configuration.openRatio
@@ -249,10 +259,18 @@ struct HandInputOwnership {
 struct ReleaseClickGate<Target: Equatable> {
     private var held = false
     private var candidate: Target?
+    private var dwellGate = DwellClickGate<Target>()
+    var dwellProgress: Double { dwellGate.progress }
 
-    mutating func cancel() { held = false; candidate = nil }
+    mutating func cancel() { held = false; candidate = nil; dwellGate.cancel() }
 
-    mutating func update(target: Target?, down: Bool, allowBegin: Bool) -> Target? {
+    mutating func update(target: Target?, down: Bool, allowBegin: Bool, dwell: Bool = false, at time: Double = 0) -> Target? {
+        if dwell {
+            held = false; candidate = nil
+            if down { dwellGate.cancel(); return nil }
+            return dwellGate.update(target:target,at:time)
+        }
+        dwellGate.cancel()
         let began = down && !held
         let ended = !down && held
         held = down
@@ -262,5 +280,27 @@ struct ReleaseClickGate<Target: Equatable> {
         let result = candidate == target ? candidate : nil
         candidate = nil
         return result
+    }
+}
+
+// A dwell needs a continuous stream of fresh hits on the same control.
+// It cannot repeat until the pointer leaves; a stalled stream cannot click.
+struct DwellClickGate<Target: Equatable> {
+    private var target: Target?
+    private var since = 0.0
+    private var last: Double?
+    private var fired = false
+    private(set) var progress = 0.0
+    mutating func cancel() { self = Self() }
+    mutating func update(target next: Target?, at time: Double) -> Target? {
+        guard time.isFinite, let next else { cancel(); return nil }
+        if let last, time < last || time-last > 0.25 { cancel() }
+        if target != next { target=next;since=time;fired=false;progress=0 }
+        last=time
+        guard !fired else { return nil }
+        progress=min(1,max(0,time-since))
+        guard progress >= 1-0.000001 else { return nil }
+        fired=true
+        return next
     }
 }

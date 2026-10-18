@@ -39,8 +39,9 @@ extension HandTracker {
    _ = mcp;set(pip,x,0.65);set(dip,x+0.04,0.58);set(tip,x+0.02,0.4)
   }
   var state = HandState(), time = 0.0, output: HandSample?
-  func frames(_ count: Int, index: CGPoint, thumb: CGPoint) {
+  func frames(_ count: Int, index: CGPoint, thumb: CGPoint, confidence: Float = 0.95) {
    set(.indexTip,Double(index.x),Double(index.y));set(.thumbTip,Double(thumb.x),Double(thumb.y))
+   observation.points[.thumbTip]?.confidence=confidence;observation.points[.indexTip]?.confidence=confidence
    set(.indexDIP,index.y > 0.8 ? 0.43 : 0.39,index.y > 0.8 ? 0.76 : 0.65)
    for _ in 0..<count {
     time += 1.0/30
@@ -80,7 +81,18 @@ extension HandTracker {
   time += 1.0/30
   output = sample(observation,side:.right,state:&state,size:SIMD2(1000,750),at:time)
   precondition(output?.clickPinch == false && output!.generation > pressedGeneration,"uncertain contact cancels")
-  print("PASS: 14 actual HandTracker sample integration checks")
+  // The wide camera makes fingertip evidence less confident. Fresh .60
+  // points remain usable; low-confidence or absent tips must still cancel.
+  state.reset()
+  frames(6,index:CGPoint(x:0.43,y:0.85),thumb:CGPoint(x:0.28,y:0.56),confidence:0.60)
+  frames(6,index:CGPoint(x:0.36,y:0.6),thumb:CGPoint(x:0.36,y:0.6),confidence:0.60)
+  precondition(output?.clickPinch == true,"fresh moderate-confidence tips can complete a pinch")
+  observation.points.removeValue(forKey:.thumbTip)
+  time += 1.0/30
+  output = sample(observation,side:.right,state:&state,size:SIMD2(1000,750),at:time)
+  precondition(output?.clickPinch == false,"missing thumb cannot maintain a pinch from cached joints")
+  precondition(output?.maskJoints[.indexTip] != nil,"dwell still has a fresh index when the thumb disappears")
+  print("PASS: 17 actual HandTracker sample integration checks")
  }
 }
 @main struct TrackerTests { static func main() { HandTracker().exercise() } }

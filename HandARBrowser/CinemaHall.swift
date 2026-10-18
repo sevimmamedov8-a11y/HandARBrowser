@@ -2,6 +2,30 @@ import SceneKit
 import simd
 import UIKit
 
+/// Small shared progress ring for native spatial controls. Geometry is rebuilt
+/// only when its 1/30 step changes, never once per rendered eye.
+final class DwellProgressRing: SCNNode {
+    private var step = -1
+    func show(on target: SCNNode?, progress: Double) {
+        guard let target, progress > 0 else { isHidden=true;return }
+        if parent !== target { removeFromParentNode();target.addChildNode(self) }
+        position=SCNVector3(0,0.11,0.04)
+        isHidden=false
+        let next=Int(min(1,progress)*30)
+        guard step != next else { return };step=next
+        let end=CGFloat.pi/2-CGFloat(max(1,next))/30*2*CGFloat.pi
+        let path=UIBezierPath()
+        path.addArc(withCenter:.zero,radius:0.027,startAngle:.pi/2,endAngle:end,clockwise:false)
+        path.addArc(withCenter:.zero,radius:0.021,startAngle:end,endAngle:.pi/2,clockwise:true)
+        path.close()
+        let shape=SCNShape(path:path,extrusionDepth:0)
+        let material=SCNMaterial();material.lightingModel = .constant
+        material.diffuse.contents=UIColor(red:0.55,green:0.86,blue:1,alpha:1)
+        material.isDoubleSided=true;material.readsFromDepthBuffer=false;material.writesToDepthBuffer=false
+        shape.firstMaterial=material;geometry=shape;renderingOrder=100
+    }
+}
+
 // MARK: - Вспомогательные вещи (локальные, чтобы не трогать SecurityVRGame)
 
 private extension SCNMaterial {
@@ -224,6 +248,7 @@ final class CinemaHall {
     private let panelHint = CineText()
 
     private var buttonClickGate = ReleaseClickGate<ObjectIdentifier>()
+    private let dwellRing = DwellProgressRing()
 
     private var allButtons: [CineButton] {
         [lightButton, playButton, backButton, fwdButton,
@@ -747,16 +772,18 @@ final class CinemaHall {
 
     func cancelInput() {
         buttonClickGate.cancel()
+        dwellRing.isHidden=true
         for button in allButtons { button.setHighlight(false) }
     }
 
     @discardableResult
-    func update(ray: WorldRay?, pinch: Bool, allowBegin: Bool = true) -> Bool {
+    func update(ray: WorldRay?, pinch: Bool, allowBegin: Bool = true, dwell: Bool = false) -> Bool {
         guard isRunning else { return false }
         let target = ray.flatMap { ray in allButtons.first { $0.hitTest(ray:ray) } }
         for button in allButtons { button.setHighlight(button === target) }
-        guard buttonClickGate.update(target:target.map { ObjectIdentifier($0) },down:pinch,allowBegin:allowBegin) != nil,
-              let target else { return false }
+        let committed=buttonClickGate.update(target:target.map { ObjectIdentifier($0) },down:pinch,allowBegin:allowBegin,dwell:dwell,at:CACurrentMediaTime())
+        dwellRing.show(on:target?.node,progress:buttonClickGate.dwellProgress)
+        guard committed != nil, let target else { return target != nil }
         onInteraction?()
 
         if target === lightButton {

@@ -69,7 +69,10 @@ enum CameraOrientationMath {
     static func rawCameraBasis(referenceToDevice rows: [SIMD3<Double>]) -> [SIMD3<Double>]? {
         guard rows.count == 3, rows.allSatisfy({ $0.x.isFinite && $0.y.isFinite && $0.z.isFinite }) else { return nil }
         func world(_ p: SIMD3<Double>) -> SIMD3<Double> { SIMD3(p.x,p.z,-p.y) }
-        return [world(rows[1]),world(-rows[0]),world(rows[2])]
+        // Sensor +X runs from the front camera toward the home-button end
+        // (-device Y); sensor +Y is device +X. UI landscapeRight is the
+        // opposite name to UIDeviceOrientation.landscapeLeft.
+        return [world(-rows[1]),world(rows[0]),world(rows[2])]
     }
     static func initialHeading(basis: [SIMD3<Double>]) -> Double {
         let forward = -basis[2]

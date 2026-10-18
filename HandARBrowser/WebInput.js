@@ -4,6 +4,38 @@
   function action(target){return target && target.closest ? target.closest('a,button,input,textarea,select,summary,label,[role=button],[onclick],.app,.file-row') : null;}
   function enabled(target){return target && !target.disabled && target.getAttribute('aria-disabled')!=='true' && target.isConnected!==false;}
   let hoverTarget=null;
+  let dwell=null,dwellRing=null,dwellExpiry=null;
+  function clearDwell(){
+    dwell=null;
+    if(dwellExpiry!==null){clearTimeout(dwellExpiry);dwellExpiry=null;}
+    if(dwellRing)dwellRing.style.display='none';
+  }
+  function drawDwell(x,y,progress){
+    if(!dwellRing){
+      dwellRing=document.createElement('div');
+      dwellRing.setAttribute('aria-hidden','true');
+      dwellRing.style.cssText='position:fixed;z-index:2147483647;width:32px;height:32px;border-radius:50%;pointer-events:none;transform:translate(-50%,-50%);mask:radial-gradient(transparent 54%,black 58%);-webkit-mask:radial-gradient(transparent 54%,black 58%);';
+      document.documentElement.appendChild(dwellRing);
+    }
+    dwellRing.style.display='block';dwellRing.style.left=x+'px';dwellRing.style.top=y+'px';
+    dwellRing.style.background='conic-gradient(#8edcff '+(progress*360)+'deg,rgba(255,255,255,.25) 0)';
+  }
+  window.__handarDwell=function(x,y){
+    const target=action(el(x,y)),now=performance.now();
+    if(document.hidden||active.size||!enabled(target)){clearDwell();return;}
+    if(!dwell||dwell.target!==target||now-dwell.last>250||now<dwell.last){dwell={target,since:now,last:now,fired:false};}
+    dwell.last=now;
+    if(dwellExpiry!==null)clearTimeout(dwellExpiry);
+    dwellExpiry=setTimeout(clearDwell,250);
+    const progress=Math.min(1,(now-dwell.since)/1000);
+    drawDwell(x,y,progress);
+    if(dwell.fired||progress<1)return;
+    dwell.fired=true;
+    // Use the same confirmed event/feedback path as a completed pinch.
+    const click=new MouseEvent('click',{bubbles:true,cancelable:true,clientX:x,clientY:y});
+    Object.defineProperty(click,'handarConfirmed',{value:true});target.dispatchEvent(click);
+  };
+  window.__handarCancelDwell=clearDwell;
   function updateHover(target){
     const next=action(target);
     if(next===hoverTarget)return;
@@ -31,11 +63,12 @@
     const target=el(x,y);updateHover(target);
     pointer(target,'pointermove',x,y,1,0);mouse(target,'mousemove',x,y,0);
   };
-  window.__handarPointerDown=function(x,y,id,slop){
+  window.__handarPointerDown=function(x,y,id,slop,suppressClick){
+    clearDwell();
     if(active.has(id))return;
     const target=el(x,y),clickTarget=action(target)||target;
     if(clickTarget&&!enabled(clickTarget))return;
-    active.set(id,{target,clickTarget,startX:x,startY:y,lastY:y,moved:false,slop:Number.isFinite(slop)?Math.max(4,slop):12});
+    active.set(id,{target,clickTarget,startX:x,startY:y,lastY:y,moved:false,cancelled:!!suppressClick,slop:Number.isFinite(slop)?Math.max(4,slop):12});
     updateHover(target);pointer(target,'pointerdown',x,y,id,1);mouse(target,'mousedown',x,y,1);
   };
   window.__handarPointerMove=function(x,y,id){
@@ -59,11 +92,12 @@
     }
   };
   window.__handarPointerCancel=function(x,y,id){
+    clearDwell();
     const a=active.get(id);active.delete(id);
     if(a){pointer(a.target,'pointercancel',x,y,id,0);mouse(a.target,'mouseup',x,y,0);}
     updateHover(null);
   };
-  window.__handarClearHover=function(){updateHover(null);};
+  window.__handarClearHover=function(){clearDwell();updateHover(null);};
 
   // --- Confirmation feedback (one click, no sound on hover/drag) ---
   document.addEventListener('click', function(event) {

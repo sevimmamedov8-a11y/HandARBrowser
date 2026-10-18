@@ -1,4 +1,4 @@
-name: Build HandAR Vision IPA — V77
+name: Build HandAR Vision IPA — V78
 
 on:
   push:
@@ -31,6 +31,7 @@ jobs:
         run: |
           python3 Tests/check_hand_gestures.py
           python3 Tests/check_hand_tracker.py
+          python3 Tests/check_camera.py
           python3 Tests/check_pointer_bridge.py
           python3 Tests/check_performance.py
           python3 Tests/check_youtube_url.py
@@ -51,7 +52,7 @@ jobs:
           /usr/bin/unzip -p build/HandARBrowser-unsigned.ipa Payload/HandARBrowser.app/Info.plist > build/packaged-Info.plist
           /usr/bin/plutil -lint build/packaged-Info.plist
           test "$(/usr/bin/plutil -extract CFBundleDisplayName raw -o - build/packaged-Info.plist)" = "HandAR Vision"
-          test "$(/usr/bin/plutil -extract CFBundleVersion raw -o - build/packaged-Info.plist)" = "77"
+          test "$(/usr/bin/plutil -extract CFBundleVersion raw -o - build/packaged-Info.plist)" = "78"
           echo "IPA OK"
 
       - name: Upload IPA artifact

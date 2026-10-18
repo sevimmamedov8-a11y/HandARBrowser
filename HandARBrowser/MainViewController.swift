@@ -1,6 +1,6 @@
 //
 //  MainViewController.swift
-//  HandAR Vision — V77
+//  HandAR Vision — V78
 //
 //  Стереоконвейер
 //  Передний план: реальные пиксели рук из камеры по узкой маске свежих суставов Vision.
@@ -722,6 +722,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
 
     private var handOwnership = HandInputOwnership()
     private var handInputWatchdog: Timer?
+    private var backgroundObserver: NSObjectProtocol?
     private var lastHandDeliveryTime: Double = -.infinity
     private var toolbarClickGate = ReleaseClickGate<Int>()
     private var directVideoClickGate = ReleaseClickGate<Int>()
@@ -906,6 +907,9 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         }
         buildInterface()
         wireServices()
+        backgroundObserver=NotificationCenter.default.addObserver(forName:UIApplication.didEnterBackgroundNotification,object:nil,queue:.main) { [weak self] _ in
+            guard let self,self.inVR else { return };self.leaveVRToMenu()
+        }
         handInputWatchdog = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
             guard let self, self.inVR, self.handOwnership.hand != nil,
                   CACurrentMediaTime()-self.lastHandDeliveryTime > 0.2 else { return }
@@ -944,6 +948,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     }
 
     deinit {
+        if let backgroundObserver { NotificationCenter.default.removeObserver(backgroundObserver) }
         handInputWatchdog?.invalidate()
         cinemaProbeTimer?.invalidate()
         cinemaPlayback.release()
@@ -2049,8 +2054,8 @@ final class MainViewController: UIViewController, MTKViewDelegate {
             self.hands.process(pixelBuffer: pixelBuffer, orientation: orientation)
         }
 
-        let cameraDelivery = LatestMainDelivery<ARFrame> { [weak self] frame in
-            guard let self, self.inVR else { return }
+        let cameraDelivery = LatestMainDelivery<CameraFrame> { [weak self] frame in
+            guard let self, self.inVR, self.tracking.isCurrent(frame) else { return }
             self.headNode.simdTransform = self.tracking.headTransform(frame)
             self.ensureBrowserAnchor(using: frame.camera.transform)
         }
@@ -2068,10 +2073,8 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         }
 
         tracking.onFailure = { [weak self] message in
-            DispatchQueue.main.async {
-                self?.leaveVRToMenu()
-                self?.showAlert(message)
-            }
+            self?.leaveVRToMenu()
+            self?.showAlert(message)
         }
 
         controller.onConnectionChanged = { [weak self] connected, _ in
@@ -2158,6 +2161,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         handOwnership.reset()
         hands.reset()
         inVR = true
+        headNode.simdTransform=matrix_identity_float4x4
         didCreateInitialAnchor = false
         browserAnchor = nil
         browserWorldTransform = nil
@@ -2216,6 +2220,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         handOwnership.suppressUntilOpen()
         if !inVR {
             inVR = true
+            headNode.simdTransform=matrix_identity_float4x4
             applyEyeGeometry()
             requestLandscapeMode()
             setVRVisible(true)
@@ -2276,6 +2281,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         cinemaPlayback.release()
         if !inVR {
             inVR = true
+            headNode.simdTransform=matrix_identity_float4x4
             didCreateInitialAnchor = false
             browserAnchor = nil
             browserWorldTransform = nil
@@ -2924,8 +2930,8 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     private func handleHands(left rawLeft: HandSample?, right rawRight: HandSample?) {
         guard inVR else { return }
         let now = CACurrentMediaTime()
-        let freshLeft = rawLeft.flatMap { now-$0.timestamp <= 0.2 && now >= $0.timestamp ? $0 : nil }
-        let freshRight = rawRight.flatMap { now-$0.timestamp <= 0.2 && now >= $0.timestamp ? $0 : nil }
+        let freshLeft = rawLeft.flatMap { now-$0.timestamp <= 0.2 && now >= $0.timestamp && tracking.acceptsHand(timestamp:$0.timestamp) ? $0 : nil }
+        let freshRight = rawRight.flatMap { now-$0.timestamp <= 0.2 && now >= $0.timestamp && tracking.acceptsHand(timestamp:$0.timestamp) ? $0 : nil }
         lastHandDeliveryTime = max(freshLeft?.timestamp ?? -.infinity, freshRight?.timestamp ?? -.infinity)
         if freshLeft != nil || freshRight != nil { lastHandSeenTime = now }
         if !directVideoActive { queueHandForegroundMask(left:freshLeft,right:freshRight) }
@@ -3645,7 +3651,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
 
     private func makeUniforms(
         drawableSize: CGSize,
-        frame: ARFrame?,
+        frame: CameraFrame?,
         hasCamera: Bool
     ) -> VRUniforms {
         var uniforms = VRUniforms()
@@ -3663,24 +3669,17 @@ final class MainViewController: UIViewController, MTKViewDelegate {
 
         guard let frame, profile.passthrough, hasCamera else { return uniforms }
 
-        let resolution = frame.camera.imageResolution
-        let intrinsics = frame.camera.intrinsics
-        let fx = intrinsics[0][0]
-        let fy = intrinsics[1][1]
-        guard fx > 0, fy > 0 else {
+        guard let projection = frame.projection else {
             uniforms.passthrough = 0
             return uniforms
         }
 
-        // Половина поля зрения реальной камеры в тангенсах.
-        let camTanX = Float(resolution.width) * 0.5 / fx
-        let camTanY = Float(resolution.height) * 0.5 / fy
         let flip = currentInterfaceOrientation() == .landscapeLeft
 
         let left = VRLensMath.frustum(eye: 0, profile: profile)
         let right = VRLensMath.frustum(eye: 1, profile: profile)
-        let mappedLeft = cameraMapping(for: left, camTanX: camTanX, camTanY: camTanY, flipped: flip)
-        let mappedRight = cameraMapping(for: right, camTanX: camTanX, camTanY: camTanY, flipped: flip)
+        let mappedLeft = cameraMapping(for:left,projection:projection,flipped:flip)
+        let mappedRight = cameraMapping(for:right,projection:projection,flipped:flip)
 
         uniforms.camScaleL = mappedLeft.scale
         uniforms.camOffsetL = mappedLeft.offset
@@ -3689,33 +3688,19 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         return uniforms
     }
 
-    /// Линейное отображение координат глаза в координаты кадра камеры так,
-    /// чтобы угловые размеры совпали: пиксель под углом X в глазу берётся
-    /// из пикселя под тем же углом X в камере.
+    /// Same projection model as hand rays, including the wider 0.5x view.
     private func cameraMapping(
         for frustum: EyeFrustum,
-        camTanX: Float,
-        camTanY: Float,
+        projection: CameraProjection,
         flipped: Bool
     ) -> (scale: SIMD2<Float>, offset: SIMD2<Float>) {
-        var scale = SIMD2<Float>(
-            (frustum.right - frustum.left) / (2 * camTanX),
-            (frustum.top - frustum.bottom) / (2 * camTanY)
-        )
-        var offset = SIMD2<Float>(
-            0.5 + frustum.left / (2 * camTanX),
-            0.5 - frustum.top / (2 * camTanY)
-        )
-
-        if flipped {
-            // В landscapeLeft кадр камеры повёрнут на 180°.
-            scale = -scale
-            offset = SIMD2<Float>(1, 1) - offset
-        }
-        return (scale, offset)
+        let mapping=projection.mapping(left:Double(frustum.left),right:Double(frustum.right),
+            bottom:Double(frustum.bottom),top:Double(frustum.top),flipped:flipped)
+        return (SIMD2(Float(mapping.scale.x),Float(mapping.scale.y)),
+                SIMD2(Float(mapping.offset.x),Float(mapping.offset.y)))
     }
 
-    private func makeCameraTextures(from frame: ARFrame?) -> (MTLTexture, MTLTexture)? {
+    private func makeCameraTextures(from frame: CameraFrame?) -> (MTLTexture, MTLTexture)? {
         guard
             profile.passthrough,
             let frame,
@@ -4370,27 +4355,57 @@ final class ARStereoTrackingManager: NSObject, ARSessionDelegate {
     let session = ARSession()
 
     private let frameLock = NSLock()
-    private var latestFrame: ARFrame?
+    private var latestFrame: CameraFrame?
     private var interfaceOrientation: UIInterfaceOrientation = .landscapeRight
+    private var runState = CameraRunState()
+    private let ultraWideCapture = UltraWideCapture()
 
     var onFrame: ((CVPixelBuffer, CGImagePropertyOrientation) -> Void)?
-    var onCamera: ((ARFrame) -> Void)?
+    var onCamera: ((CameraFrame) -> Void)?
     var onAnchorUpdate: ((ARAnchor) -> Void)?
     var onFailure: ((String) -> Void)?
 
-    var latestFrameCopy: ARFrame? {
+    override init() {
+        super.init()
+        ultraWideCapture.onFrame = { [weak self] frame in self?.publish(frame) }
+    }
+    deinit { ultraWideCapture.stop();session.pause() }
+
+    private var currentMode: CameraMode? {
+        frameLock.lock();defer{frameLock.unlock()};return runState.mode
+    }
+    private func reportFailure(_ message: String, mode: CameraMode, token suppliedToken: UInt64? = nil) {
+        frameLock.lock();let token=suppliedToken ?? runState.generation;frameLock.unlock()
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.frameLock.lock();let current=self.runState.isCurrent(token,mode:mode);self.frameLock.unlock()
+            if current { self.onFailure?(message) }
+        }
+    }
+    var latestFrameCopy: CameraFrame? {
         frameLock.lock()
         defer { frameLock.unlock() }
         return latestFrame
     }
 
+    func isCurrent(_ frame: CameraFrame) -> Bool {
+        frameLock.lock();defer{frameLock.unlock()}
+        return runState.accepts(mode:frame.mode,timestamp:frame.timestamp)
+    }
+    func acceptsHand(timestamp: Double) -> Bool {
+        frameLock.lock();defer{frameLock.unlock()}
+        return runState.acceptsHand(timestamp:timestamp)
+    }
+
     func setInterfaceOrientation(_ orientation: UIInterfaceOrientation) {
+        frameLock.lock();defer{frameLock.unlock()}
         interfaceOrientation = orientation
     }
 
     /// Матрица головы в мире с поправкой на ориентацию интерфейса.
-    func headTransform(_ frame: ARFrame) -> simd_float4x4 {
-        frame.camera.viewMatrix(for: interfaceOrientation).inverse
+    func headTransform(_ frame: CameraFrame) -> simd_float4x4 {
+        frameLock.lock();let interfaceOrientation=self.interfaceOrientation;frameLock.unlock()
+        return frame.camera.viewMatrix(for: interfaceOrientation).inverse
     }
 
     /// Луч из точки, найденной Vision, в мировые координаты.
@@ -4398,26 +4413,15 @@ final class ARStereoTrackingManager: NSObject, ARSessionDelegate {
     func worldRay(visionPoint: CGPoint) -> WorldRay? {
         guard let frame = latestFrameCopy else { return nil }
 
-        let resolution = frame.camera.imageResolution
-        let intrinsics = frame.camera.intrinsics
-        let fx = intrinsics[0][0]
-        let fy = intrinsics[1][1]
-        let cx = intrinsics[2][0]
-        let cy = intrinsics[2][1]
-        guard fx > 0, fy > 0 else { return nil }
+        guard let projection=frame.projection else { return nil }
 
         // Vision отдаёт нормированные координаты ориентированного кадра
         // (начало — левый низ). Возвращаемся в координаты сырого кадра.
-        let flipped = (interfaceOrientation == .landscapeLeft)
-        let px = Float(flipped ? (1 - visionPoint.x) : visionPoint.x) * Float(resolution.width)
-        let py = Float(flipped ? visionPoint.y : (1 - visionPoint.y)) * Float(resolution.height)
-        guard px.isFinite, py.isFinite else { return nil }
-
-        let directionInCamera = simd_normalize(SIMD3<Float>(
-            (px - cx) / fx,
-            -(py - cy) / fy,
-            -1
-        ))
+        frameLock.lock();let flipped=interfaceOrientation == .landscapeLeft;frameLock.unlock()
+        let uv=CameraProjection.rawUV(vision:SIMD2(Double(visionPoint.x),Double(visionPoint.y)),landscapeLeft:flipped)
+        let tangent=projection.tangent(rawUV:uv)
+        guard tangent.x.isFinite,tangent.y.isFinite else { return nil }
+        let directionInCamera=simd_normalize(SIMD3<Float>(Float(tangent.x),Float(tangent.y),-1))
 
         let transform = frame.camera.transform
         let rotation = simd_float3x3(
@@ -4434,8 +4438,26 @@ final class ARStereoTrackingManager: NSObject, ARSessionDelegate {
     }
 
     func start() {
+        pause() // Invalidate old source callbacks before opening a new run gate.
+        let mode=CameraMode.load(ultraWideAvailable:UltraWideCapture.isAvailable)
+        frameLock.lock()
+        let token=runState.begin(mode,at:CACurrentMediaTime());latestFrame=nil
+        frameLock.unlock()
+        // Release the previous physical camera before opening the other pipeline.
+        ultraWideCapture.stop { [weak self] in
+            guard let self else { return }
+            self.frameLock.lock();let current=self.runState.isCurrent(token,mode:mode);self.frameLock.unlock()
+            guard current else { return }
+            if mode == .ultraWide {
+                self.ultraWideCapture.start { [weak self] message in self?.reportFailure(message,mode:.ultraWide,token:token) }
+            }
+            else { self.startWorldTracking() }
+        }
+    }
+
+    private func startWorldTracking() {
         guard ARWorldTrackingConfiguration.isSupported else {
-            onFailure?("Этот iPhone не поддерживает ARKit World Tracking.")
+            reportFailure("Этот iPhone не поддерживает ARKit World Tracking.",mode:.worldTracking)
             return
         }
 
@@ -4453,34 +4475,46 @@ final class ARStereoTrackingManager: NSObject, ARSessionDelegate {
 
     func pause() {
         session.pause()
+        ultraWideCapture.stop()
         frameLock.lock()
+        runState.stop()
         latestFrame = nil
         frameLock.unlock()
     }
 
     func add(anchor: ARAnchor) {
+        guard currentMode == .worldTracking else { return }
         session.add(anchor: anchor)
     }
 
     func remove(anchor: ARAnchor) {
+        guard currentMode == .worldTracking else { return }
         session.remove(anchor: anchor)
     }
 
     func session(_ session: ARSession, didUpdate frame: ARFrame) {
+        publish(CameraFrame(frame))
+    }
+
+    private func publish(_ frame: CameraFrame) {
         frameLock.lock()
+        guard runState.accepts(mode:frame.mode,timestamp:frame.timestamp) else { frameLock.unlock();return }
         latestFrame = frame
+        let orientation=interfaceOrientation
         frameLock.unlock()
 
-        onFrame?(frame.capturedImage, imageOrientation(for: interfaceOrientation))
+        onFrame?(frame.capturedImage, imageOrientation(for:orientation))
         onCamera?(frame)
     }
 
     func session(_ session: ARSession, didUpdate anchors: [ARAnchor]) {
+        guard currentMode == .worldTracking else { return }
         anchors.forEach { onAnchorUpdate?($0) }
     }
 
     func session(_ session: ARSession, didFailWithError error: Error) {
-        onFailure?("ARKit завершил сессию: \(error.localizedDescription)")
+        guard currentMode == .worldTracking else { return }
+        reportFailure("ARKit завершил сессию: \(error.localizedDescription)",mode:.worldTracking)
     }
 
     private func imageOrientation(for orientation: UIInterfaceOrientation) -> CGImagePropertyOrientation {
@@ -4785,6 +4819,8 @@ final class MainMenuView: UIView {
     private let scrollView = UIScrollView()
     private let stack = UIStackView()
     private let passthroughSwitch = UISwitch()
+    private let cameraSelector = UISegmentedControl(items:["0,5× · широкий","AR 1×"])
+    private let cameraNote = UILabel()
     private let cinemaField = UITextField()
     private let cinemaButton = UIButton(type: .system)
     private var profile: VRProfile
@@ -4860,6 +4896,22 @@ final class MainMenuView: UIView {
 
         stack.axis = .vertical
         stack.spacing = 14
+        let ultraWideAvailable=UltraWideCapture.isAvailable
+        let cameraMode=CameraMode.load(ultraWideAvailable:ultraWideAvailable)
+        cameraSelector.setEnabled(ultraWideAvailable,forSegmentAt:0)
+        cameraSelector.selectedSegmentIndex=cameraMode == .ultraWide ? 0 : 1
+        cameraSelector.selectedSegmentTintColor=UIColor(white:0.7,alpha:0.35)
+        cameraNote.font = .systemFont(ofSize:12)
+        cameraNote.textColor=UIColor.white.withAlphaComponent(0.65)
+        cameraNote.numberOfLines=0
+        cameraSelector.addAction(UIAction { [weak self] _ in
+            guard let self else { return }
+            let mode: CameraMode=self.cameraSelector.selectedSegmentIndex == 0 ? .ultraWide : .worldTracking
+            mode.save();self.updateCameraNote()
+        },for:.valueChanged)
+        updateCameraNote()
+        stack.addArrangedSubview(cameraSelector)
+        stack.addArrangedSubview(cameraNote)
 
         // 3D-кинотеатр: поле для ссылки на YouTube + кнопка входа.
         let cinemaTitle = UILabel()
@@ -4957,6 +5009,12 @@ final class MainMenuView: UIView {
     func setProfile(_ updated: VRProfile) {
         profile = updated
         applyProfile()
+    }
+
+    private func updateCameraNote() {
+        if !UltraWideCapture.isAvailable { cameraNote.text="Камера 0,5× недоступна на этом iPhone. Работает обычный AR-режим." }
+        else if cameraSelector.selectedSegmentIndex == 0 { cameraNote.text="Настоящая камера 0,5×. Повороты головы отслеживаются; перемещения по комнате — нет." }
+        else { cameraNote.text="Обычная камера AR 1×: отслеживаются повороты и перемещения по комнате." }
     }
 
     private func applyProfile() {

@@ -2,8 +2,8 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
-echo "== Hand AR Browser V70 project check =="
-for f in "HandARBrowser.xcodeproj/project.pbxproj" "HandARBrowser/AppDelegate.swift" "HandARBrowser/MainViewController.swift" "HandARBrowser/CinemaHall.swift" "HandARBrowser/CinemaPlayback.swift" "HandARBrowser/Info.plist" "HandARBrowser/WebInput.js"; do
+echo "== Hand AR Browser V75 project check =="
+for f in "HandARBrowser.xcodeproj/project.pbxproj" "HandARBrowser/AppDelegate.swift" "HandARBrowser/MainViewController.swift" "HandARBrowser/HandGesture.swift" "HandARBrowser/CinemaHall.swift" "HandARBrowser/CinemaPlayback.swift" "HandARBrowser/Info.plist" "HandARBrowser/WebInput.js"; do
   [[ -f "$f" ]] && echo "[OK] $f" || { echo "[FAIL] missing $f"; exit 1; }
 done
 
@@ -78,7 +78,7 @@ grep -Fq "private let leftHandSkeletonNode = SCNNode()" "$SRC"
 grep -Fq "private let rightHandSkeletonNode = SCNNode()" "$SRC"
 grep -Fq "private static let handSkeletonBonePairs" "$SRC"
 grep -Fq "recognizedPoints(.all)" "$SRC"
-grep -Fq "queueHandForegroundMask(left: left, right: right)" "$SRC"
+grep -Fq "queueHandForegroundMask(left:freshLeft,right:freshRight)" "$SRC"
 grep -Fq "handMaskEnabled" "$SRC"
 grep -Fq "handMaskTexture" "$SRC"
 grep -Fq "texture2d<float> handMask" "$SRC"
@@ -88,7 +88,9 @@ grep -Fq "readsFromDepthBuffer = false" "$SRC"
 ! grep -Fq "rightHandSkeletonNode.isHidden = !visible" "$SRC"
 grep -Fq "private func planeHit(" "$SRC"
 grep -Fq "private func updateDrag(with ray: WorldRay)" "$SRC"
-grep -Fq "dragZoneHeight" "$SRC"
+grep -Fq "if sample.isFist" "$SRC"
+grep -Fq "struct StablePinchGesture" "HandARBrowser/HandGesture.swift"
+grep -Fq "struct ReleaseClickGate" "HandARBrowser/HandGesture.swift"
 grep -Fq "private static let defaultPanelWidth: Float = 2.90" "$SRC"
 ! grep -Fq "private let browserWorldWidth: Float = 0.82" "$SRC"
 grep -Fq "struct ToolbarItem" "$SRC"
@@ -151,7 +153,7 @@ grep -Fq "NSCameraUsageDescription" HandARBrowser/Info.plist
 ! grep -Fq "let isPinching: Bool" "$SRC"
 ! grep -Fq "cursorNode" "$SRC"
 
-# V70 spatial Home View and common app shell.
+# V75 spatial Home View and common app shell.
 grep -Fq 'class="rail glass"' "$SRC"
 grep -Fq 'class="window-ornament"' "$SRC"
 grep -Fq 'class="spatial-sidebar"' "$SRC"
@@ -159,7 +161,7 @@ grep -Fq 'applySpatialSurface(home: true, transparent: true)' "$SRC"
 grep -Fq 'case "environment-camera", "environment-dark"' "$SRC"
 grep -Fq 'handar-hover' "$JS"
 
-echo "[OK] V70 static project checks"
+echo "[OK] V75 static project checks"
 
 if command -v swiftc >/dev/null 2>&1; then
   # Parser-only validation can fail on Linux because Apple SDK modules are unavailable;

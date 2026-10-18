@@ -1,6 +1,7 @@
 """Golden URL checks against the exact Swift router; run with macOS Swift."""
 from pathlib import Path
-import subprocess,tempfile
+import tempfile
+from swift_test_support import run_swift_sources
 r=Path(__file__).resolve().parent.parent
 s=(r/'HandARBrowser/MainViewController.swift').read_text(encoding='utf-8')
 start=s.index('    private func youtubeWatchURL(')
@@ -17,4 +18,4 @@ print("PASS: example link, timestamp, Shorts, domain and ID validation")
 with tempfile.TemporaryDirectory(prefix='handar-youtube-') as directory:
     script=Path(directory)/'url.swift'
     script.write_text('import Foundation\n'+s[start:end]+tests,encoding='utf-8')
-    subprocess.run(['swift',str(script)],check=True,timeout=30)
+    run_swift_sources([script])

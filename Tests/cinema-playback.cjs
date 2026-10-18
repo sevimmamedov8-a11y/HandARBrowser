@@ -14,3 +14,18 @@ for(const role of ['left','right']){
  assert.equal(video.volume,role==='right'?0:1);assert.equal(starts,1);
 }
 console.log('PASS: left/right eye autoplay and audio isolation');
+
+const input=fs.readFileSync(path.resolve(__dirname,'../HandARBrowser/WebInput.js'),'utf8');
+const begin=input.indexOf('  function playbackVideo()');assert(begin>=0);
+const movie={clientWidth:960,clientHeight:540,duration:100,currentTime:50,paused:false,volume:0.6,play(){this.paused=false;return Promise.resolve()},pause(){this.paused=true}};
+const small={clientWidth:20,clientHeight:20,duration:10,currentTime:0};
+const pc={window:{},document:{querySelectorAll(){return [small,movie]}}};vm.createContext(pc);
+vm.runInContext('(function(){'+input.slice(begin),pc);
+pc.window.__handarSeekVideo(10,false);assert.equal(movie.currentTime,60);assert.equal(small.currentTime,0);
+pc.window.__handarSeekVideo(-1000,false);assert.equal(movie.currentTime,0);
+pc.window.__handarSeekVideo(1000,false);assert.equal(movie.currentTime,100);
+pc.window.__handarSeekVideo(NaN,false);assert.equal(movie.currentTime,100);
+pc.window.__handarSeekVideo(0,true);assert.equal(movie.currentTime,0);assert.equal(movie.paused,false);
+pc.window.__handarTogglePlay();assert.equal(movie.paused,true);
+pc.window.__handarSetVolume(-0.15);assert(Math.abs(movie.volume-0.45)<1e-9);
+console.log('PASS: cinema web seek, restart, largest-video selection, pause and volume');

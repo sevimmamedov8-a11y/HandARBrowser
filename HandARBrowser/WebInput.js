@@ -1,56 +1,66 @@
 (function(){
   const active = new Map();
-  function el(x,y){
-    const e=document.elementFromPoint(x,y);
-    return e || document.body;
-  }
+  function el(x,y){return document.elementFromPoint(x,y)||document.body;}
+  function action(target){return target && target.closest ? target.closest('a,button,input,textarea,select,summary,label,[role=button],[onclick],.app,.file-row') : null;}
+  function enabled(target){return target && !target.disabled && target.getAttribute('aria-disabled')!=='true' && target.isConnected!==false;}
   let hoverTarget=null;
   function updateHover(target){
-    const next=target && target.closest ? target.closest('button,a,.app,.btn,.key,.tile,.file-row') : null;
+    const next=action(target);
     if(next===hoverTarget)return;
     if(hoverTarget)hoverTarget.classList.remove('handar-hover');
     hoverTarget=next;
     if(hoverTarget)hoverTarget.classList.add('handar-hover');
   }
+  function pointer(target,type,x,y,id,buttons){target.dispatchEvent(new PointerEvent(type,{bubbles:true,cancelable:true,pointerId:id,pointerType:'mouse',clientX:x,clientY:y,buttons}));}
+  function mouse(target,type,x,y,buttons){target.dispatchEvent(new MouseEvent(type,{bubbles:true,cancelable:true,clientX:x,clientY:y,buttons}));}
+  function scrollAt(target,amount){
+    if(!amount)return;
+    for(let node=target;node;node=node.parentElement){
+      if(node.scrollHeight>node.clientHeight+1 && typeof getComputedStyle==='function'){
+        const overflow=getComputedStyle(node).overflowY;
+        if(overflow==='auto'||overflow==='scroll'){
+          node.scrollTop+=amount;
+          return;
+        }
+      }
+    }
+    const root=document.scrollingElement;
+    if(root)root.scrollTop+=amount;
+  }
   window.__handarHover=function(x,y){
-    const target=el(x,y);
-    updateHover(target);
-    target.dispatchEvent(new PointerEvent('pointermove',{bubbles:true,cancelable:true,pointerId:1,pointerType:'mouse',clientX:x,clientY:y,buttons:0}));
-    target.dispatchEvent(new MouseEvent('mousemove',{bubbles:true,cancelable:true,clientX:x,clientY:y,buttons:0}));
+    const target=el(x,y);updateHover(target);
+    pointer(target,'pointermove',x,y,1,0);mouse(target,'mousemove',x,y,0);
   };
-  window.__handarPointerDown=function(x,y,id){
-    active.set(id,{x,y,startX:x,startY:y,moved:false});
-    const target=el(x,y);
-    target.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true,cancelable:true,pointerId:id,pointerType:'mouse',clientX:x,clientY:y,buttons:1}));
-    target.dispatchEvent(new MouseEvent('mousedown',{bubbles:true,cancelable:true,clientX:x,clientY:y,buttons:1}));
+  window.__handarPointerDown=function(x,y,id,slop){
+    if(active.has(id))return;
+    const target=el(x,y),clickTarget=action(target)||target;
+    if(clickTarget&&!enabled(clickTarget))return;
+    active.set(id,{target,clickTarget,startX:x,startY:y,lastY:y,moved:false,slop:Number.isFinite(slop)?Math.max(4,slop):12});
+    updateHover(target);pointer(target,'pointerdown',x,y,id,1);mouse(target,'mousedown',x,y,1);
   };
   window.__handarPointerMove=function(x,y,id){
-    const target=el(x,y);
-    target.dispatchEvent(new PointerEvent('pointermove',{bubbles:true,cancelable:true,pointerId:id,pointerType:'mouse',clientX:x,clientY:y,buttons:1}));
-    target.dispatchEvent(new MouseEvent('mousemove',{bubbles:true,cancelable:true,clientX:x,clientY:y,buttons:1}));
-    const start=active.get(id)||{startX:x,startY:y};
-    active.set(id,{x,y,startX:start.startX,startY:start.startY,
-      moved:start.moved || Math.hypot(x-start.startX,y-start.startY)>=52});
+    const a=active.get(id);if(!a)return;
+    const under=el(x,y),underAction=action(under)||under;
+    if(underAction!==a.clickTarget)a.cancelled=true;
+    updateHover(under);
+    const moved=a.moved||Math.hypot(x-a.startX,y-a.startY)>=a.slop;
+    if(moved)scrollAt(a.target,(y-(a.moved?a.lastY:a.startY))*2.6);
+    a.moved=moved;a.lastY=y;
+    pointer(a.target,'pointermove',x,y,id,1);mouse(a.target,'mousemove',x,y,1);
   };
   window.__handarPointerUp=function(x,y,id){
-    const a=active.get(id)||{x,y};
-    const target=el(x,y);
-    target.dispatchEvent(new PointerEvent('pointerup',{bubbles:true,cancelable:true,pointerId:id,pointerType:'mouse',clientX:x,clientY:y,buttons:0}));
-    target.dispatchEvent(new MouseEvent('mouseup',{bubbles:true,cancelable:true,clientX:x,clientY:y,buttons:0}));
-    if(!a.moved && Math.hypot(x-(a.startX ?? a.x),y-(a.startY ?? a.y))<52){
-      const clickable=target.closest('a,button,input,textarea,select,summary,label,[role=button]')||target;
+    const a=active.get(id);if(!a)return;
+    active.delete(id);
+    pointer(a.target,'pointerup',x,y,id,0);mouse(a.target,'mouseup',x,y,0);
+    const target=el(x,y),clickTarget=action(target)||target;
+    if(!a.moved&&!a.cancelled&&Math.hypot(x-a.startX,y-a.startY)<a.slop&&a.clickTarget&&clickTarget===a.clickTarget&&enabled(clickTarget)){
       const click=new MouseEvent('click',{bubbles:true,cancelable:true,clientX:x,clientY:y});
-      Object.defineProperty(click,'handarConfirmed',{value:true});
-      clickable.dispatchEvent(click);
+      Object.defineProperty(click,'handarConfirmed',{value:true});clickTarget.dispatchEvent(click);
     }
-    active.delete(id);
   };
-
   window.__handarPointerCancel=function(x,y,id){
-    active.delete(id);
-    const target=el(x,y);
-    target.dispatchEvent(new PointerEvent('pointercancel',{bubbles:true,pointerId:id,pointerType:'mouse',clientX:x,clientY:y,buttons:0}));
-    target.dispatchEvent(new MouseEvent('mouseup',{bubbles:true,clientX:x,clientY:y,buttons:0}));
+    const a=active.get(id);active.delete(id);
+    if(a){pointer(a.target,'pointercancel',x,y,id,0);mouse(a.target,'mouseup',x,y,0);}
     updateHover(null);
   };
   window.__handarClearHover=function(){updateHover(null);};
@@ -58,7 +68,7 @@
   // --- Confirmation feedback (one click, no sound on hover/drag) ---
   document.addEventListener('click', function(event) {
     if (!event.isTrusted && !event.handarConfirmed) return;
-    const target = event.target && event.target.closest && event.target.closest('button,a,input,select,summary,label,[role=button],.app,.file-row');
+    const target = event.target && event.target.closest && event.target.closest('button,a,input,select,summary,label,[role=button],[onclick],.app,.file-row');
     if (!target || target.disabled || target.getAttribute('aria-disabled') === 'true') return;
     target.classList.add('handar-confirmed');
     setTimeout(function(){target.classList.remove('handar-confirmed');}, 200);
@@ -317,8 +327,19 @@
   });
 
   // --- Управление воспроизведением (панель 3D-кинотеатра) ---------------
+  function playbackVideo(){
+    const all=Array.from(document.querySelectorAll('video'));
+    all.sort((a,b)=>(b.clientWidth*b.clientHeight)-(a.clientWidth*a.clientHeight));
+    return all[0]||null;
+  }
+  window.__handarSeekVideo=function(seconds,absolute){
+    const v=playbackVideo();if(!v||!Number.isFinite(seconds))return;
+    const target=absolute?seconds:(v.currentTime||0)+seconds;
+    const end=Number.isFinite(v.duration)?v.duration:Number.MAX_VALUE;
+    try{v.currentTime=Math.max(0,Math.min(end,target));if(absolute){const p=v.play();if(p&&p.catch)p.catch(function(){});}}catch(e){}
+  };
   window.__handarTogglePlay = function () {
-    var v = document.querySelector('video');
+    var v = playbackVideo();
     if (!v) return 'none';
     try {
       if (v.paused) { v.play(); return 'play'; }
@@ -326,12 +347,12 @@
     } catch (e) { return 'none'; }
   };
   window.__handarVideoState = function () {
-    var v = document.querySelector('video');
+    var v = playbackVideo();
     if (!v) return 'none';
     return v.paused ? 'paused' : 'playing';
   };
   window.__handarSetVolume = function (delta) {
-    var v = document.querySelector('video');
+    var v = playbackVideo();
     if (!v) return;
     try { v.volume = Math.max(0, Math.min(1, v.volume + delta)); } catch (e) {}
   };

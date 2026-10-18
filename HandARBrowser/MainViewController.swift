@@ -16,9 +16,9 @@
 //  ----------
 //    • Луч выходит из кончика указательного пальца. Где он встречает панель,
 //      там горит точка с кольцом — видно, куда наведён.
-//    • Нажатие: СРЕДНИЙ + большой палец.
-//    • Перетаскивание панели: УКАЗАТЕЛЬНЫЙ + большой, рука в нижней трети кадра.
-//    • Масштаб: две руки, средний + большой на каждой; двигаем указательные
+//    • Нажатие: УКАЗАТЕЛЬНЫЙ + большой, с подтверждённым отпусканием.
+//    • Перетаскивание панели: устойчивый кулак, луч направлен на панель.
+//    • Масштаб: две руки, указательный + большой на каждой; двигаем указательные
 //      дальше друг от друга — окно увеличивается, ближе — уменьшается.
 //    • Панель ссылок над браузером: Google, YouTube, TikTok, Назад.
 //
@@ -35,16 +35,29 @@ import MetalKit
 import simd
 
 struct HandSample {
+    let hand: TrackedHand
+    let timestamp: Double
+    let generation: UInt64
     let indexTip: CGPoint
     let middleTip: CGPoint
     let thumbTip: CGPoint
     let joints: [VNHumanHandPoseObservation.JointName: CGPoint]
-    /// Средний + большой: нажатие.
+    /// Confirmed thumb + index contact, held until confirmed opening.
     let clickPinch: Bool
-    /// Указательный + большой: захват панели.
+    let clickBegan: Bool
+    let clickOpenConfirmed: Bool
+    /// Compatibility field: panel grabbing is a fist, not another pinch.
     let grabPinch: Bool
-    /// Рука в кулаке — пальцы согнуты.
     let isFist: Bool
+
+    var routing: HandRoutingState {
+        HandRoutingState(hand:hand,generation:generation,down:clickPinch,openConfirmed:clickOpenConfirmed)
+    }
+    func routed(down: Bool, began: Bool) -> HandSample {
+        HandSample(hand:hand,timestamp:timestamp,generation:generation,indexTip:indexTip,
+            middleTip:middleTip,thumbTip:thumbTip,joints:joints,clickPinch:down,
+            clickBegan:began,clickOpenConfirmed:clickOpenConfirmed,grabPinch:grabPinch,isFist:isFist)
+    }
 }
 
 /// Луч в мировых координатах.
@@ -449,6 +462,53 @@ struct VRPerformanceBudget {
     }
 }
 
+// Unit-square to quadrilateral mapping. Independent of UIKit and SceneKit.
+struct CinemaScreenHomography {
+    let a: Double, b: Double, c: Double
+    let d: Double, e: Double, f: Double
+    let g: Double, h: Double
+
+    init?(corners: [SIMD2<Double>]) {
+        guard corners.count == 4, corners.allSatisfy({ $0.x.isFinite && $0.y.isFinite }) else { return nil }
+        let p = corners
+        let dx1 = p[1].x - p[2].x, dx2 = p[3].x - p[2].x
+        let dy1 = p[1].y - p[2].y, dy2 = p[3].y - p[2].y
+        let dx3 = p[0].x - p[1].x + p[2].x - p[3].x
+        let dy3 = p[0].y - p[1].y + p[2].y - p[3].y
+        let determinant = dx1 * dy2 - dx2 * dy1
+        guard abs(determinant) > 0.000001 else { return nil }
+        g = (dx3 * dy2 - dx2 * dy3) / determinant
+        h = (dx1 * dy3 - dx3 * dy1) / determinant
+        a = p[1].x - p[0].x + g * p[1].x
+        b = p[3].x - p[0].x + h * p[3].x
+        c = p[0].x
+        d = p[1].y - p[0].y + g * p[1].y
+        e = p[3].y - p[0].y + h * p[3].y
+        f = p[0].y
+        guard [a,b,c,d,e,f,g,h].allSatisfy({ $0.isFinite }),
+              [1.0, 1+g, 1+g+h, 1+h].allSatisfy({ $0 > 0.000001 }) else { return nil }
+    }
+
+    func map(_ uv: SIMD2<Double>) -> SIMD2<Double>? {
+        let w = g * uv.x + h * uv.y + 1
+        guard abs(w) > 0.000001 else { return nil }
+        let result = SIMD2((a * uv.x + b * uv.y + c) / w,
+                           (d * uv.x + e * uv.y + f) / w)
+        return result.x.isFinite && result.y.isFinite ? result : nil
+    }
+
+    func unmap(_ point: SIMD2<Double>) -> SIMD2<Double>? {
+        let aa = a - point.x * g, bb = b - point.x * h
+        let dd = d - point.y * g, ee = e - point.y * h
+        let xx = point.x - c, yy = point.y - f
+        let determinant = aa * ee - bb * dd
+        guard abs(determinant) > 0.000001 else { return nil }
+        let result = SIMD2((xx * ee - bb * yy) / determinant,
+                           (aa * yy - xx * dd) / determinant)
+        return result.x.isFinite && result.y.isFinite ? result : nil
+    }
+}
+
 private final class WeakScriptMessageHandler: NSObject, WKScriptMessageHandler {
     weak var target: WKScriptMessageHandler?
 
@@ -554,6 +614,10 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     // не попадает в WKWebView.takeSnapshot, поэтому в кинорежиме используем
     // два настоящих видимых WKWebView — по одному на каждую VR-линзу.
     private let directVideoStage = UIView(frame: .zero)
+    private let cinemaEyeContainers = [UIView(), UIView()]
+    private let cinemaWebPointers = [UIView(), UIView()]
+    private var cinemaScreenMappings: [CinemaScreenHomography?] = [nil, nil]
+    private var cinemaWebScreenActive: Bool { cinemaActive && directVideoActive }
     private var directVideoLeft: WKWebView!
     private var directVideoRight: WKWebView!
     private let directVideoLensMask = DirectVideoLensMaskView(frame: .zero)
@@ -642,7 +706,6 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     private var cinemaOriginalURL: URL?
     private var directVideoExitButtons: [UIButton] = []
     private var directVideoStatusLabels: [UILabel] = []
-    private var directVideoExitPinch = false
     private var browserAnchor: ARAnchor?
     private var browserWorldTransform: simd_float4x4?
     private var didCreateInitialAnchor = false
@@ -651,7 +714,12 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     private var isDragging = false
     private var dragDistance: Float = 1.55
     private var dragOffset = SIMD3<Float>(repeating: 0)
-    private var wasClickPinching = false
+
+    private var handOwnership = HandInputOwnership()
+    private var handInputWatchdog: Timer?
+    private var lastHandDeliveryTime: Double = -.infinity
+    private var toolbarClickGate = ReleaseClickGate<Int>()
+    private var directVideoClickGate = ReleaseClickGate<Int>()
     private var controllerPointer = CGPoint(x: 0.5, y: 0.5)
     private var controllerButtonDown = false
     private var controllerConnected = false
@@ -660,7 +728,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     private var controllerMotionAvailable = false
     private var controllerMotionRotation = SIMD3<Float>(repeating: 0)
 
-    // Масштабирование двумя руками: обе руки делают средний+большой палец,
+    // Масштабирование двумя руками: обе руки делают указательный+большой палец,
     // затем расстояние между кончиками указательных меняет размер панели.
     private var isResizing = false
     private var resizeStartHandDistance: CGFloat = 0
@@ -686,8 +754,6 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     private var browserPlaneGeometry: SCNPlane!
     private var browserFrameGeometry: SCNBox!
     private var browserHandleNode: SCNNode!
-    /// Ниже этой доли кадра щипок указательным считается захватом панели.
-    private let dragZoneHeight: CGFloat = 0.34
     /// На таком расстоянии от камеры рисуется начало луча — примерно там кисть.
     private let fingerRayOrigin: Float = 0.32
 
@@ -835,6 +901,16 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         }
         buildInterface()
         wireServices()
+        handInputWatchdog = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+            guard let self, self.inVR, self.handOwnership.hand != nil,
+                  CACurrentMediaTime()-self.lastHandDeliveryTime > 0.2 else { return }
+            self.cancelHandInteraction()
+            self.handOwnership.reset()
+            self.hands.reset()
+            self.endDrag()
+            self.endResize()
+        }
+        if let watchdog = handInputWatchdog { RunLoop.main.add(watchdog,forMode:.common) }
         controller.start()
     }
 
@@ -863,6 +939,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     }
 
     deinit {
+        handInputWatchdog?.invalidate()
         cinemaProbeTimer?.invalidate()
         cinemaPlayback.release()
         tracking.pause()
@@ -1338,8 +1415,11 @@ final class MainViewController: UIViewController, MTKViewDelegate {
 
         directVideoLeft = makeDirectVideoWebView(role: "left")
         directVideoRight = makeDirectVideoWebView(role: "right")
-        directVideoStage.addSubview(directVideoLeft)
-        directVideoStage.addSubview(directVideoRight)
+        for (eye, webView) in [directVideoLeft!, directVideoRight!].enumerated() {
+            cinemaEyeContainers[eye].backgroundColor = .clear
+            directVideoStage.addSubview(cinemaEyeContainers[eye])
+            cinemaEyeContainers[eye].addSubview(webView)
+        }
 
         directVideoLensMask.backgroundColor = .clear
         directVideoLensMask.isUserInteractionEnabled = false
@@ -1355,6 +1435,16 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         directVideoPointer.layer.shadowRadius = 5
         directVideoPointer.isHidden = true
         directVideoStage.addSubview(directVideoPointer)
+        for pointer in cinemaWebPointers {
+            pointer.bounds = CGRect(x: 0, y: 0, width: 10, height: 10)
+            pointer.backgroundColor = .white
+            pointer.layer.cornerRadius = 5
+            pointer.layer.borderColor = UIColor(white: 0.3, alpha: 1).cgColor
+            pointer.layer.borderWidth = 1
+            pointer.isUserInteractionEnabled = false
+            pointer.isHidden = true
+            directVideoStage.addSubview(pointer)
+        }
         for _ in 0..<2 {
             let button = UIButton(type: .system)
             var config = UIButton.Configuration.filled()
@@ -1432,7 +1522,10 @@ final class MainViewController: UIViewController, MTKViewDelegate {
           window.__handarTuneDirectVideo=function(){
             var v=video(); if(!v) return;
             try{v.setAttribute('playsinline','');v.setAttribute('webkit-playsinline','');v.playsInline=true;}catch(e){}
-            try{v.muted=window.__handarDirectMuted;v.volume=window.__handarDirectMuted?0:1;}catch(e){}
+            try{v.muted=window.__handarDirectMuted;if(window.__handarDirectMuted){v.volume=0;}}catch(e){}
+            if(window.__handarCinemaSurface && v.readyState>=2 && (!v.paused || v.currentTime>0)){
+              document.documentElement.classList.add('handar-cinema-surface');
+            }
           };
           window.__handarDirectPlay=function(){
             var v=video(); if(!v) return;
@@ -1448,7 +1541,11 @@ final class MainViewController: UIViewController, MTKViewDelegate {
             try{var p=v.play();if(p&&p.catch){p.catch(function(){})}}catch(e){}
           };
           var style=document.createElement('style');
-          style.textContent='html,body{background:#000!important;margin:0!important;} video{display:block!important;visibility:visible!important;opacity:1!important;transform:translateZ(0)!important;}';
+          style.textContent='html,body{background:#000!important;margin:0!important;} video{display:block!important;visibility:visible!important;opacity:1!important;transform:translateZ(0)!important;}' +
+            'html.handar-cinema-surface,html.handar-cinema-surface body{overflow:hidden!important;}' +
+            '.handar-cinema-surface body *{visibility:hidden!important;}' +
+            '.handar-cinema-surface video{visibility:visible!important;position:fixed!important;inset:0!important;width:100vw!important;height:100vh!important;object-fit:contain!important;z-index:2147483646!important;}' +
+            '.handar-cinema-surface .html5-video-player,.handar-cinema-surface .html5-video-container{position:fixed!important;inset:0!important;width:100vw!important;height:100vh!important;}';
           (document.head||document.documentElement).appendChild(style);
           setInterval(window.__handarTuneDirectVideo,800);
           setTimeout(window.__handarTuneDirectVideo,50);
@@ -1460,6 +1557,18 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     private func layoutDirectVideoStage() {
         let bounds = view.bounds
         directVideoStage.frame = bounds
+        if cinemaWebScreenActive {
+            updateCinemaWebScreen()
+            return
+        }
+        for (eye, webView) in [directVideoLeft!, directVideoRight!].enumerated() {
+            cinemaEyeContainers[eye].frame = bounds
+            cinemaEyeContainers[eye].clipsToBounds = false
+            webView.layer.transform = CATransform3DIdentity
+            webView.layer.anchorPoint = CGPoint(x: 0.5, y: 0.5)
+            webView.isHidden = false
+            cinemaWebPointers[eye].isHidden = true
+        }
         let padding: CGFloat = 8
         let gap: CGFloat = 10
         let diameter = max(1, min(bounds.height - padding * 2,
@@ -1491,7 +1600,148 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         }
     }
 
+    private func projectedCinemaCorner(_ local: SIMD3<Float>, eye: Int) -> SIMD2<Double>? {
+        let camera = eye == 0 ? leftCameraNode : rightCameraNode
+        let world = cinemaHall.screenWorldTransform * SIMD4<Float>(local, 1)
+        let point = camera.simdWorldTransform.inverse * world
+        let depth = -point.z
+        guard depth > 0.03 else { return nil }
+        let frustum = VRLensMath.frustum(eye: eye, profile: profile)
+        let source = SIMD2<Float>((point.x / depth - frustum.left) / (frustum.right - frustum.left),
+                                 (frustum.top - point.y / depth) / (frustum.top - frustum.bottom))
+        let center = VRLensMath.lensCenterUV(eye: eye, profile: profile)
+        let aspect = Float(view.bounds.width * 0.5 / max(view.bounds.height, 1))
+        let isotropic = (source - center) * SIMD2<Float>(aspect, 1)
+        let sourceRadius = simd_length(isotropic)
+        var radius = sourceRadius
+        // Invert the Metal green-channel radial lookup at the four screen corners.
+        for _ in 0..<10 where sourceRadius > 0.000001 {
+            let r2 = radius * radius
+            let value = radius * (1 + profile.k1 * r2 + profile.k2 * r2 * r2) - sourceRadius
+            let derivative = 1 + 3 * profile.k1 * r2 + 5 * profile.k2 * r2 * r2
+            guard derivative > 0.000001 else { return nil }
+            radius = max(0, radius - value / derivative)
+        }
+        let corrected = center + isotropic * (sourceRadius > 0.000001 ? radius / sourceRadius : 1) / SIMD2<Float>(aspect, 1)
+        let result = SIMD2<Double>(Double(corrected.x) * Double(view.bounds.width * 0.5),
+                                   Double(corrected.y) * Double(view.bounds.height))
+        return result.x.isFinite && result.y.isFinite ? result : nil
+    }
+
+    private func updateCinemaWebScreen() {
+        guard cinemaWebScreenActive, view.bounds.width > 1, view.bounds.height > 1 else { return }
+        let halfWidth = view.bounds.width * 0.5
+        let sourceSize = CGSize(width: 960, height: 540)
+        let w = CinemaHall.screenWidth * 0.5, h = CinemaHall.screenHeight * 0.5
+        let localCorners = [SIMD3<Float>(-w,h,0.012), SIMD3<Float>(w,h,0.012),
+                            SIMD3<Float>(w,-h,0.012), SIMD3<Float>(-w,-h,0.012)]
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        for (eye, webView) in [directVideoLeft!, directVideoRight!].enumerated() {
+            cinemaEyeContainers[eye].frame = CGRect(x: CGFloat(eye) * halfWidth, y: 0, width: halfWidth, height: view.bounds.height)
+            cinemaEyeContainers[eye].clipsToBounds = true
+            let corners = localCorners.compactMap { projectedCinemaCorner($0, eye: eye) }
+            guard let mapping = CinemaScreenHomography(corners: corners) else {
+                cinemaScreenMappings[eye] = nil
+                webView.isHidden = true
+                cinemaWebPointers[eye].isHidden = true
+                continue
+            }
+            cinemaScreenMappings[eye] = mapping
+            webView.isHidden = false
+            if webView.bounds.size != sourceSize { webView.bounds = CGRect(origin: .zero, size: sourceSize) }
+            webView.layer.anchorPoint = .zero
+            webView.layer.position = .zero
+            var transform = CATransform3DIdentity
+            transform.m11 = CGFloat(mapping.a) / sourceSize.width
+            transform.m21 = CGFloat(mapping.b) / sourceSize.height
+            transform.m41 = CGFloat(mapping.c)
+            transform.m12 = CGFloat(mapping.d) / sourceSize.width
+            transform.m22 = CGFloat(mapping.e) / sourceSize.height
+            transform.m42 = CGFloat(mapping.f)
+            transform.m14 = CGFloat(mapping.g) / sourceSize.width
+            transform.m24 = CGFloat(mapping.h) / sourceSize.height
+            webView.layer.transform = transform
+        }
+        directVideoLensMask.frame = view.bounds
+        let radius = view.bounds.height * 0.497
+        for eye in 0..<2 {
+            let uv = VRLensMath.lensCenterUV(eye: eye, profile: profile)
+            let center = CGPoint(x: CGFloat(eye) * halfWidth + CGFloat(uv.x) * halfWidth,
+                                 y: CGFloat(uv.y) * view.bounds.height)
+            let circle = CGRect(x: center.x-radius, y: center.y-radius, width: radius*2, height: radius*2)
+            if eye == 0 { directVideoLensMask.leftCircle = circle } else { directVideoLensMask.rightCircle = circle }
+            directVideoExitButtons[eye].frame = CGRect(x: center.x-58, y: center.y-radius+16, width: 116, height: 36)
+            directVideoStatusLabels[eye].frame = CGRect(x: center.x-radius*0.8, y: center.y+radius*0.55,
+                                                      width: radius*1.6, height: 60)
+        }
+        CATransaction.commit()
+    }
+
+    private func updateCinemaWebPointers(_ uv: CGPoint?) {
+        for eye in 0..<2 {
+            guard let uv, let mapping = cinemaScreenMappings[eye],
+                  let point = mapping.map(SIMD2(Double(uv.x), Double(uv.y))) else {
+                cinemaWebPointers[eye].isHidden = true
+                continue
+            }
+            let position = CGPoint(x: CGFloat(point.x) + CGFloat(eye) * view.bounds.width * 0.5, y: CGFloat(point.y))
+            cinemaWebPointers[eye].center = position
+            let lens = eye == 0 ? directVideoLensMask.leftCircle : directVideoLensMask.rightCircle
+            let dx = position.x-lens.midX, dy = position.y-lens.midY
+            cinemaWebPointers[eye].isHidden = !cinemaEyeContainers[eye].frame.contains(position) || dx*dx+dy*dy > lens.width*lens.width*0.25
+        }
+    }
+
+    private func handleCinemaWebHands(left: HandSample?, right: HandSample?) {
+        guard let sample = right ?? left, let ray = tracking.worldRay(visionPoint: sample.indexTip) else {
+            cinemaHall.update(ray: nil, pinch: false)
+            updateCinemaWebPointers(nil)
+            directLeftInput.release(webView: directVideoLeft)
+            directRightInput.release(webView: directVideoRight)
+            return
+        }
+        if let frame = tracking.latestFrameCopy {
+            let oriented = sample.indexTip.applying(frame.displayTransform(for: currentInterfaceOrientation(), viewportSize: view.bounds.size))
+            let point = CGPoint(x: oriented.x * view.bounds.width, y: oriented.y * view.bounds.height)
+            if handleDirectVideoExit(at: point, pinch: sample.clickPinch, allowBegin:sample.clickBegan) {
+                updateCinemaWebPointers(nil)
+                return
+            }
+        }
+        directVideoPointer.isHidden = true
+        if cinemaHall.update(ray: ray, pinch: sample.clickPinch, allowBegin:sample.clickBegan) {
+            updateCinemaWebPointers(nil)
+            directLeftInput.release(webView: directVideoLeft)
+            directRightInput.release(webView: directVideoRight)
+            return
+        }
+        guard let hit = planeHit(ray: ray, transform: cinemaHall.screenWorldTransform) else {
+            updateCinemaWebPointers(nil)
+            directLeftInput.release(webView: directVideoLeft)
+            directRightInput.release(webView: directVideoRight)
+            return
+        }
+        let uv = CGPoint(x: CGFloat(hit.localX / CinemaHall.screenWidth + 0.5),
+                         y: CGFloat(0.5 - hit.localY / CinemaHall.screenHeight))
+        guard (0...1).contains(uv.x), (0...1).contains(uv.y) else {
+            updateCinemaWebPointers(nil)
+            directLeftInput.release(webView: directVideoLeft)
+            directRightInput.release(webView: directVideoRight)
+            return
+        }
+        updateCinemaWebPointers(uv)
+        updateDirectVideoInput(normalizedPoint: uv, pinch: sample.clickPinch, allowBegin:sample.clickBegan)
+    }
+
     private func directVideoTarget(for point: CGPoint) -> (WKWebView, CGPoint)? {
+        if cinemaWebScreenActive {
+            let eye = point.x < view.bounds.midX ? 0 : 1
+            let local = SIMD2<Double>(Double(point.x - CGFloat(eye) * view.bounds.width * 0.5), Double(point.y))
+            guard let mapping = cinemaScreenMappings[eye], let uv = mapping.unmap(local),
+                  (0...1).contains(uv.x), (0...1).contains(uv.y) else { return nil }
+            return (eye == 0 ? directVideoLeft : directVideoRight, CGPoint(x: CGFloat(uv.x), y: CGFloat(uv.y)))
+        }
         guard let left = directVideoLeft, let right = directVideoRight else { return nil }
         let candidates: [(WKWebView, CGRect)] = [
             (left, left.frame),
@@ -1526,25 +1776,26 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         }
     }
 
-    private func handleDirectVideoExit(at point: CGPoint, pinch: Bool) -> Bool {
-        let pressed = pinch && !directVideoExitPinch
-        directVideoExitPinch = pinch
-        let selected = directVideoExitButtons.first { $0.frame.contains(point) }
-        for button in directVideoExitButtons { button.isHighlighted = button === selected }
+    private func handleDirectVideoExit(at point: CGPoint, pinch: Bool, allowBegin: Bool = true) -> Bool {
+        let selected = directVideoExitButtons.firstIndex { $0.frame.contains(point) }
+        for (index,button) in directVideoExitButtons.enumerated() { button.isHighlighted = index == selected }
+        let confirmed = directVideoClickGate.update(target:selected,down:pinch,allowBegin:allowBegin)
         guard selected != nil else { return false }
         directVideoPointer.isHidden = false
         directVideoPointer.center = point
-        directLeftInput.release(webView: directVideoLeft)
-        directRightInput.release(webView: directVideoRight)
-        if pressed { closeDirectVideo() }
+        directLeftInput.release(webView:directVideoLeft)
+        directRightInput.release(webView:directVideoRight)
+        if confirmed != nil { closeDirectVideo() }
         return true
     }
 
     private func presentDirectVideoStage(url: URL) {
         directVideoGeneration = UUID()
         stopBrowserCapture()
-        vrView?.isPaused = true
-        directVideoExitPinch = false
+        // The hall keeps rendering behind the projected live screen.
+        vrView?.isPaused = !cinemaActive
+        directVideoStage.backgroundColor = cinemaActive ? .clear : .black
+        directVideoClickGate.cancel()
         directVideoURL = url
         setDirectVideoNotice("Загружаю страницу…")
         directVideoActive = true
@@ -1566,8 +1817,10 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     private func hideDirectVideoStage() {
         directVideoGeneration = UUID()
         vrView?.isPaused = !inVR
-        directVideoExitPinch = false
+        directVideoClickGate.cancel()
         directVideoActive = false
+        cinemaScreenMappings = [nil, nil]
+        updateCinemaWebPointers(nil)
         directVideoSyncTimer?.invalidate()
         directVideoSyncTimer = nil
         directVideoPointer.isHidden = true
@@ -1838,12 +2091,13 @@ final class MainViewController: UIViewController, MTKViewDelegate {
 
     private func enterVR() {
         guard !inVR else { return }
+        handOwnership.reset()
+        hands.reset()
         inVR = true
         didCreateInitialAnchor = false
         browserAnchor = nil
         browserWorldTransform = nil
         isDragging = false
-        wasClickPinching = false
         isResizing = false
         resizeStartHandDistance = 0
         controllerPointer = CGPoint(x: 0.5, y: 0.5)
@@ -1894,6 +2148,8 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     /// Доступна из раздела «Игры» VR Desktop (уже внутри VR) и может быть
     /// вызвана повторно без выхода из VR.
     private func startSecurityVR() {
+        cancelHandInteraction()
+        handOwnership.suppressUntilOpen()
         if !inVR {
             inVR = true
             applyEyeGeometry()
@@ -1919,6 +2175,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
             0,
             -headNode.simdWorldTransform.columns.2.z
         ))
+        securityGame.onInteraction = { [weak self] in self?.playUIConfirmation() }
         securityGame.onExitRequested = { [weak self] in
             self?.exitSecurityVR()
         }
@@ -1948,6 +2205,8 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     /// Вход в 3D-кинозал. Браузерная панель становится экраном, вокруг неё
     /// строится зал с креслами и панелью управления за спиной.
     private func enterCinema(url: URL?) {
+        cancelHandInteraction()
+        handOwnership.suppressUntilOpen()
         applySpatialSurface(home: false, transparent: false)
         stopCinemaProbe()
         cinemaPlayback.release()
@@ -2056,7 +2315,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         cinemaPlayback.release()
         pauseAndMuteBrowserMedia()
         // Keep the site's real video layer visible; WK snapshots cannot carry it.
-        cinemaHall.setNotice("Веб-плеер: нажми воспроизведение на странице")
+        cinemaHall.setNotice("")
         presentDirectVideoStage(url: original)
     }
 
@@ -2169,11 +2428,19 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     }
 
     private func cinemaSeek(by seconds: Double) {
+        if cinemaWebScreenActive {
+            directVideoLeft.evaluateJavaScript("window.__handarSeekVideo && window.__handarSeekVideo(\(seconds), false);") { [weak self] _, _ in self?.syncDirectVideoEyes() }
+            return
+        }
         guard cinemaPlayback.isActive else { return }
         cinemaPlayback.seek(by: seconds)
     }
 
     private func cinemaRestart() {
+        if cinemaWebScreenActive {
+            directVideoLeft.evaluateJavaScript("window.__handarSeekVideo && window.__handarSeekVideo(0, true);") { [weak self] _, _ in self?.syncDirectVideoEyes() }
+            return
+        }
         guard cinemaPlayback.isActive else { return }
         cinemaPlayback.restart()
         cinemaHall.setPlayingState(true)
@@ -2215,6 +2482,9 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     }
 
     private func leaveVRToMenu() {
+        cancelHandInteraction()
+        handOwnership.reset()
+        hands.reset()
         tracking.pause()
         stopBrowserCapture()
         hideDirectVideoStage()
@@ -2491,6 +2761,12 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     }
 
     private func updateControllerHand() {
+        if cinemaWebScreenActive {
+            controllerHandRoot.isHidden = true
+            updateCinemaWebPointers(controllerPointer)
+            updateDirectVideoInput(normalizedPoint: controllerPointer, pinch: controllerButtonDown)
+            return
+        }
         if directVideoActive {
             controllerHandRoot.isHidden = true
             let screen = CGPoint(x: controllerPointer.x * view.bounds.width, y: controllerPointer.y * view.bounds.height)
@@ -2536,10 +2812,10 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         input.update(normalizedPoint: CGPoint(x: x, y: y), pinch: controllerButtonDown, webView: browser)
     }
 
-    private func updateDirectVideoInput(normalizedPoint: CGPoint, pinch: Bool) {
+    private func updateDirectVideoInput(normalizedPoint: CGPoint, pinch: Bool, allowBegin: Bool = true) {
         // Both eyes must accept the same play/consent controls.
-        directLeftInput.update(normalizedPoint: normalizedPoint, pinch: pinch, webView: directVideoLeft)
-        directRightInput.update(normalizedPoint: normalizedPoint, pinch: pinch, webView: directVideoRight)
+        directLeftInput.update(normalizedPoint: normalizedPoint, pinch: pinch, webView: directVideoLeft, allowBegin:allowBegin)
+        directRightInput.update(normalizedPoint: normalizedPoint, pinch: pinch, webView: directVideoRight, allowBegin:allowBegin)
     }
 
     private func handleDirectVideoHands(left: HandSample?, right: HandSample?) {
@@ -2553,7 +2829,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
             frame.displayTransform(for: currentInterfaceOrientation(), viewportSize: view.bounds.size)
         )
         let screenPoint = CGPoint(x: oriented.x * view.bounds.width, y: oriented.y * view.bounds.height)
-        if handleDirectVideoExit(at: screenPoint, pinch: sample.clickPinch) { return }
+        if handleDirectVideoExit(at: screenPoint, pinch: sample.clickPinch, allowBegin:sample.clickBegan) { return }
         guard let (_, local) = directVideoTarget(for: screenPoint) else {
             directVideoPointer.isHidden = true
             if !sample.clickPinch {
@@ -2566,23 +2842,67 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         directVideoPointer.center = screenPoint
         directVideoPointer.backgroundColor = sample.clickPinch ? UIColor(red: 0.35, green: 0.85, blue: 1, alpha: 0.9) : .white
         lastBrowserInteractionTime = CACurrentMediaTime()
-        updateDirectVideoInput(normalizedPoint: local, pinch: sample.clickPinch)
+        updateDirectVideoInput(normalizedPoint: local, pinch: sample.clickPinch, allowBegin:sample.clickBegan)
         if sample.clickPinch { activateDirectVideoAudio() }
 
     }
 
-    private func handleHands(left: HandSample?, right: HandSample?) {
+    private func cancelHandInteraction() {
+        input.release(webView: browser)
+        directLeftInput.release(webView: directVideoLeft)
+        directRightInput.release(webView: directVideoRight)
+        cinemaHall.cancelInput()
+        securityGame.cancelInput()
+        toolbarClickGate.cancel()
+        directVideoClickGate.cancel()
+    }
+
+    private func handleHands(left rawLeft: HandSample?, right rawRight: HandSample?) {
         guard inVR else { return }
+        let now = CACurrentMediaTime()
+        let freshLeft = rawLeft.flatMap { now-$0.timestamp <= 0.2 && now >= $0.timestamp ? $0 : nil }
+        let freshRight = rawRight.flatMap { now-$0.timestamp <= 0.2 && now >= $0.timestamp ? $0 : nil }
+        lastHandDeliveryTime = max(freshLeft?.timestamp ?? -.infinity, freshRight?.timestamp ?? -.infinity)
+        if freshLeft != nil || freshRight != nil { lastHandSeenTime = now }
+        if !directVideoActive { queueHandForegroundMask(left:freshLeft,right:freshRight) }
+        // Resizing consumes both pinches; neither may turn into a click afterward.
+        if !cinemaActive, !securityGameActive, !directVideoActive,
+           let left = freshLeft, let right = freshRight, left.clickPinch, right.clickPinch {
+            cancelHandInteraction()
+            handOwnership.suppressUntilOpen()
+            endDrag()
+            updateResize(left:left,right:right)
+            return
+        }
+        if isResizing {
+            endResize()
+            cancelHandInteraction()
+            handOwnership.suppressUntilOpen()
+        }
+        let decision = handOwnership.select(left:freshLeft?.routing,right:freshRight?.routing)
+        if decision.cancel { cancelHandInteraction() }
+        if decision.changedHand { endDrag() }
+        let selected = decision.hand == .left ? freshLeft : (decision.hand == .right ? freshRight : nil)
+        let routed = selected?.routed(down:decision.down,began:decision.began)
+        let left = decision.hand == .left ? routed : nil
+        let right = decision.hand == .right ? routed : nil
+        // Empty Vision updates must not cancel a controller's active press.
+        if routed == nil, controllerConnected, now-lastHandSeenTime > 0.45 {
+            updateControllerHand()
+            return
+        }
+        if cinemaWebScreenActive {
+            handleCinemaWebHands(left: left, right: right)
+            return
+        }
         if directVideoActive {
             handleDirectVideoHands(left: left, right: right)
             return
         }
-        queueHandForegroundMask(left: left, right: right)
-
         if securityGameActive {
             if let sample = right ?? left,
                let ray = tracking.worldRay(visionPoint: sample.indexTip) {
-                securityGame.update(ray: ray, pinch: sample.clickPinch)
+                securityGame.update(ray: ray, pinch: sample.clickPinch, allowBegin:sample.clickBegan)
             } else {
                 securityGame.update(ray: nil, pinch: false)
             }
@@ -2597,7 +2917,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
             // проваливаемся дальше — экран (браузер) продолжает принимать ввод.
             if let sample = right ?? left,
                let ray = tracking.worldRay(visionPoint: sample.indexTip) {
-                let consumed = cinemaHall.update(ray: ray, pinch: sample.clickPinch)
+                let consumed = cinemaHall.update(ray: ray, pinch: sample.clickPinch, allowBegin:sample.clickBegan)
                 lastHandSeenTime = CACurrentMediaTime()
                 controllerHandRoot.isHidden = true
                 if consumed {
@@ -2616,21 +2936,6 @@ final class MainViewController: UIViewController, MTKViewDelegate {
             controllerHandRoot.isHidden = true
         }
 
-        // Две руки: средний+большой палец = режим изменения размера.
-        // Расходятся указательные — окно увеличивается, сходятся — уменьшается.
-        if let left, let right, left.clickPinch && right.clickPinch {
-            updateResize(left: left, right: right)
-            endDrag()
-            releasePointer()
-            hidePointer()
-            wasClickPinching = true
-            return
-        }
-
-        if isResizing {
-            endResize()
-        }
-
         guard
             let sample = right ?? left,
             let ray = tracking.worldRay(visionPoint: sample.indexTip)
@@ -2638,7 +2943,6 @@ final class MainViewController: UIViewController, MTKViewDelegate {
             endDrag()
             releasePointer()
             hidePointer()
-            wasClickPinching = false
             if controllerConnected && CACurrentMediaTime() - lastHandSeenTime > 0.45 {
                 updateControllerHand()
             } else {
@@ -2647,32 +2951,32 @@ final class MainViewController: UIViewController, MTKViewDelegate {
             return
         }
 
-        // Захват: указательный + большой, рука в нижней трети кадра.
-        let inDragZone = sample.indexTip.y < dragZoneHeight
-        if sample.grabPinch && (isDragging || inDragZone) {
+        // A fist grabs the panel under its ray; it never shares the click pinch.
+        let grabHit = browserWorldTransform.flatMap { planeHit(ray:ray,transform:$0) }
+        let inDragZone = grabHit.map { abs($0.localX) <= browserWorldWidth*0.5 && abs($0.localY) <= browserWorldHeight*0.5+0.06 } ?? false
+        if sample.isFist && (isDragging || inDragZone) {
             updateDrag(with: ray)
             releasePointer()
             highlightToolbar(nil)
             pointerNode.isHidden = true
-            wasClickPinching = false
             return
         }
         endDrag()
 
         guard let transform = browserWorldTransform else {
+            toolbarClickGate.cancel()
             showRay(from: ray, hit: nil)
             hidePointerDot()
             releasePointer()
-            wasClickPinching = sample.clickPinch
             return
         }
 
         guard let hit = planeHit(ray: ray, transform: transform) else {
+            toolbarClickGate.cancel()
             showRay(from: ray, hit: nil)
             hidePointerDot()
             releasePointer()
             highlightToolbar(nil)
-            wasClickPinching = sample.clickPinch
             return
         }
 
@@ -2685,20 +2989,19 @@ final class MainViewController: UIViewController, MTKViewDelegate {
             let index = linkItems.firstIndex { hit.localX >= $0.minX && hit.localX <= $0.maxX }
             highlightToolbar(index)
             releasePointer()
-            if let index, sample.clickPinch, !wasClickPinching {
-                perform(item: linkItems[index])
-                UIImpactFeedbackGenerator(style: .rigid).impactOccurred()
+            if let index = toolbarClickGate.update(target:index,down:sample.clickPinch,allowBegin:sample.clickBegan) {
+                perform(item:linkItems[index])
+                UIImpactFeedbackGenerator(style:.rigid).impactOccurred()
             }
-            wasClickPinching = sample.clickPinch
             return
         }
         highlightToolbar(nil)
+        toolbarClickGate.cancel()
 
         let normalizedX = hit.localX / browserWorldWidth + 0.5
         let normalizedY = 0.5 - hit.localY / browserWorldHeight
         guard normalizedX >= 0, normalizedX <= 1, normalizedY >= 0, normalizedY <= 1 else {
             releasePointer()
-            wasClickPinching = sample.clickPinch
             return
         }
 
@@ -2706,9 +3009,8 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         input.update(
             normalizedPoint: CGPoint(x: CGFloat(normalizedX), y: CGFloat(normalizedY)),
             pinch: sample.clickPinch,
-            webView: browser
+            webView: browser, allowBegin: sample.clickBegan
         )
-        wasClickPinching = sample.clickPinch
     }
 
     private func updateResize(left: HandSample, right: HandSample) {
@@ -3217,6 +3519,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
 
         let drawableSize = view.drawableSize
         guard drawableSize.width > 1, drawableSize.height > 1 else { return }
+        if cinemaWebScreenActive { updateCinemaWebScreen() }
 
         ensureEyeTextures(for: drawableSize)
         guard let eyeTexture, let eyeDepthTexture else { return }
@@ -3925,8 +4228,8 @@ addEventListener('resize',()=>{if(current==='fruit')[fruitW,fruitH]=fitCanvas(fc
 /// Виртуальная рука поверх настоящей: рисуем ладонь плюс батарею пальцев
 /// с сужением к кончикам, используя те же суставы, что и трекер.
 final class DirectVideoLensMaskView: UIView {
-    var leftCircle: CGRect = .zero { didSet { setNeedsDisplay() } }
-    var rightCircle: CGRect = .zero { didSet { setNeedsDisplay() } }
+    var leftCircle: CGRect = .zero { didSet { if oldValue != leftCircle { setNeedsDisplay() } } }
+    var rightCircle: CGRect = .zero { didSet { if oldValue != rightCircle { setNeedsDisplay() } } }
 
     override func draw(_ rect: CGRect) {
         guard let context = UIGraphicsGetCurrentContext() else { return }
@@ -3995,7 +4298,7 @@ extension MainViewController: WKNavigationDelegate, WKUIDelegate {
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         if directVideoActive, webView === directVideoLeft || webView === directVideoRight {
-            webView.evaluateJavaScript("window.__handarTuneDirectVideo ? window.__handarTuneDirectVideo() : null;", completionHandler: nil)
+            webView.evaluateJavaScript("window.__handarCinemaSurface = \(cinemaWebScreenActive ? "true" : "false"); window.__handarTuneDirectVideo ? window.__handarTuneDirectVideo() : null;", completionHandler: nil)
             if webView === directVideoLeft {
                 setDirectVideoNotice("Если видео не началось, нажми ▶ на странице")
                 activateDirectVideoAudio()
@@ -4158,198 +4461,155 @@ final class HandTracker {
     private let request: VNDetectHumanHandPoseRequest = {
         let request = VNDetectHumanHandPoseRequest()
         request.maximumHandCount = 2
-        if let latest = VNDetectHumanHandPoseRequest.supportedRevisions.max() {
-            request.revision = latest
-        }
+        if let latest = VNDetectHumanHandPoseRequest.supportedRevisions.max() { request.revision = latest }
         return request
     }()
-
     private let queue = DispatchQueue(label: "handar.vision", qos: .userInitiated)
     private let gate = DispatchSemaphore(value: 1)
     private var lastProcessedTime: CFTimeInterval = -.infinity
 
-    /// Сглаженные позиции и состояния щипков по каждой руке.
     private struct HandState {
-        var index: CGPoint?
-        var middle: CGPoint?
-        var thumb: CGPoint?
         var joints: [VNHumanHandPoseObservation.JointName: CGPoint] = [:]
-        /// Сколько кадров подряд сустав не распознаётся — пока лимит не вышел,
-        /// виртуальный сустав держит последнюю стабильную позицию.
         var jointAges: [VNHumanHandPoseObservation.JointName: Int] = [:]
-        var isFist = false
-        var clickPinch = false
-        var grabPinch = false
+        var pinch = StablePinchGesture()
+        var fist = StableFistGesture()
+        var previousWrist: SIMD2<Double>?
+        var previousPalm: Double?
 
         mutating func reset() {
-            index = nil
-            middle = nil
-            thumb = nil
             joints.removeAll(keepingCapacity: true)
             jointAges.removeAll(keepingCapacity: true)
-            isFist = false
-            clickPinch = false
-            grabPinch = false
+            pinch.cancel() // Keep the generation monotonic across loss/reacquisition.
+            fist.reset()
+            previousWrist = nil
+            previousPalm = nil
+        }
+    }
+    private var leftState = HandState()
+    private var rightState = HandState()
+    var onUpdate: ((HandSample?, HandSample?) -> Void)?
+
+    func reset() {
+        queue.async { [weak self] in
+            self?.leftState.reset()
+            self?.rightState.reset()
         }
     }
 
-    private var leftState = HandState()
-    private var rightState = HandState()
-
-    var onUpdate: ((HandSample?, HandSample?) -> Void)?
-
-    func process(
-        pixelBuffer: CVPixelBuffer,
-        orientation: CGImagePropertyOrientation
-    ) {
+    func process(pixelBuffer: CVPixelBuffer, orientation: CGImagePropertyOrientation) {
         guard gate.wait(timeout: .now()) == .success else { return }
         let now = CACurrentMediaTime()
         let budget = VRPerformanceBudget(thermalLevel: ProcessInfo.processInfo.thermalState.rawValue)
-        guard now - lastProcessedTime >= budget.handFrameInterval else {
-            gate.signal()
-            return
-        }
+        guard now-lastProcessedTime+0.001 >= budget.handFrameInterval else { gate.signal(); return }
         lastProcessedTime = now
-
         queue.async { [weak self] in
             guard let self else { return }
             defer { self.gate.signal() }
-
-            let handler = VNImageRequestHandler(
-                cvPixelBuffer: pixelBuffer,
-                orientation: orientation,
-                options: [:]
-            )
-
+            let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: orientation, options: [:])
             do {
                 try handler.perform([self.request])
-
-                var left: HandSample?
-                var right: HandSample?
-                var foundLeft = false
-                var foundRight = false
-
+                // Never turn unknown chirality into "right", or update one hand twice.
+                var candidates: [TrackedHand: (VNHumanHandPoseObservation, Float)] = [:]
                 for observation in self.request.results ?? [] {
-                    guard
-                        let allPoints = try? observation.recognizedPoints(.all),
-                        let index = allPoints[.indexTip],
-                        let thumb = allPoints[.thumbTip],
-                        let wrist = allPoints[.wrist],
-                        index.confidence > 0.45,
-                        thumb.confidence > 0.45,
-                        wrist.confidence > 0.35
-                    else {
-                        continue
+                    let side: TrackedHand
+                    switch observation.chirality {
+                    case .left: side = .left
+                    case .right: side = .right
+                    default: continue
                     }
-
-                    let isLeft = observation.chirality == .left
-                    var state = isLeft ? self.leftState : self.rightState
-
-                    var filteredJoints: [VNHumanHandPoseObservation.JointName: CGPoint] = [:]
-                    filteredJoints.reserveCapacity(allPoints.count)
-                    for (jointName, point) in allPoints where point.confidence > 0.32 {
-                        filteredJoints[jointName] = smooth(
-                            state.joints[jointName],
-                            point.location,
-                            alpha: adaptiveAlpha(previous: state.joints[jointName], current: point.location)
-                        )
-                        state.jointAges[jointName] = 0
-                    }
-
-                    // Пропавшие суставы (палец за пальцем, в тени) не телепортируют
-                    // виртуальную руку — держим последнюю стабильную позицию
-                    // до лимита кадров, иначе скрываем узел.
-                    for (jointName, old) in state.joints {
-                        guard filteredJoints[jointName] == nil else { continue }
-                        let age = (state.jointAges[jointName] ?? 0) + 1
-                        state.jointAges[jointName] = age
-                        if age <= 18 {
-                            filteredJoints[jointName] = old
-                        }
-                    }
-
-                    // Кулак: считаем согнутые пальцы по углу в PIP.
-                    let fingerTriplets: [(VNHumanHandPoseObservation.JointName, VNHumanHandPoseObservation.JointName, VNHumanHandPoseObservation.JointName)] = [
-                        (.indexMCP, .indexPIP, .indexDIP),
-                        (.middleMCP, .middlePIP, .middleDIP),
-                        (.ringMCP, .ringPIP, .ringDIP),
-                        (.littleMCP, .littlePIP, .littleDIP)
-                    ]
-                    var curled = 0
-                    var known = 0
-                    for (mcp, pip, dip) in fingerTriplets {
-                        if let isCurled = fingerCurled(
-                            mcp: filteredJoints[mcp],
-                            pip: filteredJoints[pip],
-                            dip: filteredJoints[dip]
-                        ) {
-                            known += 1
-                            if isCurled { curled += 1 }
-                        }
-                    }
-                    if known >= 2 {
-                        if curled >= 3 {
-                            state.isFist = true
-                        } else if curled <= 1 {
-                            state.isFist = false
-                        }
-                    }
-
-                    let filteredIndex = filteredJoints[.indexTip] ?? index.location
-                    let filteredMiddle = filteredJoints[.middleTip]
-                    let filteredThumb = filteredJoints[.thumbTip] ?? thumb.location
-                    let filteredWrist = filteredJoints[.wrist] ?? wrist.location
-                    let indexBase = filteredJoints[.indexMCP]
-                    let middleBase = filteredJoints[.middleMCP]
-
-                    // Нормируем на ладонь, но не требуем идеального распознавания
-                    // среднего пальца каждый кадр. Так курсор остаётся стабильным,
-                    // а средний+большой используется только как команда клика.
-                    let palmReference = indexBase ?? middleBase ?? filteredWrist
-                    let palmSize = max(distance(filteredWrist, palmReference), 0.035)
-                    let clickRatio = filteredMiddle.map { distance($0, filteredThumb) / palmSize }
-                    let grabRatio = distance(filteredIndex, filteredThumb) / palmSize
-
-                    state.index = filteredIndex
-                    state.middle = filteredMiddle
-                    state.thumb = filteredThumb
-                    state.joints = filteredJoints
-                    state.clickPinch = clickRatio.map {
-                        pinchHysteresis(previous: state.clickPinch, ratio: $0, close: 0.52, open: 0.70)
-                    } ?? false
-                    state.grabPinch = pinchHysteresis(previous: state.grabPinch, ratio: grabRatio, close: 0.46, open: 0.64)
-
-                    let sample = HandSample(
-                        indexTip: filteredIndex,
-                        middleTip: filteredMiddle ?? filteredIndex,
-                        thumbTip: filteredThumb,
-                        joints: filteredJoints,
-                        clickPinch: state.clickPinch,
-                        grabPinch: state.grabPinch,
-                        isFist: state.isFist
-                    )
-
-                    if isLeft {
-                        self.leftState = state
-                        foundLeft = true
-                        left = sample
-                    } else {
-                        self.rightState = state
-                        foundRight = true
-                        right = sample
-                    }
+                    guard let points = try? observation.recognizedPoints(.all) else { continue }
+                    let score = min(points[.wrist]?.confidence ?? 0, points[.middleMCP]?.confidence ?? 0)
+                    if score > (candidates[side]?.1 ?? -1) { candidates[side] = (observation,score) }
                 }
-
-                if !foundLeft { self.leftState.reset() }
-                if !foundRight { self.rightState.reset() }
-
-                self.onUpdate?(left, right)
+                var width = Double(CVPixelBufferGetWidth(pixelBuffer))
+                var height = Double(CVPixelBufferGetHeight(pixelBuffer))
+                switch orientation {
+                case .left, .right, .leftMirrored, .rightMirrored: swap(&width,&height)
+                default: break
+                }
+                let size = SIMD2<Double>(width,height)
+                let left = candidates[.left].flatMap { self.sample($0.0, side: .left, state: &self.leftState, size: size, at: now) }
+                let right = candidates[.right].flatMap { self.sample($0.0, side: .right, state: &self.rightState, size: size, at: now) }
+                if left == nil { self.leftState.reset() }
+                if right == nil { self.rightState.reset() }
+                self.onUpdate?(left,right)
             } catch {
                 self.leftState.reset()
                 self.rightState.reset()
-                self.onUpdate?(nil, nil)
+                self.onUpdate?(nil,nil)
             }
         }
+    }
+
+    private func sample(_ observation: VNHumanHandPoseObservation, side: TrackedHand,
+                        state: inout HandState, size: SIMD2<Double>, at time: Double) -> HandSample? {
+        guard let points = try? observation.recognizedPoints(.all) else { return nil }
+        func fresh(_ joint: VNHumanHandPoseObservation.JointName, confidence: Float = 0.55) -> CGPoint? {
+            guard let point = points[joint], point.confidence >= confidence else { return nil }
+            return point.location
+        }
+        func pixel(_ point: CGPoint) -> SIMD2<Double> {
+            SIMD2(Double(point.x)*size.x,Double(point.y)*size.y)
+        }
+        guard let wrist = fresh(.wrist), let middleBase = fresh(.middleMCP) else { return nil }
+        let indexBase = fresh(.indexMCP)
+        let index = fresh(.indexTip,confidence:0.65)
+        let thumb = fresh(.thumbTip,confidence:0.65)
+        let middle = fresh(.middleTip)
+        var filtered: [VNHumanHandPoseObservation.JointName: CGPoint] = [:]
+        for (joint,point) in points where point.confidence >= 0.40 {
+            filtered[joint] = smooth(state.joints[joint],point.location,
+                                     alpha:adaptiveAlpha(previous:state.joints[joint],current:point.location))
+            state.jointAges[joint] = 0
+        }
+        // Short visual grace only. Cached joints NEVER make gesture decisions.
+        for (joint,point) in state.joints where filtered[joint] == nil {
+            let age = (state.jointAges[joint] ?? 0)+1
+            state.jointAges[joint] = age
+            if age <= 3 { filtered[joint] = point }
+        }
+        func curlPoint(_ joint: VNHumanHandPoseObservation.JointName) -> CGPoint? {
+            fresh(joint).map { CGPoint(x:Double($0.x)*size.x,y:Double($0.y)*size.y) }
+        }
+        let triplets: [(VNHumanHandPoseObservation.JointName,VNHumanHandPoseObservation.JointName,VNHumanHandPoseObservation.JointName)] = [
+            (.indexMCP,.indexPIP,.indexDIP),(.middleMCP,.middlePIP,.middleDIP),
+            (.ringMCP,.ringPIP,.ringDIP),(.littleMCP,.littlePIP,.littleDIP)
+        ]
+        var curled = 0, known = 0
+        for (mcp,pip,dip) in triplets {
+            if let closed = fingerCurled(mcp:curlPoint(mcp),pip:curlPoint(pip),dip:curlPoint(dip)) {
+                known += 1
+                if closed { curled += 1 }
+            }
+        }
+        // A pinch with the other three fingers curled is not a fist: the index
+        // itself must be observably curled before panel grabbing is possible.
+        let indexCurl = fingerCurled(mcp:curlPoint(.indexMCP),pip:curlPoint(.indexPIP),dip:curlPoint(.indexDIP))
+        let fist = state.fist.update(curled:indexCurl == true ? curled : 0,
+                                    known:indexCurl == nil ? 0 : known,at:time)
+        var measurement: HandPinchMeasurement?
+        if let index, let thumb, let indexBase {
+            measurement = HandPinchGeometry.measure(thumb:pixel(thumb),index:pixel(index),wrist:pixel(wrist),
+                indexBase:pixel(indexBase),middleBase:pixel(middleBase),littleBase:fresh(.littleMCP).map(pixel))
+        }
+        var discontinuity = false
+        if let palm = measurement?.palmSpan, let previousPalm = state.previousPalm,
+           let previousWrist = state.previousWrist {
+            let scale = palm / previousPalm
+            discontinuity = scale < 0.55 || scale > 1.8 || HandPinchGeometry.distance(pixel(wrist),previousWrist) > palm*0.9
+        }
+        state.pinch.update(ratio:measurement?.ratio,confident:measurement != nil && !discontinuity && indexCurl != nil,
+                           grabbing:fist || (indexCurl == true && known >= 3 && curled >= 2),at:time)
+        state.previousWrist = pixel(wrist)
+        state.previousPalm = measurement?.palmSpan
+        state.joints = filtered
+        // A fist may occlude fingertips. Aim it using a fresh palm joint.
+        let pointer = index.map { filtered[.indexTip] ?? $0 } ?? (filtered[.middleMCP] ?? middleBase)
+        return HandSample(hand:side,timestamp:time,generation:state.pinch.generation,
+            indexTip:pointer,middleTip:middle.map {filtered[.middleTip] ?? $0} ?? pointer,
+            thumbTip:thumb.map {filtered[.thumbTip] ?? $0} ?? pointer,joints:filtered,
+            clickPinch:state.pinch.isDown,clickBegan:false,clickOpenConfirmed:state.pinch.isOpenConfirmed,
+            grabPinch:fist,isFist:fist)
     }
 }
 
@@ -4367,17 +4627,6 @@ private func adaptiveAlpha(previous: CGPoint?, current: CGPoint) -> CGFloat {
     guard let previous else { return 1.0 }
     let jump = min(distance(previous, current), 0.30)
     return min(0.62, max(0.30, 0.30 + jump * 1.15))
-}
-
-@inline(__always)
-private func pinchHysteresis(
-    previous: Bool,
-    ratio: CGFloat,
-    close: CGFloat = 0.52,
-    open: CGFloat = 0.70
-) -> Bool {
-    if previous { return ratio < open }
-    return ratio < close
 }
 
 @inline(__always)
@@ -4411,63 +4660,51 @@ final class WebInputBridge {
     private var lastHoverPoint: CGPoint?
     private weak var lastHoverWebView: WKWebView?
     private var lastHoverTime: CFTimeInterval = -.infinity
-    private var lastPoint: CGPoint?
+    private weak var pressedWebView: WKWebView?
     private var pointerDown = false
 
-    func update(normalizedPoint: CGPoint, pinch: Bool, webView: WKWebView) {
+    func update(normalizedPoint: CGPoint, pinch: Bool, webView: WKWebView, allowBegin: Bool = true) {
         let x = normalizedPoint.x * webView.bounds.width
         let y = normalizedPoint.y * webView.bounds.height
-        let current = CGPoint(x: x, y: y)
-        let previous = lastPoint ?? current
-        let deltaY = current.y - previous.y
-
+        guard x.isFinite, y.isFinite else { release(webView:webView); return }
+        if pointerDown, let previous = pressedWebView, previous !== webView { release(webView:previous) }
         if pinch && !pointerDown {
+            guard allowBegin else { return }
             pointerDown = true
-            dispatch("window.__handarPointerDown(\(x),\(y),1);", to: webView)
+            pressedWebView = webView
+            let slop = max(8,min(18,webView.bounds.width*0.012))
+            dispatch("window.__handarPointerDown(\(x),\(y),1,\(slop));",to:webView)
         } else if pinch && pointerDown {
-            if abs(deltaY) > 0.75 {
-                let amount = String(
-                    format: "%.2f",
-                    locale: Locale(identifier: "en_US_POSIX"),
-                    deltaY * 2.6
-                )
-                dispatch("window.scrollBy(0,\(amount));", to: webView)
-            }
-            dispatch("window.__handarPointerMove(\(x),\(y),1);", to: webView)
+            dispatch("window.__handarPointerMove(\(x),\(y),1);",to:webView)
         } else if !pinch && pointerDown {
             pointerDown = false
-            dispatch("window.__handarPointerUp(\(x),\(y),1);", to: webView)
+            pressedWebView = nil
+            dispatch("window.__handarPointerUp(\(x),\(y),1);",to:webView)
         } else {
             let now = CACurrentMediaTime()
-            let moved = lastHoverPoint.map { hypot(current.x - $0.x, current.y - $0.y) >= 2 } ?? true
-            if lastHoverWebView !== webView || (moved && now - lastHoverTime >= 1.0 / 30.0) || now - lastHoverTime >= 0.25 {
+            let moved = lastHoverPoint.map { hypot(x-$0.x,y-$0.y)>=2 } ?? true
+            if lastHoverWebView !== webView || (moved && now-lastHoverTime>=1.0/30) || now-lastHoverTime>=0.25 {
                 lastHoverTime = now
-                lastHoverPoint = current
+                lastHoverPoint = CGPoint(x:x,y:y)
                 lastHoverWebView = webView
-                dispatch("window.__handarHover(\(x),\(y));", to: webView)
+                dispatch("window.__handarHover(\(x),\(y));",to:webView)
             }
         }
-
-        lastPoint = current
     }
 
     func release(webView: WKWebView) {
         if lastHoverWebView === webView, lastHoverPoint != nil {
-            dispatch("window.__handarClearHover && window.__handarClearHover();", to: webView)
+            dispatch("window.__handarClearHover && window.__handarClearHover();",to:webView)
             lastHoverPoint = nil
             lastHoverWebView = nil
         }
-        guard pointerDown else {
-            lastPoint = nil
-            return
-        }
+        guard pointerDown, pressedWebView === webView else { return }
         pointerDown = false
-        dispatch("window.__handarPointerCancel && window.__handarPointerCancel(window.innerWidth/2,window.innerHeight/2,1);", to: webView)
-        lastPoint = nil
+        pressedWebView = nil
+        dispatch("window.__handarPointerCancel && window.__handarPointerCancel(0,0,1);",to:webView)
     }
-
     private func dispatch(_ script: String, to webView: WKWebView) {
-        webView.evaluateJavaScript(script, completionHandler: nil)
+        webView.evaluateJavaScript(script,completionHandler:nil)
     }
 }
 

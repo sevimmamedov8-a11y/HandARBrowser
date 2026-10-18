@@ -1,4 +1,4 @@
-HANDAR VISION V73
+HANDAR VISION V75
 
 1. Открой HandARBrowser.xcodeproj на macOS с Xcode и iOS SDK.
 2. Выбери iPhone, команду подписи и собери приложение.
@@ -17,3 +17,9 @@ HANDAR VISION V73
 Подтверждение действий и видео: V72_RELEASE_NOTES_RU.md.
 
 Прямой запуск YouTube: V73_RELEASE_NOTES_RU.md.
+
+Видео в 3D-зале: V74_RELEASE_NOTES_RU.md.
+
+V75: клик — большой + указательный; панель — кулаком.
+После потери руки разожми пальцы для повторного взведения.
+Проверки и ограничения: V75_RELEASE_NOTES_RU.md.

@@ -826,6 +826,7 @@ private final class SecurityGuest {
 
 final class SecurityVRGame {
     var onExitRequested: (() -> Void)?
+    var onInteraction: (() -> Void)?
 
     private(set) var isRunning = false
     private weak var scene: SCNScene?
@@ -879,6 +880,7 @@ final class SecurityVRGame {
     private let handDistance: Float = 0.45
 
     private var previousPinch = false
+    private var uiClickGate = ReleaseClickGate<ObjectIdentifier>()
     private var lastFrameTime = CACurrentMediaTime()
 
     private static let guestNames = [
@@ -891,6 +893,7 @@ final class SecurityVRGame {
 
     func start(in scene: SCNScene, cameraOrigin: SIMD3<Float>, cameraForward: SIMD3<Float>) {
         guard !isRunning else { return }
+        uiClickGate.cancel()
         isRunning = true
         self.scene = scene
 
@@ -939,6 +942,7 @@ final class SecurityVRGame {
     }
 
     func stop() {
+        uiClickGate.cancel()
         guard isRunning else { return }
         isRunning = false
         guest?.removeFromWorld()
@@ -1488,8 +1492,15 @@ final class SecurityVRGame {
 
     // MARK: Ввод
 
-    func update(ray: WorldRay?, pinch: Bool) {
+    func cancelInput() {
+        uiClickGate.cancel()
+        previousPinch = false
+        if isRunning { releaseHold() }
+    }
+
+    func update(ray: WorldRay?, pinch requestedPinch: Bool, allowBegin: Bool = true) {
         guard isRunning else { return }
+        let pinch = requestedPinch && (previousPinch || allowBegin)
         let now = CACurrentMediaTime()
         let dt = Float(min(max(now - lastFrameTime, 0), 0.1))
         lastFrameTime = now
@@ -1513,6 +1524,25 @@ final class SecurityVRGame {
                 break
             }
         }
+
+        let uiTarget = ray.flatMap { ray in allButtons.first { $0.hitTest(ray:ray) } }
+        if let committed = uiClickGate.update(target:uiTarget.map {ObjectIdentifier($0)},down:pinch,allowBegin:allowBegin),
+           let uiTarget, ObjectIdentifier(uiTarget) == committed {
+            if let tool = toolButtons.first(where: {$0.1 === uiTarget})?.0 {
+                selectedTool = tool
+                refreshToolHighlight()
+            } else if uiTarget === exitButton { onExitRequested?() }
+            else if uiTarget === rulesButton {
+                rulesVisible.toggle()
+                rulesBoard.isHidden = !rulesVisible
+            } else if guest?.phase == .atGate, uiTarget === acceptButton { decide(accept:true) }
+            else if guest?.phase == .atGate, uiTarget === rejectButton { decide(accept:false) }
+            else { return }
+            onInteraction?()
+            UIImpactFeedbackGenerator(style:.light).impactOccurred()
+            return
+        }
+        if uiTarget != nil { return }
 
         // Попадания в гостя (мировые координаты — как у луча трекинга).
         var hitChest = false
@@ -1582,26 +1612,6 @@ final class SecurityVRGame {
         guard pinchPressed else { return }
 
         if let ray {
-            // Кнопки инструментов
-            for (tool, button) in toolButtons where button.hitTest(ray: ray) {
-                selectedTool = tool
-                refreshToolHighlight()
-                UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                return
-            }
-            if exitButton.hitTest(ray: ray) {
-                UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                onExitRequested?()
-                return
-            }
-            if rulesButton.hitTest(ray: ray) {
-                rulesVisible.toggle()
-                rulesBoard.isHidden = !rulesVisible
-                toastLabel.setText(rulesVisible ? "Правила на экране. Ещё раз — скрыть." : "Правила скрыты")
-                UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                return
-            }
-
             // Кисть к его кисти + щипок — хват «рука к руке».
             if heldItem == nil, heldGuest == nil, let guest,
                guest.phase != .leaving, guest.phase != .held, guest.phase != .dropping {
@@ -1635,18 +1645,6 @@ final class SecurityVRGame {
             }
 
             if let guest, guest.phase == .atGate || guest.phase == .attacking {
-                if guest.phase == .atGate {
-                    if acceptButton.hitTest(ray: ray) {
-                        UIImpactFeedbackGenerator(style: .heavy).impactOccurred()
-                        decide(accept: true)
-                        return
-                    }
-                    if rejectButton.hitTest(ray: ray) {
-                        UIImpactFeedbackGenerator(style: .heavy).impactOccurred()
-                        decide(accept: false)
-                        return
-                    }
-                }
 
                 // Действия по гостю выбранным инструментом.
                 if hitChest || hitFace {

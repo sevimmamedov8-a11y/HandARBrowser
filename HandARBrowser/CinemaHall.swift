@@ -223,7 +223,7 @@ final class CinemaHall {
     private let panelTitle = CineText()
     private let panelHint = CineText()
 
-    private var previousPinch = false
+    private var buttonClickGate = ReleaseClickGate<ObjectIdentifier>()
 
     private var allButtons: [CineButton] {
         [lightButton, playButton, backButton, fwdButton,
@@ -234,6 +234,7 @@ final class CinemaHall {
 
     func start(in scene: SCNScene, cameraOrigin: SIMD3<Float>, cameraForward: SIMD3<Float>) {
         guard !isRunning else { return }
+        cancelInput()
         isRunning = true
         self.scene = scene
 
@@ -275,10 +276,10 @@ final class CinemaHall {
         localScreen.columns.3 = SIMD4<Float>(0, Self.seatedEyeHeight, -Self.screenDistance, 1)
         screenWorldTransform = simd_mul(root.simdTransform, localScreen)
 
-        previousPinch = false
     }
 
     func stop() {
+        cancelInput()
         guard isRunning else { return }
         isRunning = false
         root.removeFromParentNode()
@@ -744,60 +745,57 @@ final class CinemaHall {
         playButton.setTitle(playing ? "Пауза" : "Смотреть")
     }
 
-    @discardableResult
-    func update(ray: WorldRay?, pinch: Bool) -> Bool {
-        guard isRunning else { return false }
-        let pressed = pinch && !previousPinch
-        previousPinch = pinch
-
+    func cancelInput() {
+        buttonClickGate.cancel()
         for button in allButtons { button.setHighlight(false) }
-        if let ray {
-            for button in allButtons where button.hitTest(ray: ray) {
-                button.setHighlight(true)
-                break
-            }
-        }
+    }
 
-        guard pressed, let ray else { return false }
-        if allButtons.contains(where: { $0.hitTest(ray: ray) }) { onInteraction?() }
+    @discardableResult
+    func update(ray: WorldRay?, pinch: Bool, allowBegin: Bool = true) -> Bool {
+        guard isRunning else { return false }
+        let target = ray.flatMap { ray in allButtons.first { $0.hitTest(ray:ray) } }
+        for button in allButtons { button.setHighlight(button === target) }
+        guard buttonClickGate.update(target:target.map { ObjectIdentifier($0) },down:pinch,allowBegin:allowBegin) != nil,
+              let target else { return false }
+        onInteraction?()
 
-        if lightButton.hitTest(ray: ray) {
+        if target === lightButton {
             setLights(!lightsOn)
             onToggleLights?(lightsOn)
             UIImpactFeedbackGenerator(style: .light).impactOccurred()
             return true
         }
-        if playButton.hitTest(ray: ray) {
+        if target === playButton {
             onPlayPause?()
             UIImpactFeedbackGenerator(style: .medium).impactOccurred()
             return true
         }
-        if backButton.hitTest(ray: ray) {
+        if target === backButton {
             onSeek?(-10)
             UIImpactFeedbackGenerator(style: .light).impactOccurred()
             return true
         }
-        if fwdButton.hitTest(ray: ray) {
+        if target === fwdButton {
             onSeek?(10)
             UIImpactFeedbackGenerator(style: .light).impactOccurred()
             return true
         }
-        if volUpButton.hitTest(ray: ray) {
+        if target === volUpButton {
             onVolume?(0.15)
             UIImpactFeedbackGenerator(style: .light).impactOccurred()
             return true
         }
-        if volDownButton.hitTest(ray: ray) {
+        if target === volDownButton {
             onVolume?(-0.15)
             UIImpactFeedbackGenerator(style: .light).impactOccurred()
             return true
         }
-        if restartButton.hitTest(ray: ray) {
+        if target === restartButton {
             onRestart?()
             UIImpactFeedbackGenerator(style: .light).impactOccurred()
             return true
         }
-        if exitButton.hitTest(ray: ray) {
+        if target === exitButton {
             onExitRequested?()
             UIImpactFeedbackGenerator(style: .medium).impactOccurred()
             return true

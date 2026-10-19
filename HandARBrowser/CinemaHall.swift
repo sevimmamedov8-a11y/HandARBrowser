@@ -203,8 +203,6 @@ final class CinemaHall {
     static let screenWidth: Float = 4.55
     static let screenHeight: Float = 2.56
     static let screenDistance: Float = 4.0
-    /// Высота глаз сидящего зрителя.
-    static let seatedEyeHeight: Float = 1.18
     static let screenCenterHeight: Float = 1.85
 
     var onExitRequested: (() -> Void)?
@@ -258,17 +256,7 @@ final class CinemaHall {
         isRunning = true
         self.scene = scene
 
-        let flatForward=SIMD3<Float>(cameraForward.x,0,cameraForward.z)
-        let forward=simd_length(flatForward)>0.0001 ? simd_normalize(flatForward) : SIMD3<Float>(0,0,-1)
-        let right = simd_normalize(simd_cross(SIMD3<Float>(0, 1, 0), forward))
-
-        // Пол зала — на высоте сидящего зрения, ось -Z смотрит на экран.
-        root.simdPosition = simd_float3(
-            cameraOrigin.x + forward.x * 0.0 + right.x * 0.0,
-            cameraOrigin.y - Self.seatedEyeHeight,
-            cameraOrigin.z + forward.z * 0.0 + right.z * 0.0
-        )
-        root.simdOrientation = simd_quatf(from: SIMD3<Float>(0, 0, -1), to: forward)
+        alignViewer(origin:cameraOrigin,forward:cameraForward)
 
         root.childNodes.forEach { $0.removeFromParentNode() }
         ceilingStrips.removeAll()
@@ -292,11 +280,23 @@ final class CinemaHall {
 
         scene.rootNode.addChildNode(root)
 
-        // Экран впереди, нормаль смотрит на зрителя.
+        updateScreenTransform()
+    }
+
+    private func updateScreenTransform() {
         var localScreen = matrix_identity_float4x4
         localScreen.columns.3 = SIMD4<Float>(0, Self.screenCenterHeight, -Self.screenDistance, 1)
         screenWorldTransform = simd_mul(root.simdTransform, localScreen)
+    }
 
+    func alignViewer(origin: SIMD3<Float>, forward direction: SIMD3<Float>) {
+        let flat=SIMD3<Float>(direction.x,0,direction.z)
+        let length=simd_length(flat)
+        let forward=length.isFinite && length>0.0001 ? flat/length : SIMD3<Float>(0,0,-1)
+        // The screen center starts straight ahead at the actual camera height.
+        root.simdPosition=SIMD3(origin.x,origin.y-Self.screenCenterHeight,origin.z)
+        root.simdOrientation=simd_quatf(from:SIMD3<Float>(0,0,-1),to:forward)
+        updateScreenTransform()
     }
 
     func stop() {

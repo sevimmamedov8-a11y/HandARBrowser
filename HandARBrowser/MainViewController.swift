@@ -53,6 +53,18 @@ struct HandSample {
     let grabPinch: Bool
     let isFist: Bool
 
+    var openPalmCenter: CGPoint? {
+        guard !isFist, !clickPinch, let wrist=maskJoints[.wrist],
+              let base=maskJoints[.middleMCP] else { return nil }
+        let fingers: [(VNHumanHandPoseObservation.JointName,VNHumanHandPoseObservation.JointName)] = [
+            (.indexTip,.indexMCP),(.middleTip,.middleMCP),(.ringTip,.ringMCP),(.littleTip,.littleMCP)]
+        for (tip,mcp) in fingers {
+            guard let tip=maskJoints[tip],let mcp=maskJoints[mcp],
+                  distance(wrist,tip) > distance(wrist,mcp)*1.35 else { return nil }
+        }
+        return CGPoint(x:(wrist.x+base.x)*0.5,y:(wrist.y+base.y)*0.5)
+    }
+
     var routing: HandRoutingState {
         HandRoutingState(hand:hand,generation:generation,down:clickPinch,openConfirmed:clickOpenConfirmed)
     }
@@ -697,6 +709,8 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     private var profile = VRProfile.load()
     private var inVR = false
     private var securityGameActive = false
+    private var menuSwipe = OpenPalmSwipeGesture()
+    private var cinemaNeedsAlignment = false
     private let securityGame = SecurityVRGame()
     private var cinemaActive = false
     private let cinemaHall = CinemaHall()
@@ -1942,6 +1956,9 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         let cameraDelivery = LatestMainDelivery<CameraFrame> { [weak self] frame in
             guard let self, self.inVR, self.tracking.isCurrent(frame) else { return }
             self.headNode.simdTransform = self.tracking.headTransform(frame)
+            if self.cinemaActive, self.cinemaNeedsAlignment {
+                self.alignCinemaToCurrentPose()
+            }
             self.ensureBrowserAnchor(using: frame.camera.transform)
         }
         tracking.onCamera = { frame in cameraDelivery.submit(frame) }
@@ -2226,6 +2243,12 @@ final class MainViewController: UIViewController, MTKViewDelegate {
             activateMediaAudioSession()
         }
         cinemaActive = true
+        cinemaNeedsAlignment = true
+        if let frame=tracking.latestFrameCopy, tracking.isCurrent(frame),
+           CACurrentMediaTime()-frame.timestamp < 0.25 {
+            headNode.simdTransform=tracking.headTransform(frame)
+            cinemaNeedsAlignment = false
+        }
 
         stopBrowserCapture()
         hideDirectVideoStage()
@@ -2235,11 +2258,11 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         toolbarNode.isHidden = true
         browserHandleNode.isHidden = true
 
-        let forward = simd_normalize(SIMD3<Float>(
+        let forward = SIMD3<Float>(
             -headNode.simdWorldTransform.columns.2.x,
             0,
             -headNode.simdWorldTransform.columns.2.z
-        ))
+        )
 
         cinemaHall.onInteraction = { [weak self] in self?.playUIConfirmation() }
         cinemaHall.onExitRequested = { [weak self] in self?.exitCinema() }
@@ -2400,6 +2423,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     }
 
     private func exitCinema() {
+        cinemaNeedsAlignment = false
         stopCinemaProbe()
         cinemaPlayback.release()
         cinemaHall.stop()
@@ -2426,6 +2450,17 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         } else {
             toggleCinemaPlayPause()
         }
+    }
+
+    private func alignCinemaToCurrentPose() {
+        guard cinemaActive, cinemaHall.isRunning else { return }
+        cinemaNeedsAlignment = false
+        let transform=headNode.simdWorldTransform
+        cinemaHall.alignViewer(origin:headNode.simdWorldPosition,
+                               forward:SIMD3(-transform.columns.2.x,0,-transform.columns.2.z))
+        browserPlaneNode.simdWorldTransform=cinemaHall.screenWorldTransform
+        updateCinemaWebScreen()
+        cancelHandInteraction()
     }
 
     private func cinemaVolume(_ delta: Float) {
@@ -2656,6 +2691,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     }
 
     private func resetBrowserAnchor() {
+        if cinemaActive { alignCinemaToCurrentPose(); return }
         if let anchor = browserAnchor {
             tracking.remove(anchor: anchor)
         }
@@ -2854,6 +2890,21 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         lastHandDeliveryTime = max(freshLeft?.timestamp ?? -.infinity, freshRight?.timestamp ?? -.infinity)
         if freshLeft != nil || freshRight != nil { lastHandSeenTime = now }
         if lensCalibrationView == nil && !directVideoActive && !cinemaActive { queueHandForegroundMask(left:freshLeft,right:freshRight) }
+        if spatialHomeVisible, !cinemaActive, !securityGameActive, lensCalibrationView == nil,
+           !isDragging, !isResizing {
+            let sample = [freshRight,freshLeft].compactMap{$0}.first{$0.openPalmCenter != nil}
+            let point=sample?.openPalmCenter
+            let direction=menuSwipe.update(hand:sample?.hand,point:point.map{SIMD2(Double($0.x),Double($0.y))},at:now)
+            if let direction {
+                browser.evaluateJavaScript("window.__handarSwipePage && window.__handarSwipePage(\(direction));") { [weak self] changed,_ in
+                    if changed as? Bool == true { self?.playUIConfirmation() }
+                }
+            }
+            if menuSwipe.isMoving {
+                cancelHandInteraction(); endDrag(); hidePointer(); hidePointerDot()
+                return
+            }
+        } else { menuSwipe.reset() }
         // Resizing consumes both pinches; neither may turn into a click afterward.
         if lensCalibrationView == nil, !cinemaActive, !securityGameActive,
            let left = freshLeft, let right = freshRight, left.clickPinch, right.clickPinch {
@@ -3823,6 +3874,14 @@ function post(id){try{window.webkit.messageHandlers.handarApp.postMessage({id:id
 function system(action){try{window.webkit.messageHandlers.handarSystem.postMessage({action:action});}catch(e){}}
 function showView(id){document.querySelectorAll('.view').forEach(v=>v.hidden=v.id!==id);document.querySelectorAll('[data-view]').forEach(b=>{b.classList.toggle('active',b.dataset.view===id);b.setAttribute('aria-pressed',String(b.dataset.view===id))});closeControl();}
 function showPage(page){document.querySelectorAll('[data-page]').forEach(p=>p.hidden=Number(p.dataset.page)!==page);document.querySelectorAll('[data-show-page]').forEach(b=>{b.classList.toggle('active',Number(b.dataset.showPage)===page);b.setAttribute('aria-pressed',String(Number(b.dataset.showPage)===page))});}
+window.__handarSwipePage=function(direction){
+  const apps=document.getElementById('apps'),controls=document.getElementById('control-center');
+  if(!apps||apps.hidden||(controls&&!controls.hidden)||document.hidden)return false;
+  const pages=Array.from(apps.querySelectorAll('[data-page]')),current=pages.findIndex(p=>!p.hidden);
+  const next=Math.max(0,Math.min(pages.length-1,current+(direction<0?1:-1)));
+  if(next===current||current<0)return false;
+  showPage(Number(pages[next].dataset.page));return true;
+};
 function closeControl(){document.getElementById('control-center').hidden=true;document.getElementById('control-toggle').setAttribute('aria-expanded','false');}
 document.getElementById('control-toggle').onclick=()=>{const p=document.getElementById('control-center');p.hidden=!p.hidden;document.getElementById('control-toggle').setAttribute('aria-expanded',String(!p.hidden));};
 document.getElementById('control-close').onclick=closeControl;
@@ -4554,6 +4613,7 @@ final class HandTracker {
         var jointAges: [VNHumanHandPoseObservation.JointName: Int] = [:]
         var pinch = StablePinchGesture()
         var fist = StableFistGesture()
+        var occludedFist = OccludedFistGesture()
         var aim = PinchAimStabilizer()
         var previousWrist: SIMD2<Double>?
         var previousPalm: Double?
@@ -4563,6 +4623,7 @@ final class HandTracker {
             jointAges.removeAll(keepingCapacity: true)
             pinch.cancel() // Keep the generation monotonic across loss/reacquisition.
             fist.reset()
+            occludedFist.reset()
             aim.reset()
             previousWrist = nil
             previousPalm = nil
@@ -4676,10 +4737,18 @@ final class HandTracker {
         let foldedIndex = index.flatMap { tip in indexBase.map { base in
             HandPinchGeometry.distance(pixel(wrist),pixel(tip)) < HandPinchGeometry.distance(pixel(wrist),pixel(base))*0.85
         } } ?? false
-        let allowsFist = HandGestureIntent.allowsFist(indexCurled:indexCurl,curled:curled,known:known,
+        let visibleTips = [VNHumanHandPoseObservation.JointName.indexTip,.middleTip,.ringTip,.littleTip]
+            .filter { fresh($0) != nil }.count
+        let palmSafe = fresh(.wrist,confidence:0.7) != nil && fresh(.middleMCP,confidence:0.7) != nil
+            && (fresh(.indexMCP,confidence:0.7) != nil || fresh(.littleMCP,confidence:0.7) != nil)
+            && [wrist,middleBase].allSatisfy { $0.x > 0.05 && $0.x < 0.95 && $0.y > 0.05 && $0.y < 0.95 }
+        let hiddenFist = state.occludedFist.update(visibleTips:visibleTips,
+            palmReliable:palmSafe,pinchEngaged:state.pinch.isEngaged,
+            hiddenAllowed:index == nil && known < 3,at:time)
+        let allowsFist = hiddenFist || HandGestureIntent.allowsFist(indexCurled:indexCurl,curled:curled,known:known,
             pinchRatio:measurement?.ratio,pinchEngaged:state.pinch.isEngaged,indexFoldedIntoPalm:foldedIndex)
-        let fist = state.fist.update(curled:allowsFist ? curled : 0,
-                                    known:indexCurl == nil ? 0 : known,at:time)
+        let fist = state.fist.update(curled:hiddenFist ? 4 : (allowsFist ? curled : 0),
+                                    known:hiddenFist ? 4 : (indexCurl == nil ? 0 : known),at:time)
         var discontinuity = false
         if let palm = measurement?.palmSpan, let previousPalm = state.previousPalm,
            let previousWrist = state.previousWrist {

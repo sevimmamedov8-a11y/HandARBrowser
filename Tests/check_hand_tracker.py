@@ -92,7 +92,42 @@ extension HandTracker {
   output = sample(observation,side:.right,state:&state,size:SIMD2(1000,750),at:time)
   precondition(output?.clickPinch == false,"missing thumb cannot maintain a pinch from cached joints")
   precondition(output?.maskJoints[.indexTip] != nil,"dwell still has a fresh index when the thumb disappears")
-  print("PASS: 17 actual HandTracker sample integration checks")
+  // A complete same-hand skeleton may transition to hidden fingertips.
+  state.reset()
+  frames(6,index:CGPoint(x:0.43,y:0.85),thumb:CGPoint(x:0.28,y:0.56))
+  let visibleSkeleton = observation.points
+  for joint in [Joint.indexTip,.middleTip,.ringTip,.littleTip,.indexPIP,.indexDIP,
+                .middlePIP,.middleDIP,.ringPIP,.ringDIP,.littlePIP,.littleDIP] {
+   observation.points.removeValue(forKey:joint)
+  }
+  for frame in 0..<12 {
+   time += 1.0/30
+   output=sample(observation,side:.right,state:&state,size:SIMD2(1000,750),at:time)
+   if frame < 3 { precondition(output?.isFist == false,"one missing frame must not grab") }
+  }
+  precondition(output?.isFist == true && output?.clickPinch == false,"hidden fingers with fresh visible palm grab without clicking")
+  precondition(output?.maskJoints[.indexTip] == nil,"hidden fingers are never fabricated in foreground mask")
+  observation.points[.wrist]?.confidence = 0.1
+  time += 1.0/30
+  precondition(sample(observation,side:.right,state:&state,size:SIMD2(1000,750),at:time) == nil,"losing the whole hand is not a fist")
+  state.reset()
+  observation.points[.wrist]?.confidence = 0.95
+  for _ in 0..<12 {
+   time += 1.0/30
+   output=sample(observation,side:.right,state:&state,size:SIMD2(1000,750),at:time)
+  }
+  precondition(output?.isFist == false,"unknown partial hand cannot start an occlusion grab")
+  observation.points=visibleSkeleton
+  frames(5,index:CGPoint(x:0.43,y:0.85),thumb:CGPoint(x:0.28,y:0.56))
+  precondition(output?.isFist == false,"visible extended fingers release the fist")
+  set(.middleTip,0.5,0.94);set(.ringTip,0.57,0.90);set(.littleTip,0.63,0.82)
+  frames(5,index:CGPoint(x:0.43,y:0.85),thumb:CGPoint(x:0.28,y:0.56))
+  precondition(output?.openPalmCenter != nil,"fresh extended fingers enable menu swipes")
+  observation.points[.middleTip]?.confidence=0.1
+  time += 1.0/30
+  output=sample(observation,side:.right,state:&state,size:SIMD2(1000,750),at:time)
+  precondition(output?.openPalmCenter == nil,"cached or uncertain tips cannot swipe")
+  print("PASS: actual HandTracker pinch, hidden-finger fist, palm loss and reacquisition integration checks")
  }
 }
 @main struct TrackerTests { static func main() { HandTracker().exercise() } }

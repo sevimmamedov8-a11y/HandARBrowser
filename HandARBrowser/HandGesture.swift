@@ -113,6 +113,81 @@ struct StablePinchGesture {
     }
 }
 
+// Missing fingers count only after this same hand showed a complete skeleton.
+// Losing the palm, approaching an image edge or a sample gap cancels evidence.
+struct OccludedFistGesture {
+    private var observedAt: Double?
+    private var hiddenSince: Double?
+    private var last: Double?
+    private(set) var isClosed = false
+    mutating func reset() { self = Self() }
+    mutating func update(visibleTips: Int, palmReliable: Bool, pinchEngaged: Bool, hiddenAllowed: Bool = true, at time: Double) -> Bool {
+        guard time.isFinite, palmReliable else { reset(); return false }
+        if let last, time < last || time-last > 0.2 { reset() }
+        last = time
+        if visibleTips >= 4 {
+            observedAt = time; hiddenSince = nil; isClosed = false
+            return false
+        }
+        guard visibleTips <= 1, hiddenAllowed, !pinchEngaged,
+              isClosed || observedAt.map({ time-$0 <= 1.2 }) == true else {
+            hiddenSince = nil; isClosed = false; return false
+        }
+        if hiddenSince == nil { hiddenSince = time }
+        isClosed = time-(hiddenSince ?? time)+0.000001 >= 0.16
+        return isClosed
+    }
+}
+
+struct OpenPalmSwipeGesture {
+    private var hand: TrackedHand?
+    private var origin: SIMD2<Double>?
+    private var began = 0.0
+    private var last: Double?
+    private var fired = false
+    private var cooldownUntil = 0.0
+    private var previousPoint: SIMD2<Double>?
+    private var stationarySince: Double?
+    private(set) var isMoving = false
+    mutating func reset() { self = Self() }
+    // Returns -1 for a leftward sweep, +1 for rightward. One event per sweep.
+    mutating func update(hand next: TrackedHand?, point: SIMD2<Double>?, at time: Double) -> Int? {
+        guard time.isFinite else { reset(); return nil }
+        guard let next, let point, point.x.isFinite, point.y.isFinite else {
+            hand = nil; origin = nil; last = nil; fired = false; isMoving = false
+            previousPoint = nil; stationarySince = nil; return nil
+        }
+        if hand != next || last.map({time < $0 || time-$0 > 0.2}) == true {
+            origin = nil; fired = false; isMoving = false; previousPoint = nil; stationarySince = nil
+        }
+        defer { previousPoint = point }
+        hand = next; last = time
+        guard let origin else { self.origin = point; began = time; return nil }
+        if fired, time >= cooldownUntil {
+            if let previousPoint, abs(point.x-previousPoint.x)<0.008, abs(point.y-previousPoint.y)<0.008 {
+                if stationarySince == nil { stationarySince = time }
+                if time-(stationarySince ?? time) >= 0.15 {
+                    self.origin = point; began = time; fired = false; isMoving = false; stationarySince = nil
+                }
+            } else { stationarySince = nil }
+            return nil
+        }
+        if !fired, !isMoving, let previousPoint,
+           abs(point.x-previousPoint.x)<0.008, abs(point.y-previousPoint.y)<0.008 {
+            self.origin = point; began = time; return nil
+        }
+        let delta = point-origin, elapsed = time-began
+        isMoving = fired || (abs(delta.x) > 0.025 && abs(delta.x) > abs(delta.y)*1.6)
+        guard !fired, time >= cooldownUntil else { return nil }
+        if elapsed > 0.65 || abs(delta.y) > 0.10 {
+            self.origin = point; began = time; isMoving = false; return nil
+        }
+        guard elapsed >= 0.12, abs(delta.x) >= 0.12, abs(delta.x) > abs(delta.y)*2 else { return nil }
+        fired = true; isMoving = true; cooldownUntil = time+0.8
+        return delta.x < 0 ? -1 : 1
+    }
+}
+
 struct StableFistGesture {
     private(set) var isClosed = false
     private var candidate: Bool?

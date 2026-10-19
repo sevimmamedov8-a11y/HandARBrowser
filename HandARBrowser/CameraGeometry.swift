@@ -28,6 +28,16 @@ struct CameraProjection {
         self.width=width;self.height=height;self.fx=fx;self.fy=fy
         self.cx=cx;self.cy=cy;self.rayScale=rayScale
     }
+    /// Aspect fill for the complete eye frustum. Use this same projection for
+    /// hand rays, otherwise widening the passthrough would shift hit testing.
+    func covering(x: Double, y: Double) -> CameraProjection {
+        let horizontal = min(cx, width-cx) / fx
+        let vertical = min(cy, height-cy) / fy
+        guard horizontal > 0, vertical > 0, x.isFinite, y.isFinite else { return self }
+        let scale = max(rayScale, max(abs(x)/horizontal, abs(y)/vertical) * 1.001)
+        return CameraProjection(width: width, height: height, fx: fx, fy: fy,
+                                cx: cx, cy: cy, rayScale: scale) ?? self
+    }
     func tangent(rawUV uv: SIMD2<Double>) -> SIMD2<Double> {
         SIMD2((uv.x*width-cx)/fx,(cy-uv.y*height)/fy)*rayScale
     }
@@ -81,5 +91,21 @@ enum CameraOrientationMath {
         // the headset; its image-right axis provides the initial horizontal yaw.
         let right=basis[0]
         return atan2(right.z,right.x)
+    }
+}
+
+/// Extra source coverage for radial correction over a rectangular viewport.
+enum LensCoverage {
+    static func overscan(center: SIMD2<Double>, aspect: Double, k1: Double, k2: Double, chroma: Double) -> Double {
+        let x = max(abs(center.x), abs(1-center.x)) * aspect
+        let y = max(abs(center.y), abs(1-center.y))
+        let radius2 = x*x+y*y
+        func factor(_ r: Double) -> Double { 1+k1*r+k2*r*r }
+        var maximum = max(1, factor(radius2))
+        if k2 < 0 {
+            let peak = -k1/(2*k2)
+            if peak > 0 && peak < radius2 { maximum = max(maximum, factor(peak)) }
+        }
+        return max(1, maximum * (1+abs(chroma))) * 1.00001
     }
 }

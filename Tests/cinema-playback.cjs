@@ -5,7 +5,7 @@ assert(part);const template=part.split('return """')[1].split('        """')[0];
 let checks=0;function check(value,message){checks++;assert(value,message)}
 function fixture(role='left'){
  let now=0,starts=0,pauses=0,seeks=0,time=5,failure=null;
- const intervals=[],timeouts=[],listeners={},styles=[],mutingAtPlay=[];
+ const intervals=[],timeouts=[],listeners={},styles=[],mutingAtPlay=[],audios=[];
  const video={clientWidth:500,clientHeight:300,paused:true,muted:false,defaultMuted:false,volume:1,
   readyState:4,duration:100,seeking:false,ended:false,playbackRate:1,style:{setProperty(){}},setAttribute(){},
   seekable:{length:1,start(){return 0},end(){return 100}},
@@ -15,14 +15,14 @@ function fixture(role='left'){
  };
  Object.defineProperty(video,'currentTime',{get(){return time},set(value){time=value;seeks++}});
  const context={Date:{now(){return now}},window:{addEventListener(name,fn){listeners[name]=fn}},
-  document:{hidden:false,querySelectorAll(){return [video]},createElement(){return {}},
+  document:{hidden:false,querySelectorAll(selector){return selector==='audio'?audios:[video]},createElement(){return {}},
    documentElement:{classList:{add(){}}},head:{appendChild(style){styles.push(style.textContent)}},
    addEventListener(name,fn){listeners[name]=fn}},
   MutationObserver:class{observe(){}disconnect(){}},requestAnimationFrame(){},
   setInterval(fn){intervals.push(fn)},setTimeout(fn){timeouts.push(fn)}};
  vm.createContext(context);
  vm.runInContext(template.replaceAll('\\(role)',role).replaceAll('\\(muted)',role==='right'?'true':'false'),context);
- return {v:video,w:context.window,doc:context.document,listeners,styles,mutingAtPlay,
+ return {v:video,w:context.window,doc:context.document,listeners,styles,mutingAtPlay,audios,
   tick(ms=1600){now+=ms;intervals.forEach(fn=>fn())},
   run(script){vm.runInContext(script,context)},runTimeouts(){timeouts.splice(0).forEach(fn=>fn())},
   get now(){return now},get starts(){return starts},get pauses(){return pauses},get seeks(){return seeks},
@@ -137,7 +137,29 @@ for(const condition of ['buffer','ad','seek']){
  check(Math.abs(masterTime-f.v.currentTime)<0.04,'250 ms simulated lag converges below 40 ms');
  check(corrections===0,'small-drift convergence never seeks');
 }
-console.log(`PASS: ${checks} cinema playback continuity, intent, visibility and synchronization checks`);
+{
+ const f=fixture();f.w.__handarBrowseOnly=true;f.v.muted=true;
+ f.runTimeouts();for(let i=0;i<5;i++)f.tick();
+ check(f.starts===0&&f.v.paused,'ordinary web pages never auto-play from the cinema watchdog');
+ check(f.v.muted,'browser preserves the site master mute setting');
+ f.w.__handarDirectPlay();check(f.starts===1&&!f.v.paused,'explicit play still works in browsing mode');
+ f.v.pause();for(let i=0;i<5;i++)f.tick();
+ check(f.starts===1&&f.v.paused,'native or custom website pause remains paused');
+ check(!f.styles.join('').includes('html,body{'),'ordinary page background and visibility are not overridden');
+}
+{
+ const f=fixture('right');f.w.__handarBrowseOnly=true;
+ f.w.__handarSyncDirectVideo(f.master({p:false,w:false}));
+ check(!f.v.paused&&f.v.muted,'browser slave follows actual master playback with muted audio');
+ f.w.__handarSyncDirectVideo(f.master({p:true,w:true}));
+ check(f.v.paused,'browser slave respects native website pause even when cinema intent is stale');
+}
+for(const role of ['left','right']){
+ const f=fixture(role);f.w.__handarBrowseOnly=true;
+ const audio={muted:false,defaultMuted:false,volume:1,setAttribute(){}};f.audios.push(audio);f.tick();
+ check(audio.muted===(role==='right')&&audio.volume===(role==='right'?0:1),'audio elements are muted only in the right eye');
+}
+console.log(`PASS: ${checks} cinema/browser playback continuity, intent, visibility and synchronization checks`);
 
 const input=fs.readFileSync(path.resolve(__dirname,'../HandARBrowser/WebInput.js'),'utf8');
 const begin=input.indexOf('  function playbackVideo()');assert(begin>=0);

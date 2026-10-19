@@ -96,8 +96,7 @@ struct VRProfile: Codable, Equatable {
     var k2: Float = 0.0
     /// Без искусственной хроматики: картинка заполняет весь экран.
     var chroma: Float = 0.0
-    /// Сохраняется для совместимости профиля; фактический радиус круглой
-    /// линзы вычисляется автоматически по размеру экрана.
+    /// Legacy setting retained for saved profiles. Eyes now fill the display.
     var lensClipRadius: Float = 0.0
 
     /// Запас поля зрения под предыскажение. Больше — картинка плотнее
@@ -236,6 +235,7 @@ private struct VRUniforms {
     var rClip: Float = 1
     var passthrough: Float = 1
     var handMaskEnabled: Float = 0
+    var overscan: Float = 1
 }
 
 /// Финальный проход. Берёт офскрин-текстуру глаз (левый глаз слева, правый справа),
@@ -272,6 +272,7 @@ final class VRCompositor {
         float rClip;
         float passthrough;
         float handMaskEnabled;
+        float overscan;
     };
 
     vertex VOut vr_vertex(uint vid [[vertex_id]]) {
@@ -313,7 +314,7 @@ final class VRCompositor {
         // Предыскажение: берём источник дальше от центра, чтобы линза,
         // растягивающая картинку наружу, вернула прямые линии прямыми.
         float f = 1.0 + u.k1 * r2 + u.k2 * r2 * r2;
-        float2 inv = float2(1.0 / u.aspect, 1.0);
+        float2 inv = float2(1.0 / u.aspect, 1.0) / u.overscan;
         float2 sampleG = center + p * f * inv;
         float2 sampleR = center + p * (f * (1.0 + u.chroma)) * inv;
         float2 sampleB = center + p * (f * (1.0 - u.chroma)) * inv;
@@ -322,6 +323,11 @@ final class VRCompositor {
             return float4(0.0, 0.0, 0.0, 1.0);
         }
 
+        // Never let bilinear filtering read pixels from the other eye.
+        float2 inset = float2(1.0 / float(eyes.get_width()), 0.5 / float(eyes.get_height()));
+        sampleG = clamp(sampleG, inset, 1.0 - inset);
+        sampleR = clamp(sampleR, inset, 1.0 - inset);
+        sampleB = clamp(sampleB, inset, 1.0 - inset);
         float2 off = float2(eye * 0.5, 0.0);
         float4 cg = eyes.sample(smp, float2(sampleG.x * 0.5, sampleG.y) + off);
         float cr = eyes.sample(smp, float2(sampleR.x * 0.5, sampleR.y) + off).r;
@@ -710,6 +716,10 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     private var cinemaSourceURL: URL?
     private var cinemaOriginalURL: URL?
     private var directVideoExitButtons: [UIButton] = []
+    private var liveNavigationButtons: [UIButton] = []
+    private var liveBrowserActive = false
+    private var liveProcessRecoveries: Set<ObjectIdentifier> = []
+    private var liveLoadErrors: [String?] = [nil, nil]
     private var directVideoStatusLabels: [UILabel] = []
     private var browserAnchor: ARAnchor?
     private var browserWorldTransform: simd_float4x4?
@@ -936,6 +946,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         super.viewDidLayoutSubviews()
         layoutViews()
         layoutDirectVideoStage()
+        applyEyeGeometry()
         tracking.setInterfaceOrientation(currentInterfaceOrientation())
     }
 
@@ -1410,6 +1421,17 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     }
 
     /// Пересчитывает IPD и матрицы проекции под текущий профиль шлема.
+    private func fullEyeFrustum(eye: Int, aspect: Float) -> EyeFrustum {
+        let base = VRLensMath.frustum(eye: eye, profile: profile)
+        let center = VRLensMath.lensCenterUV(eye: eye, profile: profile)
+        let scale = Float(LensCoverage.overscan(center: SIMD2(Double(center.x), Double(center.y)),
+            aspect: Double(aspect), k1: Double(profile.k1), k2: Double(profile.k2), chroma: Double(profile.chroma)))
+        let x = base.left + center.x * (base.right-base.left)
+        let y = base.top - center.y * (base.top-base.bottom)
+        return EyeFrustum(left: x+(base.left-x)*scale, right: x+(base.right-x)*scale,
+                          bottom: y+(base.bottom-y)*scale, top: y+(base.top-y)*scale)
+    }
+
     private func applyEyeGeometry() {
         let halfIPD = profile.ipdMM * 0.0005   // мм → м и пополам
         leftCameraNode.simdPosition = SIMD3<Float>(-halfIPD, 0, 0)
@@ -1417,8 +1439,11 @@ final class MainViewController: UIViewController, MTKViewDelegate {
 
         let near: Float = 0.02
         let far: Float = 100
-        let left = VRLensMath.frustum(eye: 0, profile: profile)
-        let right = VRLensMath.frustum(eye: 1, profile: profile)
+        let aspect = Float(view.bounds.width * 0.5 / max(view.bounds.height, 1))
+        let left = fullEyeFrustum(eye: 0, aspect: aspect)
+        let right = fullEyeFrustum(eye: 1, aspect: aspect)
+        tracking.setCameraCoverage(x: Double(max(abs(left.left), abs(left.right))),
+                                   y: Double(max(abs(left.bottom), abs(left.top))))
         leftCameraNode.camera?.projectionTransform = VRLensMath.projection(left, near: near, far: far)
         rightCameraNode.camera?.projectionTransform = VRLensMath.projection(right, near: near, far: far)
     }
@@ -1438,6 +1463,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
 
         directVideoLensMask.backgroundColor = .clear
         directVideoLensMask.isOpaque = false
+        directVideoLensMask.isHidden = true
         directVideoLensMask.isUserInteractionEnabled = false
         directVideoStage.addSubview(directVideoLensMask)
 
@@ -1472,6 +1498,19 @@ final class MainViewController: UIViewController, MTKViewDelegate {
             button.addAction(UIAction { [weak self] _ in self?.closeDirectVideo() }, for: .touchUpInside)
             directVideoStage.addSubview(button)
             directVideoExitButtons.append(button)
+            for (symbol, action) in [("chevron.left", 0), ("arrow.clockwise", 1)] {
+                let navigationButton = UIButton(type: .system)
+                var navigationConfig = UIButton.Configuration.filled()
+                navigationConfig.image = UIImage(systemName: symbol)
+                navigationConfig.baseForegroundColor = .white
+                navigationConfig.baseBackgroundColor = UIColor(white: 0.24, alpha: 0.9)
+                navigationConfig.cornerStyle = .capsule
+                navigationButton.configuration = navigationConfig
+                navigationButton.accessibilityLabel = action == 0 ? "Назад" : "Обновить"
+                navigationButton.addAction(UIAction { [weak self] _ in self?.navigateLiveBrowser(back: action == 0) }, for: .touchUpInside)
+                directVideoStage.addSubview(navigationButton)
+                liveNavigationButtons.append(navigationButton)
+            }
             let label = UILabel()
             label.textColor = .white
             label.backgroundColor = UIColor(white: 0.1, alpha: 0.88)
@@ -1521,7 +1560,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         webView.scrollView.backgroundColor = .black
         webView.scrollView.bounces = false
         webView.allowsBackForwardNavigationGestures = false
-        webView.customUserAgent = browser.customUserAgent
+        webView.customUserAgent = nil
         return webView
     }
 
@@ -1543,7 +1582,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
             if(!configured.has(v)){
               configured.add(v);
               v.setAttribute('playsinline','');v.setAttribute('webkit-playsinline','');v.playsInline=true;
-              if(!window.__handarDirectMuted&&v.muted)v.muted=false;
+              if(!window.__handarBrowseOnly&&!window.__handarDirectMuted&&v.muted)v.muted=false;
             }
             // Muting the slave is mandatory before play(). Never repeatedly unmute
             // the master: WebKit can pause playback when mute changes without a gesture.
@@ -1557,7 +1596,8 @@ final class MainViewController: UIViewController, MTKViewDelegate {
             wanted=!!playing;blocked=false;
             if(wanted)lastPlay=-Infinity;
           };
-          function ensurePlaying(v){
+          function ensurePlaying(v,explicit){
+            if(window.__handarBrowseOnly&&!window.__handarDirectMuted&&!explicit)return;
             if(!v||!wanted||blocked||document.hidden||v.ended||v.error||pending||!v.paused)return;
             var now=Date.now();if(now-lastPlay<1500)return;lastPlay=now;
             configure(v);pending=true;
@@ -1565,6 +1605,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
             try{var p=v.play();if(p&&p.then)p.then(function(){pending=false;},failed);else pending=false;}catch(e){failed(e)}
           }
           window.__handarTuneDirectVideo=function(){
+            if(window.__handarDirectMuted)document.querySelectorAll('audio').forEach(configure);
             var v=video(); if(!v) return;
             configure(v);
             if(window.__handarCinemaSurface && v.readyState>=2 && (!v.paused || v.currentTime>0)){
@@ -1575,7 +1616,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
             var v=video(); if(!v) return;
             window.__handarSetPlaybackIntent(true);configure(v);
             if(!window.__handarDirectMuted && v.muted)v.muted=false;
-            ensurePlaying(v);
+            ensurePlaying(v,true);
           };
           window.__handarEnsureDirectVideo=function(){
             window.__handarTuneDirectVideo();ensurePlaying(video());
@@ -1588,7 +1629,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
           };
           window.__handarSyncDirectVideo=function(master){
             var v=video();if(!v||!master)return;configure(v);
-            wanted=!!master.w&&!master.b;
+            wanted=window.__handarBrowseOnly ? !master.p&&!master.b : !!master.w&&!master.b;
             var baseRate=Number.isFinite(master.s)&&master.s>0?master.s:1;
             if(!wanted){if(v.playbackRate!==baseRate)v.playbackRate=baseRate;if(!v.paused)v.pause();return;}
             var now=Date.now();
@@ -1626,13 +1667,13 @@ final class MainViewController: UIViewController, MTKViewDelegate {
           },true);
           var observer=new MutationObserver(function(changes){
             changes.forEach(function(change){change.addedNodes.forEach(function(node){
-              if(node.nodeName==='VIDEO')configure(node);
-              if(node.querySelectorAll)node.querySelectorAll('video').forEach(configure);
+              if(node.nodeName==='VIDEO'||(window.__handarDirectMuted&&node.nodeName==='AUDIO'))configure(node);
+              if(node.querySelectorAll)node.querySelectorAll(window.__handarDirectMuted?'video,audio':'video').forEach(configure);
             });});
           });
           observer.observe(document,{childList:true,subtree:true});
           var style=document.createElement('style');
-          style.textContent='html,body{background:#000!important;margin:0!important;} video{display:block!important;visibility:visible!important;opacity:1!important;transform:translateZ(0)!important;}' +
+          style.textContent='html.handar-cinema-surface,html.handar-cinema-surface body{background:#000!important;margin:0!important;}' +
             'html.handar-cinema-surface,html.handar-cinema-surface body{overflow:hidden!important;}' +
             '.handar-cinema-surface video{visibility:visible!important;position:fixed!important;inset:0!important;width:100vw!important;height:100vh!important;object-fit:contain!important;z-index:2147483646!important;}' +
             '.handar-cinema-surface .html5-video-player,.handar-cinema-surface .html5-video-container{position:fixed!important;inset:0!important;width:100vw!important;height:100vh!important;}';
@@ -1649,50 +1690,50 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     private func layoutDirectVideoStage() {
         let bounds = view.bounds
         directVideoStage.frame = bounds
-        // The hall has its own Home button below the screen. Keep the floating
-        // exit only for the separate flat-video stage.
-        for button in directVideoExitButtons { button.isHidden = cinemaWebScreenActive }
-        if cinemaWebScreenActive {
-            updateCinemaWebScreen()
-            return
-        }
+        directVideoLensMask.isHidden = true
+        for button in directVideoExitButtons + liveNavigationButtons { button.isHidden = cinemaWebScreenActive }
+        if cinemaWebScreenActive { updateCinemaWebScreen(); return }
+        let half = bounds.width * 0.5
+        let header: CGFloat = 50
         for (eye, webView) in [directVideoLeft!, directVideoRight!].enumerated() {
-            cinemaEyeContainers[eye].frame = bounds
-            cinemaEyeContainers[eye].clipsToBounds = false
+            // Each viewport occupies exactly one half, including all four corners.
+            let origin = CGFloat(eye) * half
+            cinemaEyeContainers[eye].frame = CGRect(x: origin, y: header, width: half, height: max(1, bounds.height-header))
+            cinemaEyeContainers[eye].clipsToBounds = true
             webView.layer.transform = CATransform3DIdentity
             webView.layer.anchorPoint = CGPoint(x: 0.5, y: 0.5)
+            webView.frame = cinemaEyeContainers[eye].bounds
             webView.isHidden = false
+            webView.layer.cornerRadius = 0
+            webView.layer.masksToBounds = false
             cinemaWebPointers[eye].isHidden = true
+            directVideoExitButtons[eye].frame = CGRect(x: origin+half*0.5-58, y: 7, width: 116, height: 36)
+            liveNavigationButtons[eye*2].frame = CGRect(x: origin+half*0.5-108, y: 7, width: 42, height: 36)
+            liveNavigationButtons[eye*2+1].frame = CGRect(x: origin+half*0.5+66, y: 7, width: 42, height: 36)
+            directVideoStatusLabels[eye].frame = CGRect(x: origin+20, y: bounds.height-86, width: half-40, height: 64)
         }
-        let padding: CGFloat = 8
-        let gap: CGFloat = 10
-        let diameter = max(1, min(bounds.height - padding * 2,
-                                  (bounds.width - padding * 2 - gap) * 0.5))
-        let total = diameter * 2 + gap
-        let startX = (bounds.width - total) * 0.5
-        let startY = (bounds.height - diameter) * 0.5
-        let left = CGRect(x: startX, y: startY, width: diameter, height: diameter)
-        let right = CGRect(x: startX + diameter + gap, y: startY, width: diameter, height: diameter)
-        directVideoLeft.frame = left
-        directVideoRight.frame = right
+    }
 
-        // Hardware-decoded HTML5 video inside WKWebView can render black when
-        // the WKWebView layer itself is clipped by cornerRadius/masksToBounds.
-        // Keep the two video webviews rectangular and draw the circular lens
-        // cut-outs in a sibling overlay instead. This preserves the VR lens
-        // appearance without masking the video layer itself.
-        directVideoLeft.layer.cornerRadius = 0
-        directVideoRight.layer.cornerRadius = 0
-        directVideoLeft.clipsToBounds = false
-        directVideoRight.clipsToBounds = false
-        directVideoLensMask.frame = directVideoStage.bounds
-        directVideoLensMask.leftCircle = left
-        directVideoLensMask.rightCircle = right
-        directVideoLensMask.setNeedsDisplay()
-        for (index, frame) in [left, right].enumerated() where directVideoExitButtons.indices.contains(index) {
-            directVideoExitButtons[index].frame = CGRect(x: frame.midX - 58, y: frame.minY + 12, width: 116, height: 36)
-            directVideoStatusLabels[index].frame = CGRect(x: frame.minX + 28, y: frame.midY + frame.height * 0.22, width: frame.width - 56, height: 60)
+    private func navigateLiveBrowser(back: Bool) {
+        cancelHandInteraction()
+        playUIConfirmation()
+        liveProcessRecoveries.removeAll()
+        if back {
+            guard directVideoLeft.canGoBack else { return }
+            directVideoLeft.goBack()
+            if directVideoRight.canGoBack { directVideoRight.goBack() }
+        } else {
+            setDirectVideoNotice("Обновляю страницу…")
+            directVideoLeft.reload()
+            directVideoRight.reload()
         }
+    }
+
+    private func openExternalPage(_ url: URL) {
+        guard inVR else { browser.load(URLRequest(url: url)); return }
+        cancelHandInteraction()
+        pauseAndMuteBrowserMedia()
+        presentDirectVideoStage(url: url, browsing: true)
     }
 
     private func projectedCinemaCorner(_ local: SIMD3<Float>, eye: Int) -> SIMD2<Double>? {
@@ -1758,17 +1799,10 @@ final class MainViewController: UIViewController, MTKViewDelegate {
             transform.m24 = CGFloat(mapping.h) / sourceSize.height
             webView.layer.transform = transform
         }
-        directVideoLensMask.frame = view.bounds
-        let radius = view.bounds.height * 0.497
+        directVideoLensMask.isHidden = true
         for eye in 0..<2 {
-            let uv = VRLensMath.lensCenterUV(eye: eye, profile: profile)
-            let center = CGPoint(x: CGFloat(eye) * halfWidth + CGFloat(uv.x) * halfWidth,
-                                 y: CGFloat(uv.y) * view.bounds.height)
-            let circle = CGRect(x: center.x-radius, y: center.y-radius, width: radius*2, height: radius*2)
-            if eye == 0 { directVideoLensMask.leftCircle = circle } else { directVideoLensMask.rightCircle = circle }
-            directVideoExitButtons[eye].frame = CGRect(x: center.x-58, y: center.y-radius+16, width: 116, height: 36)
-            directVideoStatusLabels[eye].frame = CGRect(x: center.x-radius*0.8, y: center.y+radius*0.55,
-                                                      width: radius*1.6, height: 60)
+            directVideoStatusLabels[eye].frame = CGRect(x: CGFloat(eye)*halfWidth+20,
+                y: view.bounds.height-86, width: halfWidth-40, height: 64)
         }
         CATransaction.commit()
     }
@@ -1782,9 +1816,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
             }
             let position = CGPoint(x: CGFloat(point.x) + CGFloat(eye) * view.bounds.width * 0.5, y: CGFloat(point.y))
             cinemaWebPointers[eye].center = position
-            let lens = eye == 0 ? directVideoLensMask.leftCircle : directVideoLensMask.rightCircle
-            let dx = position.x-lens.midX, dy = position.y-lens.midY
-            cinemaWebPointers[eye].isHidden = !cinemaEyeContainers[eye].frame.contains(position) || dx*dx+dy*dy > lens.width*lens.width*0.25
+            cinemaWebPointers[eye].isHidden = !cinemaEyeContainers[eye].frame.contains(position)
         }
     }
 
@@ -1839,16 +1871,14 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         }
         guard let left = directVideoLeft, let right = directVideoRight else { return nil }
         let candidates: [(WKWebView, CGRect)] = [
-            (left, left.frame),
-            (right, right.frame)
+            (left, cinemaEyeContainers[0].frame),
+            (right, cinemaEyeContainers[1].frame)
         ]
         for (w, frame) in candidates {
             guard frame.contains(point), frame.width > 1, frame.height > 1 else { continue }
             let local = CGPoint(x: (point.x - frame.minX) / frame.width,
                                 y: (point.y - frame.minY) / frame.height)
-            let dx = local.x - 0.5
-            let dy = local.y - 0.5
-            if dx * dx + dy * dy <= 0.25 { return (w, local) }
+            return (w, local)
         }
         return nil
     }
@@ -1872,8 +1902,10 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     }
 
     private func handleDirectVideoExit(at point: CGPoint, pinch: Bool, allowBegin: Bool = true, dwell: Bool = false) -> Bool {
-        let selected = directVideoExitButtons.firstIndex { !$0.isHidden && $0.frame.contains(point) }
-        for (index,button) in directVideoExitButtons.enumerated() { button.isHighlighted = index == selected }
+        updateFlatWebPointers(nil)
+        let buttons = directVideoExitButtons + liveNavigationButtons
+        let selected = buttons.firstIndex { !$0.isHidden && $0.frame.contains(point) }
+        for (index,button) in buttons.enumerated() { button.isHighlighted = index == selected }
         let confirmed = directVideoClickGate.update(target:selected,down:pinch,allowBegin:allowBegin,dwell:dwell,at:CACurrentMediaTime())
         directDwellRing.isHidden = directVideoClickGate.dwellProgress <= 0
         if !directDwellRing.isHidden {
@@ -1887,13 +1919,29 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         guard selected != nil else { return false }
         directVideoPointer.isHidden = false
         directVideoPointer.center = point
+        let mirror = CGPoint(x: point.x < view.bounds.midX ? point.x+view.bounds.width*0.5 : point.x-view.bounds.width*0.5, y: point.y)
+        cinemaWebPointers[point.x < view.bounds.midX ? 1 : 0].center = mirror
+        cinemaWebPointers[point.x < view.bounds.midX ? 1 : 0].isHidden = false
         directLeftInput.release(webView:directVideoLeft)
         directRightInput.release(webView:directVideoRight)
-        if confirmed != nil { closeDirectVideo() }
+        if let confirmed { buttons[confirmed].sendActions(for: .touchUpInside) }
         return true
     }
 
-    private func presentDirectVideoStage(url: URL) {
+    private func presentDirectVideoStage(url: URL, browsing: Bool = false) {
+        liveBrowserActive = browsing
+        liveProcessRecoveries.removeAll()
+        liveLoadErrors = [nil, nil]
+        // This flag is installed before page scripts, and persists across navigation.
+        for webView in [directVideoLeft!, directVideoRight!] {
+            let controller = webView.configuration.userContentController
+            let scripts = controller.userScripts.filter { !$0.source.hasPrefix("window.__handarBrowseOnly=") }
+            controller.removeAllUserScripts()
+            controller.addUserScript(WKUserScript(source: "window.__handarBrowseOnly=\(browsing ? "true" : "false");", injectionTime: .atDocumentStart, forMainFrameOnly: true))
+            for script in scripts { controller.addUserScript(script) }
+            webView.backgroundColor = browsing ? .systemBackground : .black
+            webView.scrollView.backgroundColor = webView.backgroundColor
+        }
         directVideoGeneration = UUID()
         directVideoSyncInFlight = false
         stopBrowserCapture()
@@ -1927,6 +1975,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         vrView?.isPaused = !inVR
         directVideoClickGate.cancel()
         directVideoActive = false
+        liveBrowserActive = false
         cinemaScreenMappings = [nil, nil]
         updateCinemaWebPointers(nil)
         directVideoSyncTimer?.invalidate()
@@ -1986,7 +2035,8 @@ final class MainViewController: UIViewController, MTKViewDelegate {
                   let state = object as? [String: Any],
                   let t = state["t"] as? Double, t.isFinite,
                   let paused = state["p"] as? Bool else { return }
-            if let error = state["e"] as? String { self.setDirectVideoNotice("Ошибка видео: " + error) }
+            if let error = self.liveLoadErrors.compactMap({ $0 }).first { self.setDirectVideoNotice(error) }
+            else if let error = state["e"] as? String { self.setDirectVideoNotice("Ошибка видео: " + error) }
             else if state["b"] as? Bool == true { self.setDirectVideoNotice("Нажми ▶ для продолжения видео") }
             else if !paused, (state["r"] as? Int ?? 0) >= 2 { self.setDirectVideoNotice("") }
             self.cinemaHall.setPlayingState(!paused)
@@ -2872,7 +2922,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         }
         if directVideoActive {
             controllerHandRoot.isHidden = true
-            let screen = CGPoint(x: controllerPointer.x * view.bounds.width, y: controllerPointer.y * view.bounds.height)
+            let screen = CGPoint(x: controllerPointer.x * view.bounds.width * 0.5, y: controllerPointer.y * view.bounds.height)
             if handleDirectVideoExit(at: screen, pinch: controllerButtonDown) { return }
             if let (_, local) = directVideoTarget(for: screen) {
                 directVideoPointer.isHidden = false
@@ -2915,7 +2965,18 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         input.update(normalizedPoint: CGPoint(x: x, y: y), pinch: controllerButtonDown, webView: browser)
     }
 
+    private func updateFlatWebPointers(_ uv: CGPoint?) {
+        directVideoPointer.isHidden = true
+        for eye in 0..<2 {
+            guard let uv else { cinemaWebPointers[eye].isHidden = true; continue }
+            let frame = cinemaEyeContainers[eye].frame
+            cinemaWebPointers[eye].center = CGPoint(x: frame.minX+uv.x*frame.width, y: frame.minY+uv.y*frame.height)
+            cinemaWebPointers[eye].isHidden = false
+        }
+    }
+
     private func updateDirectVideoInput(normalizedPoint: CGPoint, pinch: Bool, allowBegin: Bool = true, dwell: Bool = false) {
+        if !cinemaWebScreenActive { updateFlatWebPointers(normalizedPoint) }
         // Both eyes must accept the same play/consent controls.
         directLeftInput.update(normalizedPoint: normalizedPoint, pinch: pinch, webView: directVideoLeft, allowBegin:allowBegin, dwell:dwell)
         directRightInput.update(normalizedPoint: normalizedPoint, pinch: pinch, webView: directVideoRight, allowBegin:allowBegin, dwell:dwell)
@@ -2923,6 +2984,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
 
     private func handleDirectVideoHands(left: HandSample?, right: HandSample?) {
         guard let sample = right ?? left, let frame = tracking.latestFrameCopy else {
+            updateFlatWebPointers(nil)
             directVideoPointer.isHidden = true
             directLeftInput.release(webView: directVideoLeft)
             directRightInput.release(webView: directVideoRight)
@@ -2931,7 +2993,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         let oriented = sample.indexTip.applying(
             frame.displayTransform(for: currentInterfaceOrientation(), viewportSize: view.bounds.size)
         )
-        let screenPoint = CGPoint(x: oriented.x * view.bounds.width, y: oriented.y * view.bounds.height)
+        let screenPoint = CGPoint(x: oriented.x * view.bounds.width * 0.5, y: oriented.y * view.bounds.height)
         if handleDirectVideoExit(at: screenPoint, pinch: sample.clickPinch, allowBegin:sample.clickBegan, dwell:usesDwell) { return }
         guard let (_, local) = directVideoTarget(for: screenPoint) else {
             directVideoPointer.isHidden = true
@@ -2959,6 +3021,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         toolbarClickGate.cancel()
         toolbarDwellRing.isHidden=true
         directDwellRing.isHidden=true
+        updateFlatWebPointers(nil)
         directVideoClickGate.cancel()
     }
 
@@ -3214,7 +3277,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         playUIConfirmation()
         switch item.action {
         case .open(let url):
-            browser.load(URLRequest(url: url))
+            openExternalPage(url)
         case .back:
             if browser.canGoBack {
                 browser.goBack()
@@ -3716,23 +3779,24 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         uniforms.k1 = profile.k1
         uniforms.k2 = profile.k2
         uniforms.chroma = profile.chroma
-        // Круглая линза максимально заполняет свою половину дисплея.
-        // Радиус ограничен и по высоте, и по ширине, поэтому окружность
-        // не превращается в овал и одинакова для обоих глаз.
-        uniforms.rClip = 0.497
+        // Full rectangular eye view; overscan preserves the calibrated lens warp.
+        uniforms.rClip = 10
+        uniforms.overscan = Float(LensCoverage.overscan(
+            center: SIMD2(Double(uniforms.lensCenterL.x), Double(uniforms.lensCenterL.y)),
+            aspect: Double(uniforms.aspect), k1: Double(profile.k1), k2: Double(profile.k2), chroma: Double(profile.chroma)))
         uniforms.passthrough = (profile.passthrough && hasCamera && !cinemaActive) ? 1 : 0
 
         guard let frame, profile.passthrough, hasCamera, !cinemaActive else { return uniforms }
 
-        guard let projection = frame.projection else {
+        guard let projection = tracking.projection(for: frame) else {
             uniforms.passthrough = 0
             return uniforms
         }
 
         let flip = currentInterfaceOrientation() == .landscapeLeft
 
-        let left = VRLensMath.frustum(eye: 0, profile: profile)
-        let right = VRLensMath.frustum(eye: 1, profile: profile)
+        let left = fullEyeFrustum(eye: 0, aspect: uniforms.aspect)
+        let right = fullEyeFrustum(eye: 1, aspect: uniforms.aspect)
         let mappedLeft = cameraMapping(for:left,projection:projection,flipped:flip)
         let mappedRight = cameraMapping(for:right,projection:projection,flipped:flip)
 
@@ -3879,12 +3943,12 @@ extension MainViewController: WKScriptMessageHandler {
 
 extension MainViewController {
     private static let vrDesktopHTML = #"""
-<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><title>HandAR · Главный экран</title><style>:root{color-scheme:dark;--text:#fff;--muted:#ffffffa3;--glass:linear-gradient(150deg,#e5e5e54a,#7171713b 45%,#d6d6d633);--edge:#ffffff47}
+<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><title>HandAR · Главный экран</title><style>:root{color-scheme:dark;--text:#fff;--muted:#ffffffa3;--glass:linear-gradient(150deg,#e1f0ff50,#8595b23b 45%,#c6abe63b);--edge:#ffffff58}
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
 html,body{margin:0;width:100%;height:100%;overflow:hidden;background:transparent;color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display",sans-serif;-webkit-user-select:none;user-select:none}
 button{font:inherit;color:inherit;cursor:pointer;border:0;background:none}button:focus-visible{outline:3px solid #fff;outline-offset:5px}
 button,.app{touch-action:manipulation}.hidden,[hidden]{display:none!important}
-.workspace{position:relative;width:100%;height:100%;display:grid;place-items:center}
+.workspace{position:relative;width:100%;height:100%;display:grid;place-items:center;background:radial-gradient(ellipse at 56% 35%,#a8d9ff16,transparent 57%),radial-gradient(ellipse at 30% 76%,#b4a1ff10,transparent 50%)}
 .status{position:absolute;top:30px;left:50%;transform:translateX(-50%);display:flex;align-items:center;gap:10px;font-size:13px;font-weight:550;color:#ffffffbc;text-shadow:0 1px 8px #0008}
 .status .divider{width:3px;height:3px;border-radius:50%;background:#fff6}.status #controllerState{display:none}
 .glass{background:var(--glass);border:1px solid var(--edge);box-shadow:inset 0 1px 0 #ffffff2b,inset 0 -1px 0 #ffffff0a,0 12px 35px #00000029;-webkit-backdrop-filter:none;backdrop-filter:none}
@@ -3894,12 +3958,12 @@ button,.app{touch-action:manipulation}.hidden,[hidden]{display:none!important}
 .view{position:absolute;inset:90px 14% 95px 21%;display:flex;flex-direction:column;justify-content:center;align-items:center;gap:27px}
 .app-page{width:100%;display:flex;flex-direction:column;align-items:center;gap:26px;animation:none}.app-row{display:flex;justify-content:center;gap:42px;width:100%}
 .app{width:104px;flex-shrink:0;display:flex;flex-direction:column;align-items:center;gap:12px;border-radius:24px;padding:0;cursor:pointer}
-.icon{position:relative;width:84px;height:84px;border-radius:50%;display:grid;place-items:center;background:linear-gradient(155deg,var(--a,#dedede),var(--b,#8b8b8b));box-shadow:inset 0 1px 2px #ffffff45,inset 0 -2px 4px #00000016,0 5px 8px #00000020;transition:none;isolation:isolate;overflow:hidden}
-.icon:after{content:"";position:absolute;inset:0;z-index:2;pointer-events:none;border-radius:50%;box-shadow:inset 0 0 0 1px #ffffff40;background:linear-gradient(#8d92951c,#8d92951c),radial-gradient(ellipse at 28% 0%,#ffffff20,transparent 60%)}
+.icon{position:relative;width:84px;height:84px;border-radius:50%;display:grid;place-items:center;background:linear-gradient(155deg,var(--a,#dedede),var(--b,#8b8b8b));box-shadow:inset 0 1px 2px #ffffff45,inset 0 -2px 4px #00000016,0 7px 13px #00000029;transition:none;isolation:isolate;overflow:hidden}
+.icon:after{content:"";position:absolute;inset:0;z-index:2;pointer-events:none;border-radius:50%;box-shadow:inset 0 0 0 1px #ffffff40;background:radial-gradient(ellipse at 28% 0%,#ffffff48,transparent 62%),linear-gradient(160deg,transparent 65%,#00000008)}
 .icon svg{width:48px;height:48px;fill:none;stroke:#fff;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round;filter:none}.icon .solid{fill:white;stroke:none}.app span{font-size:14px;font-weight:500;letter-spacing:.05px;text-shadow:0 2px 6px #000b;white-space:nowrap}
-.app:hover .icon,.app.handar-hover .icon,.app:focus-visible .icon{transform:scale(1.045);box-shadow:inset 0 1px 2px #ffffff45,0 0 0 4px #ffffff1a}.app:active .icon,.app.launch .icon{transform:scale(.94)}
-.blue{--a:#7db9df;--b:#417db9}.red{--a:#de7b80;--b:#b14c5c}.pink{--a:#ff72c2;--b:#b328ee}.teal{--a:#59d1d1;--b:#03869a}.indigo{--a:#8d93ff;--b:#4e50cb}.green{--a:#96ce9b;--b:#4c9f67}.cyan{--a:#7dbed8;--b:#408fb0}.orange{--a:#ffc55b;--b:#ed7d18}.purple{--a:#b69ad6;--b:#8465b0}.gray{--a:#d8dbe0;--b:#858b93}.dark{--a:#62666e;--b:#383e48}
-.app[data-id=photos] .icon,.app[data-id=safari] .icon,.app[data-id=notes] .icon,.app[data-id=maps] .icon{background:linear-gradient(145deg,#dce0e3,#cbd2d8)}
+.app:hover .icon,.app.handar-hover .icon,.app:focus-visible .icon{transform:scale(1.045);box-shadow:inset 0 1px 2px #ffffff45,0 0 0 4px #cceeff40,0 7px 22px #91caff24}.app:active .icon,.app.launch .icon{transform:scale(.94)}
+.blue{--a:#66c3f2;--b:#337ce0}.red{--a:#f28e99;--b:#d34468}.pink{--a:#ff72c2;--b:#b328ee}.teal{--a:#59d1d1;--b:#03869a}.indigo{--a:#8d93ff;--b:#4e50cb}.green{--a:#9bdd9e;--b:#42aa78}.cyan{--a:#80d5e8;--b:#359dc6}.orange{--a:#ffc55b;--b:#ed7d18}.purple{--a:#c4a6ef;--b:#9067cc}.gray{--a:#d8dbe0;--b:#858b93}.dark{--a:#62666e;--b:#383e48}
+.app[data-id=photos] .icon,.app[data-id=safari] .icon,.app[data-id=notes] .icon,.app[data-id=maps] .icon{background:linear-gradient(145deg,#f0f4f7,#cdd9e6)}
 .app[data-id=notes] .icon svg{stroke:#a6a6a6}.app[data-id=notes] .icon:before{content:"";position:absolute;inset:0 0 65%;background:#ffd84c}
 .app[data-id=maps] .icon svg{stroke:#0989ff}.app[data-id=spotify] .icon{background:linear-gradient(150deg,#dc8190,#be516e)}
 .pages{height:24px;display:flex;align-items:center;gap:12px}.page-dot{width:7px;height:7px;padding:10px;position:relative;opacity:.42}.page-dot:after{content:"";position:absolute;inset:7px;border-radius:50%;background:white}.page-dot.active{opacity:1}.page-dot.handar-hover{transform:scale(1.3)}
@@ -4194,25 +4258,25 @@ addEventListener('resize',()=>{if(current==='fruit')[fruitW,fruitH]=fitCanvas(fc
         case "home":
             openVRDesktop()
         case "safari", "google":
-            browser.load(URLRequest(url: Self.homeURL))
+            openExternalPage(Self.homeURL)
         case "youtube":
-            browser.load(URLRequest(url: Self.youTubeURL))
+            openExternalPage(Self.youTubeURL)
         case "tiktok":
-            browser.load(URLRequest(url: Self.tikTokURL))
+            openExternalPage(Self.tikTokURL)
         case "telegram":
-            browser.load(URLRequest(url: Self.telegramURL))
+            openExternalPage(Self.telegramURL)
         case "discord":
-            browser.load(URLRequest(url: Self.discordURL))
+            openExternalPage(Self.discordURL)
         case "spotify":
-            browser.load(URLRequest(url: Self.spotifyURL))
+            openExternalPage(Self.spotifyURL)
         case "maps":
-            browser.load(URLRequest(url: Self.mapsURL))
+            openExternalPage(Self.mapsURL)
         case "gmail":
-            browser.load(URLRequest(url: Self.gmailURL))
+            openExternalPage(Self.gmailURL)
         case "reddit":
-            browser.load(URLRequest(url: Self.redditURL))
+            openExternalPage(Self.redditURL)
         case "wikipedia":
-            browser.load(URLRequest(url: Self.wikipediaURL))
+            openExternalPage(Self.wikipediaURL)
         case "notes":
             browser.loadHTMLString(Self.vrNotesHTML, baseURL: URL(string: "https://handar.vision/"))
         case "calculator":
@@ -4351,9 +4415,30 @@ extension MainViewController: WKNavigationDelegate, WKUIDelegate {
     private func reportVideoNavigationFailure(_ webView: WKWebView, error: Error) {
         guard (error as NSError).code != NSURLErrorCancelled else { return }
         if directVideoActive, webView === directVideoLeft || webView === directVideoRight {
-            setDirectVideoNotice("Страница не загрузилась: " + error.localizedDescription)
+            let message = cinemaWebScreenActive ? "Не удалось загрузить видео. Вернись домой и открой ссылку ещё раз." : "Не удалось загрузить. Нажми ↻. " + error.localizedDescription
+            liveLoadErrors[webView === directVideoLeft ? 0 : 1] = message
+            setDirectVideoNotice(message)
         } else if webView === browser, cinemaActive, !directVideoActive {
             startCinemaWebFallback()
+        }
+    }
+
+    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        guard directVideoActive, webView === directVideoLeft || webView === directVideoRight else {
+            if webView === browser { browser.reload() }
+            return
+        }
+        let key = ObjectIdentifier(webView)
+        if liveProcessRecoveries.insert(key).inserted {
+            directVideoGeneration = UUID()
+            directVideoSyncInFlight = false
+            cancelHandInteraction()
+            setDirectVideoNotice("Восстанавливаю страницу…")
+            webView.reload()
+        } else {
+            let message = cinemaWebScreenActive ? "Страница остановлена. Вернись домой и открой ссылку ещё раз." : "Страница остановлена. Нажми ↻ для повторной загрузки или «Домой»."
+            liveLoadErrors[webView === directVideoLeft ? 0 : 1] = message
+            setDirectVideoNotice(message)
         }
     }
 
@@ -4370,6 +4455,11 @@ extension MainViewController: WKNavigationDelegate, WKUIDelegate {
         if webView === browser, navigationAction.targetFrame?.isMainFrame == true,
            let url = navigationAction.request.url,
            ["http", "https"].contains(url.scheme?.lowercased() ?? ""), url.host != "handar.vision" {
+            if inVR && !cinemaActive && !isCinemaMode {
+                decisionHandler(.cancel)
+                openExternalPage(url)
+                return
+            }
             applySpatialSurface(home: false, transparent: false)
             toolbarNode.isHidden = cinemaActive || isCinemaMode
         }
@@ -4377,6 +4467,15 @@ extension MainViewController: WKNavigationDelegate, WKUIDelegate {
     }
 
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+        if directVideoActive, webView === directVideoLeft || webView === directVideoRight {
+            liveLoadErrors[webView === directVideoLeft ? 0 : 1] = nil
+        }
+        if directVideoActive, webView === directVideoLeft {
+            directVideoGeneration = UUID()
+            directVideoSyncInFlight = false
+            cancelHandInteraction()
+            setDirectVideoNotice("Загружаю страницу…")
+        }
         if webView === browser {
             snapshotGeneration = UUID()
         }
@@ -4384,10 +4483,17 @@ extension MainViewController: WKNavigationDelegate, WKUIDelegate {
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         if directVideoActive, webView === directVideoLeft || webView === directVideoRight {
+            liveLoadErrors[webView === directVideoLeft ? 0 : 1] = nil
             webView.evaluateJavaScript("window.__handarCinemaSurface = \(cinemaWebScreenActive ? "true" : "false"); window.__handarTuneDirectVideo ? window.__handarTuneDirectVideo() : null;", completionHandler: nil)
             if webView === directVideoLeft {
-                setDirectVideoNotice("Если видео не началось, нажми ▶ на странице")
+                setDirectVideoNotice(liveLoadErrors.compactMap { $0 }.first ?? (liveBrowserActive ? "" : "Если видео не началось, нажми ▶ на странице"))
+                if liveBrowserActive, let url = webView.url, directVideoRight.url != url {
+                    directVideoRight.load(URLRequest(url: url))
+                }
                 activateDirectVideoAudio()
+            }
+            if liveBrowserActive, !directVideoLeft.isLoading, !directVideoRight.isLoading {
+                setDirectVideoNotice(liveLoadErrors.compactMap { $0 }.first ?? "")
             }
             return
         }
@@ -4413,6 +4519,17 @@ final class ARStereoTrackingManager: NSObject, ARSessionDelegate {
 
     private let frameLock = NSLock()
     private var latestFrame: CameraFrame?
+    private var cameraCoverage = SIMD2<Double>(0, 0)
+
+    func setCameraCoverage(x: Double, y: Double) {
+        frameLock.lock(); defer { frameLock.unlock() }
+        cameraCoverage = SIMD2(x, y)
+    }
+
+    func projection(for frame: CameraFrame) -> CameraProjection? {
+        frameLock.lock(); let coverage = cameraCoverage; frameLock.unlock()
+        return frame.projection?.covering(x: coverage.x, y: coverage.y)
+    }
     private var interfaceOrientation: UIInterfaceOrientation = .landscapeRight
     private var runState = CameraRunState()
     private let ultraWideCapture = UltraWideCapture()
@@ -4470,7 +4587,7 @@ final class ARStereoTrackingManager: NSObject, ARSessionDelegate {
     func worldRay(visionPoint: CGPoint) -> WorldRay? {
         guard let frame = latestFrameCopy else { return nil }
 
-        guard let projection=frame.projection else { return nil }
+        guard let projection=projection(for: frame) else { return nil }
 
         // Vision отдаёт нормированные координаты ориентированного кадра
         // (начало — левый низ). Возвращаемся в координаты сырого кадра.

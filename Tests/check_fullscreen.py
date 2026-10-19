@@ -18,6 +18,7 @@ import CoreGraphics
 struct VRProfile {
  var screenWidthMM:Float=147,screenHeightMM:Float=68,eyeToScreenMM:Float=42
  var lensVerticalOffsetMM:Float=0,fovScale:Float=1,k1:Float=0,k2:Float=0,chroma:Float=0
+ var screenHorizontalOffsetMM:Float?=nil,rightEyeVerticalOffsetMM:Float?=nil,lensSeparationMM:Float=63
 }
 final class Harness {
  var profile=VRProfile()
@@ -33,7 +34,7 @@ tests = r'''
    h.profile.lensVerticalOffsetMM=offset;h.profile.k1=k1;h.profile.k2=k2;h.profile.chroma=0.015
    let c=VRLensMath.lensCenterUV(eye:0,profile:h.profile)
    let center=SIMD2(Double(c.x),Double(c.y))
-   let factor=LensCoverage.overscan(center:center,aspect:aspect,k1:Double(k1),k2:Double(k2),chroma:Double(h.profile.chroma))
+   let factor=Double(VRLensMath.renderScale(profile:h.profile,aspect:Float(aspect)))
    let base=VRLensMath.frustum(eye:0,profile:h.profile),wide=h.fullEyeFrustum(eye:0,aspect:Float(aspect))
    let raw=CameraProjection(width:1280,height:720,fx:530,fy:535,cx:627,cy:355,rayScale:0.5)!
    let camera=raw.covering(x:Double(max(abs(wide.left),abs(wide.right))),y:Double(max(abs(wide.bottom),abs(wide.top))))
@@ -42,12 +43,12 @@ tests = r'''
     let p=(uv-center)*SIMD2(aspect,1),r2=p.x*p.x+p.y*p.y
     let f=1+Double(k1)*r2+Double(k2)*r2*r2
     for channel in [-1.0,0,1] {
-     let sample=center+(uv-center)*f*(1+channel*Double(h.profile.chroma))/factor
-     check(sample.x>=0 && sample.x<=1 && sample.y>=0 && sample.y<=1,"warped texture samples stay within their own eye, including corners")
+     let sample=SIMD2<Double>(0.5,0.5)+(uv-center)*f*(1+channel*Double(h.profile.chroma))/factor
+     check(sample.x>=(-1e-6) && sample.x<=1.000001 && sample.y>=(-1e-6) && sample.y<=1.000001,"warped texture samples stay within their own eye, including corners")
     }
-    let sample=center+(uv-center)*f/factor
+    let sample=SIMD2<Double>(0.5,0.5)+(uv-center)*f/factor
     let tangent=SIMD2(Double(wide.left)+sample.x*Double(wide.right-wide.left),Double(wide.top)-sample.y*Double(wide.top-wide.bottom))
-    let original=center+(uv-center)*f
+    let original=SIMD2<Double>(0.5,0.5)+(uv-center)*f
     let expected=SIMD2(Double(base.left)+original.x*Double(base.right-base.left),Double(base.top)-original.y*Double(base.top-base.bottom))
     check(abs(tangent.x-expected.x)<1e-5 && abs(tangent.y-expected.y)<1e-5,"overscan preserves calibrated scene scale and optical center")
     for flipped in [false,true] {

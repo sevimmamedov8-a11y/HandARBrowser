@@ -24,10 +24,10 @@ final class WKWebView {
  func evaluateJavaScript(_ text:String,completionHandler:((Any?,Error?)->Void)?) {scripts.append(text)}
 }
 final class Harness {
- let browser=WKWebView(),directVideoLeft=WKWebView(),directVideoRight=WKWebView(),toolbarNode=Node()
+ let browser=WKWebView(),directVideoLeft=WKWebView(),toolbarNode=Node()
  var inVR=true,cinemaActive=false,isCinemaMode=false,cinemaWebScreenActive=false
  var directVideoActive=true,liveBrowserActive=true,directVideoSyncInFlight=true
- var liveProcessRecoveries:Set<ObjectIdentifier>=[];var liveLoadErrors:[String?]=[nil,nil]
+ var liveProcessRecoveries:Set<ObjectIdentifier>=[];var liveLoadError:String?
  var directVideoGeneration=UUID(),snapshotGeneration=UUID()
  var notice="",opened:[URL]=[],cancels=0,opaque=false,fallbacks=0
  func setDirectVideoNotice(_ text:String) {notice=text}
@@ -62,30 +62,26 @@ struct Tests {
   check(policy(h.browser,url) == .allow,"outside VR navigation stays in the regular browser")
   h.inVR=true
   let original=h.directVideoGeneration
-  h.webViewWebContentProcessDidTerminate(h.directVideoRight)
-  check(h.directVideoRight.reloads==1 && h.cancels==1,"web process loss cancels gestures and reloads once")
-  check(!h.directVideoSyncInFlight && h.directVideoGeneration != original,"process loss invalidates outstanding stereo callbacks")
-  h.webViewWebContentProcessDidTerminate(h.directVideoRight)
-  check(h.directVideoRight.reloads==1 && h.liveLoadErrors[1] != nil,"repeated crash stops retry loop and presents recovery controls")
-  h.directVideoLeft.url=url;h.directVideoRight.url=url
+  h.webViewWebContentProcessDidTerminate(h.directVideoLeft)
+  check(h.directVideoLeft.reloads==1 && h.cancels==1,"web process loss cancels gestures and reloads once")
+  check(!h.directVideoSyncInFlight && h.directVideoGeneration != original,"process loss invalidates outstanding old media callbacks")
+  h.webViewWebContentProcessDidTerminate(h.directVideoLeft)
+  check(h.directVideoLeft.reloads==1 && h.liveLoadError != nil,"repeated crash stops retry loop and presents recovery controls")
+  h.directVideoLeft.url=url
+  h.webView(h.directVideoLeft,didStartProvisionalNavigation:nil)
   h.webView(h.directVideoLeft,didFinish:nil)
-  check(!h.notice.isEmpty,"successful master cannot hide a failed right eye")
-  h.webView(h.directVideoRight,didStartProvisionalNavigation:nil)
-  h.webView(h.directVideoRight,didFinish:nil)
-  check(h.notice.isEmpty && h.liveLoadErrors[1]==nil,"successful recovery clears the error after both pages finish")
+  check(h.notice.isEmpty && h.liveLoadError==nil,"successful single-source recovery clears the error for both copies")
   h.reportVideoNavigationFailure(h.directVideoLeft,error:NSError(domain:NSURLErrorDomain,code:NSURLErrorCancelled))
   check(h.notice.isEmpty,"normal navigation cancellation is not an error")
   h.reportVideoNavigationFailure(h.directVideoLeft,error:NSError(domain:NSURLErrorDomain,code:NSURLErrorNotConnectedToInternet))
-  check(!h.notice.isEmpty && h.liveLoadErrors[0] != nil,"offline error is visible instead of a blank page")
+  check(!h.notice.isEmpty && h.liveLoadError != nil,"offline error is visible instead of a blank page")
   h.directVideoSyncInFlight=true;let before=h.directVideoGeneration
   h.webView(h.directVideoLeft,didStartProvisionalNavigation:nil)
-  check(!h.directVideoSyncInFlight && before != h.directVideoGeneration && h.liveLoadErrors[0]==nil,"new navigation discards old sync and error state")
-  h.directVideoRight.url=URL(string:"https://www.youtube.com/")!
-  h.webView(h.directVideoLeft,didFinish:nil)
-  check(h.directVideoRight.requests.last?.url==url,"left eye redirects reconcile the right URL")
+  check(!h.directVideoSyncInFlight && before != h.directVideoGeneration && h.liveLoadError==nil,"new navigation discards old sync and error state")
+  check(h.directVideoLeft.requests.isEmpty,"finishing a source page does not start a second eye navigation")
   h.cinemaWebScreenActive=true
-  h.reportVideoNavigationFailure(h.directVideoRight,error:NSError(domain:NSURLErrorDomain,code:NSURLErrorTimedOut))
-  check(!h.notice.contains("↻"),"cinema failure describes the available hall Home control")
+  h.reportVideoNavigationFailure(h.directVideoLeft,error:NSError(domain:NSURLErrorDomain,code:NSURLErrorTimedOut))
+  check(!h.notice.contains("Обновить"),"cinema failure describes the available hall Home control")
   h.directVideoActive=false;h.cinemaActive=true
   h.reportVideoNavigationFailure(h.browser,error:NSError(domain:NSURLErrorDomain,code:NSURLErrorTimedOut))
   check(h.fallbacks==1,"cinema retains live-video fallback")

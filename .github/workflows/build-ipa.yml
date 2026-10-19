@@ -1,4 +1,4 @@
-name: Build HandAR Vision IPA — V82
+name: Build HandAR Vision IPA — V83
 
 on:
   push:
@@ -34,6 +34,8 @@ jobs:
           python3 Tests/check_camera.py
           python3 Tests/check_fullscreen.py
           python3 Tests/check_spatial_windows.py
+          python3 Tests/check_monoscopic.py
+          python3 Tests/check_lens_calibration.py
           python3 Tests/check_live_navigation.py
           python3 Tests/check_pointer_bridge.py
           python3 Tests/check_performance.py
@@ -56,7 +58,7 @@ jobs:
           /usr/bin/unzip -p build/HandARBrowser-unsigned.ipa Payload/HandARBrowser.app/Info.plist > build/packaged-Info.plist
           /usr/bin/plutil -lint build/packaged-Info.plist
           test "$(/usr/bin/plutil -extract CFBundleDisplayName raw -o - build/packaged-Info.plist)" = "HandAR Vision"
-          test "$(/usr/bin/plutil -extract CFBundleVersion raw -o - build/packaged-Info.plist)" = "82"
+          test "$(/usr/bin/plutil -extract CFBundleVersion raw -o - build/packaged-Info.plist)" = "83"
           /usr/bin/plutil -extract UILaunchScreen json -o - build/packaged-Info.plist >/dev/null
           echo "IPA OK"
 

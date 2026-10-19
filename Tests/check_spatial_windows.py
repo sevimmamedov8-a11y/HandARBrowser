@@ -33,21 +33,22 @@ let CATransform3DIdentity=Transform()
 enum CATransaction {static func begin(){};static func commit(){};static func setDisableActions(_ b:Bool){}}
 final class Layer {var transform=Transform();var anchorPoint=CGPoint.zero;var position=CGPoint.zero}
 class View {
- var frame=CGRect.zero,bounds=CGRect.zero,center=CGPoint.zero
+ var frame=CGRect.zero {didSet{bounds.size=frame.size}}
+ var bounds=CGRect.zero,center=CGPoint.zero
  var clipsToBounds=false,isHidden=false;let layer=Layer()
  func bringSubviewToFront(_ v:View){}
 }
 final class WKWebView:View {}
-final class Bridge {var points:[CGPoint]=[];func update(normalizedPoint:CGPoint,pinch:Bool,webView:WKWebView,allowBegin:Bool,dwell:Bool){points.append(normalizedPoint)}}
+final class CopyView:View {var copyOffset=CGPoint.zero}
+final class Bridge {var points:[CGPoint]=[];func release(webView:WKWebView){};func update(normalizedPoint:CGPoint,pinch:Bool,webView:WKWebView,allowBegin:Bool,dwell:Bool){points.append(normalizedPoint)}}
 final class CinemaHall {static let screenWidth:Float=4.55,screenHeight:Float=2.56;var screenWorldTransform=Matrix(t:SIMD3(0,1,-4))}
-struct VRProfile {var screenWidthMM:Float=147,screenHeightMM:Float=68,eyeToScreenMM:Float=42,lensVerticalOffsetMM:Float=0,fovScale:Float=1,k1:Float=0,k2:Float=0,chroma:Float=0}
+struct VRProfile {var screenWidthMM:Float=147,screenHeightMM:Float=68,eyeToScreenMM:Float=42,lensVerticalOffsetMM:Float=0,fovScale:Float=1,k1:Float=0,k2:Float=0,chroma:Float=0,lensSeparationMM:Float=63;var screenHorizontalOffsetMM:Float?=nil,rightEyeVerticalOffsetMM:Float?=nil}
 final class Harness {
- let view=View(),directVideoStage=View(),directVideoLensMask=View()
- let directVideoLeft:WKWebView! = WKWebView(),directVideoRight:WKWebView! = WKWebView()
- let cinemaEyeContainers=[View(),View()],cinemaWebPointers=[View(),View()],directVideoStatusLabels=[View(),View()]
- let directVideoExitButtons=[View(),View()],liveNavigationButtons=[View(),View(),View(),View()]
+ let view=View(),directVideoStage=View(),liveWebReplicator=CopyView()
+ let directVideoLeft:WKWebView! = WKWebView()
+ let cinemaEyeContainers=[View(),View()],cinemaWebPointers=[View(),View()],directVideoStatusLabels=[View()]
  let leftCameraNode=Camera(),rightCameraNode=Camera(),cinemaHall=CinemaHall()
- let directLeftInput=Bridge(),directRightInput=Bridge()
+ let directLeftInput=Bridge()
  var cinemaScreenMappings:[CinemaScreenHomography?]=[nil,nil]
  var profile=VRProfile(),directVideoActive=true,cinemaWebScreenActive=false
  var browserWorldTransform:Matrix?=Matrix(t:SIMD3(0,0,-2.15))
@@ -61,22 +62,22 @@ tests=r'''
   func check(_ value:Bool,_ message:String){count+=1;precondition(value,message)}
   func close(_ a:Double,_ b:Double)->Bool{abs(a-b)<1e-4}
   let h=Harness();h.view.bounds=CGRect(x:0,y:0,width:844,height:390)
-  h.leftCameraNode.simdWorldTransform.t.x = -0.0315;h.rightCameraNode.simdWorldTransform.t.x = 0.0315
+  h.rightCameraNode.simdWorldTransform.t.x = 10 // Deliberately different; must never be used.
   h.layoutDirectVideoStage()
-  check(h.directVideoLensMask.isHidden,"no lens overlay adds a black frame")
-  check((h.directVideoExitButtons+h.liveNavigationButtons).allSatisfy{$0.isHidden},"no fullscreen native toolbar")
+  check(h.liveWebReplicator.frame.size==h.view.bounds.size,"replication stage covers display while its source stays in a spatial window")
   let corners=[SIMD3<Float>(-1.45,0.815,0.012),SIMD3<Float>(1.45,0.815,0.012),SIMD3<Float>(1.45,-0.815,0.012),SIMD3<Float>(-1.45,-0.815,0.012)]
   for eye in 0..<2 {
-   let web=eye==0 ? h.directVideoLeft! : h.directVideoRight!
+   let web=h.directVideoLeft!
    check(web.bounds.size==CGSize(width:1280,height:720),"browser retains the same viewport as the desktop")
    let mapping=h.cinemaScreenMappings[eye]!
    let quad=corners.map{h.projectedCinemaCorner($0,eye:eye)!}
    check(quad.allSatisfy{$0.x>0 && $0.x<422 && $0.y>0 && $0.y<390},"floating window leaves camera background around it")
-   let cameraX:Double=eye==0 ? -0.0315:0.0315
+   let cameraX:Double=0
+   let optical=VRLensMath.lensCenterUV(eye:eye,profile:h.profile)
    let base=VRLensMath.frustum(eye:eye,profile:h.profile)
    for i in 0..<4 {
     let worldX=Double(corners[i].x)-cameraX,worldY=Double(corners[i].y),depth=2.15-Double(corners[i].z)
-    let expected=SIMD2((worldX/depth-Double(base.left))/Double(base.right-base.left)*422,(Double(base.top)-worldY/depth)/Double(base.top-base.bottom)*390)
+    let expected=SIMD2(((worldX/depth-Double(base.left))/Double(base.right-base.left)+Double(optical.x)-0.5)*422,((Double(base.top)-worldY/depth)/Double(base.top-base.bottom)+Double(optical.y)-0.5)*390)
     check(close(quad[i].x,expected.x)&&close(quad[i].y,expected.y),"live page occupies the same world plane as the menu")
    }
    for uv in [SIMD2<Double>(0.1,0.2),SIMD2(0.5,0.5),SIMD2(0.9,0.8)] {
@@ -85,9 +86,10 @@ tests=r'''
     let transform=web.layer.transform,pixel=CGPoint(x:uv.x*1280,y:uv.y*720)
     let divisor=Double(transform.m14*pixel.x+transform.m24*pixel.y+transform.m44)
     let actual=SIMD2(Double(transform.m11*pixel.x+transform.m21*pixel.y+transform.m41)/divisor,Double(transform.m12*pixel.x+transform.m22*pixel.y+transform.m42)/divisor)
-    check(close(actual.x,p.x)&&close(actual.y,p.y),"UIKit transform and hand hit projection agree")
+    let offset=eye==0 ? SIMD2<Double>(0,0):SIMD2(Double(h.liveWebReplicator.copyOffset.x)-422,Double(h.liveWebReplicator.copyOffset.y))
+    check(close(actual.x+offset.x,p.x)&&close(actual.y+offset.y,p.y),"source transform plus replica translation agrees with input projection")
    }
-   check(h.directVideoStatusLabels[eye].frame.maxY<web.bounds.height,"error notice stays inside the world window")
+   check(h.directVideoStatusLabels[0].frame.maxY<web.bounds.height,"one replicated error notice stays inside the world window")
   }
   let original=h.cinemaScreenMappings[0]!.map(SIMD2(0.5,0.5))!
   h.browserWorldTransform!.t.x=0.3;h.updateCinemaWebScreen()
@@ -102,11 +104,13 @@ tests=r'''
   check(width<300,"size changes alter the spatial page without changing the headset viewport")
   let uv=CGPoint(x:0.25,y:0.75)
   h.updateDirectVideoInput(normalizedPoint:uv,pinch:false,dwell:true)
-  check(h.directLeftInput.points==[uv]&&h.directRightInput.points==[uv],"both eyes receive the same spatial dwell target")
+  check(h.directLeftInput.points==[uv],"one source receives a spatial dwell click exactly once")
   check(h.cinemaWebPointers.allSatisfy{!$0.isHidden},"cursor projects into both eyes")
   h.updateCinemaWebPointers(nil);check(h.cinemaWebPointers.allSatisfy{$0.isHidden},"tracking cancellation clears both cursors")
   h.browserWorldTransform=nil;h.updateCinemaWebScreen()
-  check(h.directVideoLeft.isHidden&&h.directVideoRight.isHidden,"recenter hides the old page until its anchor is ready")
+  check(h.directVideoLeft.isHidden&&h.cinemaScreenMappings[1]==nil,"recenter hides the old page until its anchor is ready")
+  h.updateDirectVideoInput(normalizedPoint:uv,pinch:true)
+  check(h.directLeftInput.points==[uv],"hidden or unanchored page cannot receive a click")
   h.cinemaWebScreenActive=true;h.updateCinemaWebScreen()
   check(!h.directVideoLeft.isHidden&&h.directVideoLeft.bounds.size==CGSize(width:960,height:540),"3D cinema retains its separate screen")
   check(SpatialWindowSizing.nextWidth(after:1.9)==2.9 && SpatialWindowSizing.nextWidth(after:2.9)==3.8 && SpatialWindowSizing.nextWidth(after:3.8)==1.9,"three size presets cycle")
@@ -117,7 +121,7 @@ tests=r'''
    defaults.set(saved,forKey:SpatialWindowSizing.storageKey)
    check(SpatialWindowSizing.restoredWidth(defaults:defaults,fallback:2.9)==expected,"saved sizes are restored and validated")
   }
-  print("PASS: \(count) world-window placement, head motion, resizing, stereo input and recovery checks")
+  print("PASS: \(count) world-window placement, head motion, resizing, single-source input and recovery checks")
  }
 }
 '''

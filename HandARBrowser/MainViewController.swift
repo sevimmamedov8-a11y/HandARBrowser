@@ -82,12 +82,15 @@ struct VRProfile: Codable, Equatable {
     /// Высота активной области экрана в ландшафте (короткая сторона).
     var screenHeightMM: Float
 
-    /// Межзрачковое расстояние пользователя.
+    /// Legacy IPD retained in saved profiles; the shared camera has no baseline.
     var ipdMM: Float = 63
     /// Расстояние между центрами линз шлема.
     var lensSeparationMM: Float = 63
     /// Смещение центров линз по вертикали относительно центра экрана.
     var lensVerticalOffsetMM: Float = 0
+    // Optional fields preserve synthesized decoding of profiles saved before V83.
+    var screenHorizontalOffsetMM: Float? = nil
+    var rightEyeVerticalOffsetMM: Float? = nil
     /// Расстояние от глаза до экрана сквозь линзу.
     var eyeToScreenMM: Float = 42
 
@@ -137,10 +140,14 @@ struct VRProfile: Codable, Equatable {
     static func load() -> VRProfile {
         guard
             let data = UserDefaults.standard.data(forKey: storageKey),
-            let decoded = try? JSONDecoder().decode(VRProfile.self, from: data)
+            var decoded = try? JSONDecoder().decode(VRProfile.self, from: data)
         else {
             return makeDefault()
         }
+        // Screen dimensions belong to this phone, not a previously saved device.
+        let actual = makeDefault()
+        decoded.screenWidthMM = actual.screenWidthMM
+        decoded.screenHeightMM = actual.screenHeightMM
         return decoded
     }
 
@@ -159,41 +166,30 @@ struct EyeFrustum {
 }
 
 enum VRLensMath {
-    /// Симметричный фрустум: левый и правый глаз получают одинаковую
-    /// ширину и одинаковый горизонтальный FOV. Межзрачковое расстояние
-    /// используется только для разнесения камер, а не для сдвига картинки
-    /// внутри своей половины экрана. Это устраняет неравномерное сведение
-    /// двух изображений под физические линзы шлема.
+    /// Both outputs sample one central-camera image. Physical lens placement
+    /// changes output UV centers, never the shared scene projection.
     static func frustum(eye: Int, profile: VRProfile) -> EyeFrustum {
         _ = eye
-        let halfEyeWidth = profile.screenWidthMM * 0.25
-        let halfHeight = profile.screenHeightMM * 0.5
-        let depth = max(profile.eyeToScreenMM, 1)
-        let lensY = profile.lensVerticalOffsetMM
-
-        var frustum = EyeFrustum(left: -halfEyeWidth / depth,
-                                 right: halfEyeWidth / depth,
-                                 bottom: (-halfHeight - lensY) / depth,
-                                 top: (halfHeight - lensY) / depth)
-
-        // Рендерим шире видимого: предыскажение утягивает края к центру.
-        let scale = max(profile.fovScale, 1)
-        let centerX = (frustum.left + frustum.right) * 0.5
-        let centerY = (frustum.bottom + frustum.top) * 0.5
-        frustum.left = centerX + (frustum.left - centerX) * scale
-        frustum.right = centerX + (frustum.right - centerX) * scale
-        frustum.bottom = centerY + (frustum.bottom - centerY) * scale
-        frustum.top = centerY + (frustum.top - centerY) * scale
-        return frustum
+        let depth=max(profile.eyeToScreenMM,1), scale=max(profile.fovScale,1)
+        let x=profile.screenWidthMM*0.25/depth*scale
+        let y=profile.screenHeightMM*0.5/depth*scale
+        return EyeFrustum(left:-x,right:x,bottom:-y,top:y)
     }
 
-    /// Центр каждой линзы всегда находится в центре своей половины дисплея.
-    /// Поэтому левое и правое изображения имеют одинаковую геометрию и
-    /// не расходятся по горизонтали.
     static func lensCenterUV(eye: Int, profile: VRProfile) -> SIMD2<Float> {
-        _ = eye
-        return SIMD2<Float>(0.5,
-                            0.5 - profile.lensVerticalOffsetMM / max(profile.screenHeightMM, 1))
+        let center=MonoViewGeometry.lensCenter(eye:eye,
+            screenWidth:Double(profile.screenWidthMM),screenHeight:Double(profile.screenHeightMM),
+            separation:Double(profile.lensSeparationMM),horizontal:Double(profile.screenHorizontalOffsetMM ?? 0),
+            vertical:Double(profile.lensVerticalOffsetMM),rightVertical:Double(profile.rightEyeVerticalOffsetMM ?? 0))
+        return SIMD2(Float(center.x),Float(center.y))
+    }
+
+    static func renderScale(profile: VRProfile, aspect: Float) -> Float {
+        let centers=(0..<2).map { eye -> SIMD2<Double> in
+            let p=lensCenterUV(eye:eye,profile:profile);return SIMD2(Double(p.x),Double(p.y))
+        }
+        return Float(MonoViewGeometry.renderScale(centers:centers,aspect:Double(aspect),
+            k1:Double(profile.k1),k2:Double(profile.k2),chroma:Double(profile.chroma)))
     }
 
     static func projection(_ frustum: EyeFrustum, near: Float, far: Float) -> SCNMatrix4 {
@@ -312,9 +308,10 @@ final class VRCompositor {
         // растягивающая картинку наружу, вернула прямые линии прямыми.
         float f = 1.0 + u.k1 * r2 + u.k2 * r2 * r2;
         float2 inv = float2(1.0 / u.aspect, 1.0) / u.overscan;
-        float2 sampleG = center + p * f * inv;
-        float2 sampleR = center + p * (f * (1.0 + u.chroma)) * inv;
-        float2 sampleB = center + p * (f * (1.0 - u.chroma)) * inv;
+        float2 sourceCenter = float2(0.5, 0.5);
+        float2 sampleG = sourceCenter + p * f * inv;
+        float2 sampleR = sourceCenter + p * (f * (1.0 + u.chroma)) * inv;
+        float2 sampleB = sourceCenter + p * (f * (1.0 - u.chroma)) * inv;
 
 
         // Never let bilinear filtering read pixels from the other eye.
@@ -322,7 +319,8 @@ final class VRCompositor {
         sampleG = clamp(sampleG, inset, 1.0 - inset);
         sampleR = clamp(sampleR, inset, 1.0 - inset);
         sampleB = clamp(sampleB, inset, 1.0 - inset);
-        float2 off = float2(eye * 0.5, 0.0);
+        // BOTH eyes read exactly the same left-hand image from this frame.
+        float2 off = float2(0.0);
         float4 cg = eyes.sample(smp, float2(sampleG.x * 0.5, sampleG.y) + off);
         float cr = eyes.sample(smp, float2(sampleR.x * 0.5, sampleR.y) + off).r;
         float cb = eyes.sample(smp, float2(sampleB.x * 0.5, sampleB.y) + off).b;
@@ -553,7 +551,6 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     private let hands = HandTracker()
     private let input = WebInputBridge()
     private let directLeftInput = WebInputBridge()
-    private let directRightInput = WebInputBridge()
     private let controller = VRBoxControllerService()
 
     // Одна логическая поверхность браузера. Стерео рождается из двух камер,
@@ -613,8 +610,9 @@ final class MainViewController: UIViewController, MTKViewDelegate {
 
     // Технологический обход чёрного YouTube-video: аппаратный HTML5 video
     // не попадает в WKWebView.takeSnapshot, поэтому в кинорежиме используем
-    // два настоящих видимых WKWebView — по одному на каждую VR-линзу.
+    // один настоящий WKWebView с копированием его слоёв в обе VR-линзы.
     private let directVideoStage = UIView(frame: .zero)
+    private let liveWebReplicator = MonoscopicWebReplicatorView(frame: .zero)
     private let cinemaEyeContainers = [UIView(), UIView()]
     private let cinemaWebPointers = [UIView(), UIView()]
     private var cinemaScreenMappings: [CinemaScreenHomography?] = [nil, nil]
@@ -626,9 +624,6 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         cinemaWebScreenActive ? SIMD2(CinemaHall.screenWidth, CinemaHall.screenHeight) : SIMD2(browserWorldWidth, browserWorldHeight)
     }
     private var directVideoLeft: WKWebView!
-    private var directVideoRight: WKWebView!
-    private let directVideoLensMask = DirectVideoLensMaskView(frame: .zero)
-    private let directVideoPointer = UIView(frame: .zero)
     private var directVideoActive = false
     private var directVideoURL: URL?
     private var directVideoGeneration = UUID()
@@ -661,10 +656,8 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     // Сцена: одна на оба глаза
     private let worldScene = SCNScene()
     private var leftRenderer: SCNRenderer!
-    private var rightRenderer: SCNRenderer!
     private let headNode = SCNNode()
     private let leftCameraNode = SCNNode()
-    private let rightCameraNode = SCNNode()
     private let browserPlaneNode = SCNNode()
     private let browserMaterial = SCNMaterial()
 
@@ -697,6 +690,8 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     private var toolbarImages: [(normal: UIImage, highlighted: UIImage)] = []
 
     private var menu: MainMenuView!
+    private var lensCalibrationView: LensCalibrationView?
+    private var returnToMenuAfterCalibration = false
     private var diagnosticsView: VRBoxDiagnosticsView?
 
     private var profile = VRProfile.load()
@@ -713,11 +708,9 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     /// если страница не отдала поток с первого раза.
     private var cinemaSourceURL: URL?
     private var cinemaOriginalURL: URL?
-    private var directVideoExitButtons: [UIButton] = []
-    private var liveNavigationButtons: [UIButton] = []
     private var liveBrowserActive = false
     private var liveProcessRecoveries: Set<ObjectIdentifier> = []
-    private var liveLoadErrors: [String?] = [nil, nil]
+    private var liveLoadError: String?
     private var directVideoStatusLabels: [UILabel] = []
     private var browserAnchor: ARAnchor?
     private var browserWorldTransform: simd_float4x4?
@@ -731,13 +724,11 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     private var handClickMode = HandClickMode.load()
     private var usesDwell: Bool { handClickMode == .dwell }
     private let toolbarDwellRing = DwellProgressRing()
-    private let directDwellRing = CAShapeLayer()
     private var handOwnership = HandInputOwnership()
     private var handInputWatchdog: Timer?
     private var backgroundObserver: NSObjectProtocol?
     private var lastHandDeliveryTime: Double = -.infinity
     private var toolbarClickGate = ReleaseClickGate<Int>()
-    private var directVideoClickGate = ReleaseClickGate<Int>()
     private var controllerPointer = CGPoint(x: 0.5, y: 0.5)
     private var controllerButtonDown = false
     private var controllerConnected = false
@@ -1025,8 +1016,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         vrView.delegate = self
 
         leftRenderer = SCNRenderer(device: metalDevice, options: nil)
-        rightRenderer = SCNRenderer(device: metalDevice, options: nil)
-        for renderer in [leftRenderer, rightRenderer] {
+        for renderer in [leftRenderer] {
             renderer?.scene = worldScene
             renderer?.autoenablesDefaultLighting = false
             renderer?.isJitteringEnabled = false
@@ -1043,13 +1033,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         leftCamera.zFar = 100
         leftCameraNode.camera = leftCamera
 
-        let rightCamera = SCNCamera()
-        rightCamera.zNear = 0.02
-        rightCamera.zFar = 100
-        rightCameraNode.camera = rightCamera
-
         headNode.addChildNode(leftCameraNode)
-        headNode.addChildNode(rightCameraNode)
         worldScene.rootNode.addChildNode(headNode)
         applyEyeGeometry()
 
@@ -1376,108 +1360,61 @@ final class MainViewController: UIViewController, MTKViewDelegate {
 
     /// Пересчитывает IPD и матрицы проекции под текущий профиль шлема.
     private func fullEyeFrustum(eye: Int, aspect: Float) -> EyeFrustum {
-        let base = VRLensMath.frustum(eye: eye, profile: profile)
-        let center = VRLensMath.lensCenterUV(eye: eye, profile: profile)
-        let scale = Float(LensCoverage.overscan(center: SIMD2(Double(center.x), Double(center.y)),
-            aspect: Double(aspect), k1: Double(profile.k1), k2: Double(profile.k2), chroma: Double(profile.chroma)))
-        let x = base.left + center.x * (base.right-base.left)
-        let y = base.top - center.y * (base.top-base.bottom)
-        return EyeFrustum(left: x+(base.left-x)*scale, right: x+(base.right-x)*scale,
-                          bottom: y+(base.bottom-y)*scale, top: y+(base.top-y)*scale)
+        let base=VRLensMath.frustum(eye:eye,profile:profile)
+        let scale=VRLensMath.renderScale(profile:profile,aspect:aspect)
+        return EyeFrustum(left:base.left*scale,right:base.right*scale,
+                          bottom:base.bottom*scale,top:base.top*scale)
     }
 
     private func applyEyeGeometry() {
-        let halfIPD = profile.ipdMM * 0.0005   // мм → м и пополам
-        leftCameraNode.simdPosition = SIMD3<Float>(-halfIPD, 0, 0)
-        rightCameraNode.simdPosition = SIMD3<Float>(halfIPD, 0, 0)
+        // Monoscopic mode requested by the user: no per-eye baseline/parallax.
+        leftCameraNode.simdPosition = .zero
 
         let near: Float = 0.02
         let far: Float = 100
         let aspect = Float(view.bounds.width * 0.5 / max(view.bounds.height, 1))
         let left = fullEyeFrustum(eye: 0, aspect: aspect)
-        let right = fullEyeFrustum(eye: 1, aspect: aspect)
         tracking.setCameraCoverage(x: Double(max(abs(left.left), abs(left.right))),
                                    y: Double(max(abs(left.bottom), abs(left.top))))
         leftCameraNode.camera?.projectionTransform = VRLensMath.projection(left, near: near, far: far)
-        rightCameraNode.camera?.projectionTransform = VRLensMath.projection(right, near: near, far: far)
     }
 
     private func configureDirectVideoStage() {
-        directVideoStage.backgroundColor = .black
+        directVideoStage.backgroundColor = .clear
+        directVideoStage.isOpaque = false
         directVideoStage.clipsToBounds = true
-
+        liveWebReplicator.backgroundColor = .clear
+        liveWebReplicator.isOpaque = false
+        directVideoStage.addSubview(liveWebReplicator)
+        let source = cinemaEyeContainers[0]
+        source.backgroundColor = .clear
+        source.isOpaque = false
+        source.clipsToBounds = true
+        liveWebReplicator.addSubview(source)
+        // Only ONE WKWebView/player. Core Animation copies this layer subtree.
         directVideoLeft = makeDirectVideoWebView(role: "left")
-        directVideoRight = makeDirectVideoWebView(role: "right")
-        for (eye, webView) in [directVideoLeft!, directVideoRight!].enumerated() {
-            cinemaEyeContainers[eye].backgroundColor = .clear
-            cinemaEyeContainers[eye].isOpaque = false
-            directVideoStage.addSubview(cinemaEyeContainers[eye])
-            cinemaEyeContainers[eye].addSubview(webView)
-        }
-
-        directVideoLensMask.backgroundColor = .clear
-        directVideoLensMask.isOpaque = false
-        directVideoLensMask.isHidden = true
-        directVideoLensMask.isUserInteractionEnabled = false
-        directVideoStage.addSubview(directVideoLensMask)
-
-        directVideoPointer.bounds = CGRect(x: 0, y: 0, width: 18, height: 18)
-        directVideoPointer.layer.cornerRadius = 9
-        directVideoPointer.layer.borderWidth = 2
-        directVideoPointer.layer.borderColor = UIColor(red: 0.35, green: 0.85, blue: 1, alpha: 1).cgColor
-        directVideoPointer.backgroundColor = .white
-        directVideoPointer.layer.shadowColor = UIColor.black.cgColor
-        directVideoPointer.layer.shadowOpacity = 0.7
-        directVideoPointer.layer.shadowRadius = 5
-        directVideoPointer.isHidden = true
-        directVideoStage.addSubview(directVideoPointer)
+        source.addSubview(directVideoLeft)
         for pointer in cinemaWebPointers {
-            pointer.bounds = CGRect(x: 0, y: 0, width: 10, height: 10)
+            pointer.bounds = CGRect(x:0,y:0,width:10,height:10)
             pointer.backgroundColor = .white
             pointer.layer.cornerRadius = 5
-            pointer.layer.borderColor = UIColor(white: 0.3, alpha: 1).cgColor
+            pointer.layer.borderColor = UIColor(white:0.3,alpha:1).cgColor
             pointer.layer.borderWidth = 1
             pointer.isUserInteractionEnabled = false
             pointer.isHidden = true
             directVideoStage.addSubview(pointer)
         }
-        for eye in 0..<2 {
-            let button = UIButton(type: .system)
-            var config = UIButton.Configuration.filled()
-            config.title = "‹ Домой"
-            config.baseForegroundColor = .white
-            config.baseBackgroundColor = UIColor(white: 0.2, alpha: 0.88)
-            config.cornerStyle = .capsule
-            button.configuration = config
-            button.addAction(UIAction { [weak self] _ in self?.closeDirectVideo() }, for: .touchUpInside)
-            directVideoStage.addSubview(button)
-            directVideoExitButtons.append(button)
-            for (symbol, action) in [("chevron.left", 0), ("arrow.clockwise", 1)] {
-                let navigationButton = UIButton(type: .system)
-                var navigationConfig = UIButton.Configuration.filled()
-                navigationConfig.image = UIImage(systemName: symbol)
-                navigationConfig.baseForegroundColor = .white
-                navigationConfig.baseBackgroundColor = UIColor(white: 0.24, alpha: 0.9)
-                navigationConfig.cornerStyle = .capsule
-                navigationButton.configuration = navigationConfig
-                navigationButton.accessibilityLabel = action == 0 ? "Назад" : "Обновить"
-                navigationButton.addAction(UIAction { [weak self] _ in self?.navigateLiveBrowser(back: action == 0) }, for: .touchUpInside)
-                directVideoStage.addSubview(navigationButton)
-                liveNavigationButtons.append(navigationButton)
-            }
-            let label = UILabel()
-            label.textColor = .white
-            label.backgroundColor = UIColor(white: 0.1, alpha: 0.88)
-            label.font = .systemFont(ofSize: 22, weight: .medium)
-            label.textAlignment = .center
-            label.numberOfLines = 3
-            label.layer.cornerRadius = 10
-            label.clipsToBounds = true
-            // A loading/error notice belongs to the window, not to the headset.
-            label.isUserInteractionEnabled = false
-            (eye == 0 ? directVideoLeft! : directVideoRight!).addSubview(label)
-            directVideoStatusLabels.append(label)
-        }
+        let label=UILabel()
+        label.textColor = .white
+        label.backgroundColor = UIColor(white:0.1,alpha:0.88)
+        label.font = .systemFont(ofSize:22,weight:.medium)
+        label.textAlignment = .center
+        label.numberOfLines = 3
+        label.layer.cornerRadius = 10
+        label.clipsToBounds = true
+        label.isUserInteractionEnabled = false
+        directVideoLeft.addSubview(label)
+        directVideoStatusLabels = [label]
     }
 
     private func makeDirectVideoWebView(role: String) -> WKWebView {
@@ -1644,10 +1581,8 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     }
 
     private func layoutDirectVideoStage() {
-        directVideoStage.frame = view.bounds
-        directVideoLensMask.isHidden = true
-        // Navigation is the same world-space toolbar used by the menu/apps.
-        for button in directVideoExitButtons + liveNavigationButtons { button.isHidden = true }
+        directVideoStage.frame=view.bounds
+        liveWebReplicator.frame=directVideoStage.bounds
         if directVideoActive { updateCinemaWebScreen() }
     }
 
@@ -1658,11 +1593,9 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         if back {
             guard directVideoLeft.canGoBack else { return }
             directVideoLeft.goBack()
-            if directVideoRight.canGoBack { directVideoRight.goBack() }
         } else {
             setDirectVideoNotice("Обновляю страницу…")
             directVideoLeft.reload()
-            directVideoRight.reload()
         }
     }
 
@@ -1674,80 +1607,61 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     }
 
     private func projectedCinemaCorner(_ local: SIMD3<Float>, eye: Int) -> SIMD2<Double>? {
-        let camera = eye == 0 ? leftCameraNode : rightCameraNode
-        guard let transform = liveWebTransform else { return nil }
-        let world = transform * SIMD4<Float>(local, 1)
-        let point = camera.simdWorldTransform.inverse * world
+        guard let transform=liveWebTransform else { return nil }
+        // One central camera, including the live page. Eye only controls alignment.
+        let point=leftCameraNode.simdWorldTransform.inverse * (transform * SIMD4<Float>(local,1))
         let depth = -point.z
         guard depth > 0.03 else { return nil }
-        let frustum = VRLensMath.frustum(eye: eye, profile: profile)
-        let source = SIMD2<Float>((point.x / depth - frustum.left) / (frustum.right - frustum.left),
-                                 (frustum.top - point.y / depth) / (frustum.top - frustum.bottom))
-        let center = VRLensMath.lensCenterUV(eye: eye, profile: profile)
-        let aspect = Float(view.bounds.width * 0.5 / max(view.bounds.height, 1))
-        let isotropic = (source - center) * SIMD2<Float>(aspect, 1)
-        let sourceRadius = simd_length(isotropic)
-        var radius = sourceRadius
-        // Invert the Metal green-channel radial lookup at the four screen corners.
-        for _ in 0..<10 where sourceRadius > 0.000001 {
-            let r2 = radius * radius
-            let value = radius * (1 + profile.k1 * r2 + profile.k2 * r2 * r2) - sourceRadius
-            let derivative = 1 + 3 * profile.k1 * r2 + 5 * profile.k2 * r2 * r2
-            guard derivative > 0.000001 else { return nil }
-            radius = max(0, radius - value / derivative)
-        }
-        let corrected = center + isotropic * (sourceRadius > 0.000001 ? radius / sourceRadius : 1) / SIMD2<Float>(aspect, 1)
-        let result = SIMD2<Double>(Double(corrected.x) * Double(view.bounds.width * 0.5),
-                                   Double(corrected.y) * Double(view.bounds.height))
-        return result.x.isFinite && result.y.isFinite ? result : nil
+        let frustum=VRLensMath.frustum(eye:0,profile:profile)
+        let source=SIMD2<Double>(Double((point.x/depth-frustum.left)/(frustum.right-frustum.left)),
+                                 Double((frustum.top-point.y/depth)/(frustum.top-frustum.bottom)))
+        let c=VRLensMath.lensCenterUV(eye:eye,profile:profile)
+        let aspect=Double(view.bounds.width*0.5/max(view.bounds.height,1))
+        guard let corrected=MonoViewGeometry.displayUV(source:source,center:SIMD2(Double(c.x),Double(c.y)),
+            aspect:aspect,k1:Double(profile.k1),k2:Double(profile.k2)) else { return nil }
+        return corrected*SIMD2(Double(view.bounds.width*0.5),Double(view.bounds.height))
     }
 
     private func updateCinemaWebScreen() {
-        guard directVideoActive, liveWebTransform != nil, view.bounds.width > 1, view.bounds.height > 1 else {
-            directVideoLeft?.isHidden = true
-            directVideoRight?.isHidden = true
+        guard directVideoActive,liveWebTransform != nil,view.bounds.width>1,view.bounds.height>1 else {
+            directVideoLeft?.isHidden=true
+            cinemaScreenMappings=[nil,nil]
+            updateCinemaWebPointers(nil)
             return
         }
-        let halfWidth = view.bounds.width * 0.5
-        let sourceSize = cinemaWebScreenActive ? CGSize(width: 960, height: 540) : CGSize(width: 1280, height: 720)
-        let w = liveWebSize.x * 0.5, h = liveWebSize.y * 0.5
-        let localCorners = [SIMD3<Float>(-w,h,0.012), SIMD3<Float>(w,h,0.012),
-                            SIMD3<Float>(w,-h,0.012), SIMD3<Float>(-w,-h,0.012)]
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        for (eye, webView) in [directVideoLeft!, directVideoRight!].enumerated() {
-            cinemaEyeContainers[eye].frame = CGRect(x: CGFloat(eye) * halfWidth, y: 0, width: halfWidth, height: view.bounds.height)
-            cinemaEyeContainers[eye].clipsToBounds = true
-            let corners = localCorners.compactMap { projectedCinemaCorner($0, eye: eye) }
-            guard let mapping = CinemaScreenHomography(corners: corners) else {
-                cinemaScreenMappings[eye] = nil
-                webView.isHidden = true
-                cinemaWebPointers[eye].isHidden = true
-                continue
-            }
-            cinemaScreenMappings[eye] = mapping
-            webView.isHidden = false
-            if webView.bounds.size != sourceSize { webView.bounds = CGRect(origin: .zero, size: sourceSize) }
-            webView.layer.anchorPoint = .zero
-            webView.layer.position = .zero
-            var transform = CATransform3DIdentity
-            transform.m11 = CGFloat(mapping.a) / sourceSize.width
-            transform.m21 = CGFloat(mapping.b) / sourceSize.height
-            transform.m41 = CGFloat(mapping.c)
-            transform.m12 = CGFloat(mapping.d) / sourceSize.width
-            transform.m22 = CGFloat(mapping.e) / sourceSize.height
-            transform.m42 = CGFloat(mapping.f)
-            transform.m14 = CGFloat(mapping.g) / sourceSize.width
-            transform.m24 = CGFloat(mapping.h) / sourceSize.height
-            webView.layer.transform = transform
+        let halfWidth=view.bounds.width*0.5
+        let sourceSize=cinemaWebScreenActive ? CGSize(width:960,height:540) : CGSize(width:1280,height:720)
+        let w=liveWebSize.x*0.5,h=liveWebSize.y*0.5
+        let localCorners=[SIMD3<Float>(-w,h,0.012),SIMD3<Float>(w,h,0.012),
+                          SIMD3<Float>(w,-h,0.012),SIMD3<Float>(-w,-h,0.012)]
+        let left=VRLensMath.lensCenterUV(eye:0,profile:profile),right=VRLensMath.lensCenterUV(eye:1,profile:profile)
+        let shift=MonoViewGeometry.replicaShift(left:SIMD2(Double(left.x),Double(left.y)),right:SIMD2(Double(right.x),Double(right.y)),
+            width:Double(view.bounds.width),height:Double(view.bounds.height))
+        let viewport=MonoViewGeometry.sourceViewport(width:Double(view.bounds.width),height:Double(view.bounds.height),shift:shift)
+        let frame=CGRect(x:CGFloat(viewport.origin.x),y:CGFloat(viewport.origin.y),width:CGFloat(viewport.size.x),height:CGFloat(viewport.size.y))
+        CATransaction.begin();CATransaction.setDisableActions(true)
+        defer { CATransaction.commit() }
+        liveWebReplicator.copyOffset=CGPoint(x:CGFloat(shift.x),y:CGFloat(shift.y))
+        cinemaEyeContainers[0].frame=frame
+        // Right frame is hit/visibility metadata, not a second content view.
+        cinemaEyeContainers[1].frame=frame.offsetBy(dx:CGFloat(shift.x),dy:CGFloat(shift.y))
+        let corners=localCorners.compactMap { projectedCinemaCorner($0,eye:0) }
+        guard let mapping=CinemaScreenHomography(corners:corners) else {
+            cinemaScreenMappings=[nil,nil];directVideoLeft.isHidden=true;updateCinemaWebPointers(nil);return
         }
-        directVideoLensMask.isHidden = true
-        for eye in 0..<2 {
-            directVideoStatusLabels[eye].frame = CGRect(x: 36, y: sourceSize.height-126,
-                width: sourceSize.width-72, height: 90)
-            (eye == 0 ? directVideoLeft! : directVideoRight!).bringSubviewToFront(directVideoStatusLabels[eye])
-        }
-        CATransaction.commit()
+        let rightCorners=corners.map { $0+SIMD2(shift.x-Double(halfWidth),shift.y) }
+        cinemaScreenMappings=[mapping,CinemaScreenHomography(corners:rightCorners)]
+        directVideoLeft.isHidden=false
+        directVideoLeft.bounds=CGRect(origin:.zero,size:sourceSize)
+        directVideoLeft.layer.anchorPoint = .zero
+        directVideoLeft.layer.position=CGPoint(x:-frame.minX,y:-frame.minY)
+        var transform=CATransform3DIdentity
+        transform.m11=CGFloat(mapping.a)/sourceSize.width;transform.m21=CGFloat(mapping.b)/sourceSize.height;transform.m41=CGFloat(mapping.c)
+        transform.m12=CGFloat(mapping.d)/sourceSize.width;transform.m22=CGFloat(mapping.e)/sourceSize.height;transform.m42=CGFloat(mapping.f)
+        transform.m14=CGFloat(mapping.g)/sourceSize.width;transform.m24=CGFloat(mapping.h)/sourceSize.height
+        directVideoLeft.layer.transform=transform
+        directVideoStatusLabels[0].frame=CGRect(x:36,y:sourceSize.height-126,width:sourceSize.width-72,height:90)
+        directVideoLeft.bringSubviewToFront(directVideoStatusLabels[0])
     }
 
     private func updateCinemaWebPointers(_ uv: CGPoint?) {
@@ -1768,20 +1682,16 @@ final class MainViewController: UIViewController, MTKViewDelegate {
             cinemaHall.update(ray: nil, pinch: false)
             updateCinemaWebPointers(nil)
             directLeftInput.release(webView: directVideoLeft)
-            directRightInput.release(webView: directVideoRight)
             return
         }
-        directVideoPointer.isHidden = true
         if cinemaHall.update(ray: ray, pinch: sample.clickPinch, allowBegin:sample.clickBegan, dwell:usesDwell) {
             updateCinemaWebPointers(nil)
             directLeftInput.release(webView: directVideoLeft)
-            directRightInput.release(webView: directVideoRight)
             return
         }
         guard let hit = planeHit(ray: ray, transform: cinemaHall.screenWorldTransform) else {
             updateCinemaWebPointers(nil)
             directLeftInput.release(webView: directVideoLeft)
-            directRightInput.release(webView: directVideoRight)
             return
         }
         let uv = CGPoint(x: CGFloat(hit.localX / CinemaHall.screenWidth + 0.5),
@@ -1789,7 +1699,6 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         guard (0...1).contains(uv.x), (0...1).contains(uv.y) else {
             updateCinemaWebPointers(nil)
             directLeftInput.release(webView: directVideoLeft)
-            directRightInput.release(webView: directVideoRight)
             return
         }
         updateCinemaWebPointers(uv)
@@ -1817,9 +1726,9 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     private func presentDirectVideoStage(url: URL, browsing: Bool = false) {
         liveBrowserActive = browsing
         liveProcessRecoveries.removeAll()
-        liveLoadErrors = [nil, nil]
+        liveLoadError = nil
         // This flag is installed before page scripts, and persists across navigation.
-        for webView in [directVideoLeft!, directVideoRight!] {
+        for webView in [directVideoLeft!] {
             let controller = webView.configuration.userContentController
             let scripts = controller.userScripts.filter { !$0.source.hasPrefix("window.__handarBrowseOnly=") }
             controller.removeAllUserScripts()
@@ -1842,18 +1751,15 @@ final class MainViewController: UIViewController, MTKViewDelegate {
             toolbarNode.isHidden = false
             isCinemaMode = false
         }
-        directVideoClickGate.cancel()
         directVideoURL = url
         setDirectVideoNotice("Загружаю страницу…")
         directVideoActive = true
         directVideoStage.isHidden = false
         layoutDirectVideoStage()
-        directVideoStage.bringSubviewToFront(directVideoPointer)
         view.bringSubviewToFront(directVideoStage)
 
         let request = URLRequest(url: url, cachePolicy: .useProtocolCachePolicy, timeoutInterval: 30)
         directVideoLeft.load(request)
-        directVideoRight.load(request)
 
         directVideoSyncTimer?.invalidate()
         directVideoSyncTimer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in
@@ -1866,7 +1772,6 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         directVideoGeneration = UUID()
         directVideoSyncInFlight = false
         vrView?.isPaused = !inVR
-        directVideoClickGate.cancel()
         directVideoActive = false
         browserPlaneNode.geometry = browserPlaneGeometry
         liveBrowserActive = false
@@ -1874,15 +1779,11 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         updateCinemaWebPointers(nil)
         directVideoSyncTimer?.invalidate()
         directVideoSyncTimer = nil
-        directVideoPointer.isHidden = true
         directVideoStage.isHidden = true
         directVideoURL = nil
         directLeftInput.release(webView: directVideoLeft)
-        directRightInput.release(webView: directVideoRight)
         pauseAndMute(directVideoLeft)
-        pauseAndMute(directVideoRight)
         directVideoLeft?.stopLoading()
-        directVideoRight?.stopLoading()
     }
 
     private func activateMediaAudioSession() {
@@ -1914,39 +1815,29 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         if !mediaAudioSessionActive { activateMediaAudioSession() }
     }
 
+    // The legacy name remains at cinema control call sites. This polls ONE
+    // player for progress/status; there is no second clock to synchronize.
     private func syncDirectVideoEyes() {
-        guard directVideoActive, !directVideoSyncInFlight else { return }
-        let generation = directVideoGeneration
-        directVideoSyncInFlight = true
-        let stateJS = "window.__handarDirectState ? window.__handarDirectState() : 'null';"
-        directVideoLeft.evaluateJavaScript(stateJS) { [weak self] result, _ in
-            guard let self, self.directVideoActive, self.directVideoGeneration == generation else { return }
-            var awaitingRight = false
-            defer { if !awaitingRight { self.directVideoSyncInFlight = false } }
-            guard let raw = result as? String, raw != "null",
-                  let data = raw.data(using: .utf8),
-                  let object = try? JSONSerialization.jsonObject(with: data),
-                  let state = object as? [String: Any],
-                  let t = state["t"] as? Double, t.isFinite,
-                  let paused = state["p"] as? Bool else { return }
-            if let error = self.liveLoadErrors.compactMap({ $0 }).first { self.setDirectVideoNotice(error) }
-            else if let error = state["e"] as? String { self.setDirectVideoNotice("Ошибка видео: " + error) }
-            else if state["b"] as? Bool == true { self.setDirectVideoNotice("Нажми ▶ для продолжения видео") }
-            else if !paused, (state["r"] as? Int ?? 0) >= 2 { self.setDirectVideoNotice("") }
+        guard directVideoActive,!directVideoSyncInFlight else { return }
+        let generation=directVideoGeneration
+        directVideoSyncInFlight=true
+        directVideoLeft.evaluateJavaScript("window.__handarDirectState ? window.__handarDirectState() : 'null';") { [weak self] result,_ in
+            guard let self,self.directVideoActive,self.directVideoGeneration==generation else { return }
+            defer { self.directVideoSyncInFlight=false }
+            guard let raw=result as? String,let data=raw.data(using:.utf8),
+                  let state=(try? JSONSerialization.jsonObject(with:data)) as? [String:Any],
+                  let time=state["t"] as? Double,time.isFinite,let paused=state["p"] as? Bool else { return }
+            if let error=self.liveLoadError { self.setDirectVideoNotice(error) }
+            else if let error=state["e"] as? String { self.setDirectVideoNotice("Ошибка видео: "+error) }
+            else if state["b"] as? Bool==true { self.setDirectVideoNotice("Нажми ▶ для продолжения видео") }
+            else if !paused,(state["r"] as? Int ?? 0)>=2 { self.setDirectVideoNotice("") }
             self.cinemaHall.setPlayingState(!paused)
-            self.cinemaHall.setTime(current:t,duration:state["d"] as? Double ?? 0)
-            let rightJS = "window.__handarSyncDirectVideo && window.__handarSyncDirectVideo(\(raw));"
-            awaitingRight = true
-            self.directVideoRight.evaluateJavaScript(rightJS) { [weak self] _, _ in
-                guard let self, self.directVideoGeneration == generation else { return }
-                self.directVideoSyncInFlight = false
-            }
+            self.cinemaHall.setTime(current:time,duration:state["d"] as? Double ?? 0)
         }
     }
 
     private func removeDirectVideoMessageHandlers() {
         directVideoLeft?.configuration.userContentController.removeScriptMessageHandler(forName: "handarFeedback")
-        directVideoRight?.configuration.userContentController.removeScriptMessageHandler(forName: "handarFeedback")
     }
 
     private func configureBrowser() {
@@ -1978,6 +1869,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         menu.onEnter = { [weak self] in
             self?.requestCameraAndEnterVR()
         }
+        menu.onCalibration = { [weak self] in self?.startLensCalibration() }
         menu.onProfileChange = { [weak self] updated in
             guard let self else { return }
             self.profile = updated
@@ -2008,6 +1900,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         let bounds = view.bounds
         vrView?.frame = bounds
         menu?.frame = bounds
+        lensCalibrationView?.frame = bounds
 
         // Внутренний WKWebView рендерим в фиксированном 16:9, чтобы
         // снимок страницы не превращался в квадрат. Сам VR-вывод при этом
@@ -2098,7 +1991,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
 
     // MARK: Вход и выход
 
-    private func requestCameraAndEnterVR() {
+    private func requestCameraAndEnterVR(afterEnter: (() -> Void)? = nil) {
         guard !inVR else { return }
         guard compositor != nil else {
             showAlert("Не удалось инициализировать VR-рендер.")
@@ -2112,12 +2005,14 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         switch AVCaptureDevice.authorizationStatus(for: .video) {
         case .authorized:
             enterVR()
+            afterEnter?()
         case .notDetermined:
             AVCaptureDevice.requestAccess(for: .video) { [weak self] allowed in
                 DispatchQueue.main.async {
                     guard let self else { return }
                     if allowed {
                         self.enterVR()
+                        afterEnter?()
                     } else {
                         self.showAlert("Нужен доступ к задней камере для VR.")
                     }
@@ -2128,6 +2023,48 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         @unknown default:
             showAlert("Не удалось проверить доступ к камере.")
         }
+    }
+
+    private func startLensCalibration() {
+        guard lensCalibrationView == nil, !cinemaActive, !securityGameActive else { return }
+        let wasInVR=inVR
+        let present: () -> Void = { [weak self] in
+            guard let self,self.inVR else { return }
+            self.returnToMenuAfterCalibration = !wasInVR
+            self.cancelHandInteraction()
+            self.controllerButtonDown=false
+            self.stopBrowserCapture()
+            self.vrView?.isPaused=true
+            let calibration=LensCalibrationView(frame:self.view.bounds,profile:self.profile)
+            calibration.onChange={ [weak self] updated in
+                guard let self else {return}
+                self.profile=updated;self.applyEyeGeometry();self.menu.updateProfile(updated)
+            }
+            calibration.onInteraction={ [weak self] in self?.playUIConfirmation() }
+            calibration.onFinish={ [weak self] in self?.finishLensCalibration() }
+            self.lensCalibrationView=calibration
+            self.view.addSubview(calibration)
+        }
+        if inVR {present()} else {requestCameraAndEnterVR(afterEnter:present)}
+    }
+
+    private func finishLensCalibration() {
+        lensCalibrationView?.cancelInteraction()
+        lensCalibrationView?.removeFromSuperview()
+        lensCalibrationView=nil
+        controllerButtonDown=false
+        cancelHandInteraction()
+        profile.save();applyEyeGeometry();menu.updateProfile(profile)
+        if returnToMenuAfterCalibration {returnToMenuAfterCalibration=false;leaveVRToMenu()}
+        else {vrView?.isPaused = !inVR;startBrowserCapture()}
+    }
+
+    private func updateCalibrationHand(_ sample: HandSample?) {
+        guard let calibration=lensCalibrationView else {return}
+        guard let sample,let frame=tracking.latestFrameCopy,!sample.isFist else {calibration.cancelInteraction();return}
+        let oriented=sample.indexTip.applying(frame.displayTransform(for:currentInterfaceOrientation(),viewportSize:view.bounds.size))
+        calibration.updatePointer(CGPoint(x:oriented.x*view.bounds.width*0.5,y:oriented.y*view.bounds.height),
+            down:sample.clickPinch,allowBegin:sample.clickBegan,dwell:usesDwell,time:CACurrentMediaTime())
     }
 
     private func enterVR() {
@@ -2529,6 +2466,10 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     }
 
     private func leaveVRToMenu() {
+        lensCalibrationView?.cancelInteraction()
+        lensCalibrationView?.removeFromSuperview()
+        lensCalibrationView=nil
+        returnToMenuAfterCalibration=false
         cancelHandInteraction()
         handOwnership.reset()
         hands.reset()
@@ -2784,6 +2725,14 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     private func handleControllerButton(_ button: VRBoxButton, pressed: Bool) {
         guard inVR, controllerConnected else { return }
         guard CACurrentMediaTime() - lastHandSeenTime > 0.45 else { return }
+        if lensCalibrationView != nil {
+            switch button {
+            case .a: controllerButtonDown=pressed;updateControllerHand()
+            case .b, .x, .menu: if pressed {finishLensCalibration()}
+            default: break
+            }
+            return
+        }
         switch button {
         case .a:
             controllerButtonDown = pressed
@@ -2808,6 +2757,11 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     }
 
     private func updateControllerHand() {
+        if let calibration=lensCalibrationView {
+            calibration.updatePointer(CGPoint(x:controllerPointer.x*view.bounds.width*0.5,y:controllerPointer.y*view.bounds.height),
+                down:controllerButtonDown,dwell:false,time:CACurrentMediaTime())
+            return
+        }
         if cinemaWebScreenActive {
             controllerHandRoot.isHidden = true
             updateCinemaWebPointers(controllerPointer)
@@ -2847,22 +2801,23 @@ final class MainViewController: UIViewController, MTKViewDelegate {
 
     private func updateDirectVideoInput(normalizedPoint: CGPoint, pinch: Bool, allowBegin: Bool = true, dwell: Bool = false) {
         updateCinemaWebPointers(normalizedPoint)
-        // Both eyes must accept the same play/consent controls.
+        guard cinemaWebPointers.contains(where: { !$0.isHidden }) else {
+            directLeftInput.release(webView:directVideoLeft)
+            return
+        }
+        // Only the source DOM receives input; its visual result is copied.
         directLeftInput.update(normalizedPoint: normalizedPoint, pinch: pinch, webView: directVideoLeft, allowBegin:allowBegin, dwell:dwell)
-        directRightInput.update(normalizedPoint: normalizedPoint, pinch: pinch, webView: directVideoRight, allowBegin:allowBegin, dwell:dwell)
     }
 
     private func cancelHandInteraction() {
+        lensCalibrationView?.cancelInteraction()
         input.release(webView: browser)
         directLeftInput.release(webView: directVideoLeft)
-        directRightInput.release(webView: directVideoRight)
         cinemaHall.cancelInput()
         securityGame.cancelInput()
         toolbarClickGate.cancel()
         toolbarDwellRing.isHidden=true
-        directDwellRing.isHidden=true
         updateCinemaWebPointers(nil)
-        directVideoClickGate.cancel()
     }
 
     private func handleHands(left rawLeft: HandSample?, right rawRight: HandSample?) {
@@ -2872,9 +2827,9 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         let freshRight = rawRight.flatMap { now-$0.timestamp <= 0.2 && now >= $0.timestamp && tracking.acceptsHand(timestamp:$0.timestamp) ? $0 : nil }
         lastHandDeliveryTime = max(freshLeft?.timestamp ?? -.infinity, freshRight?.timestamp ?? -.infinity)
         if freshLeft != nil || freshRight != nil { lastHandSeenTime = now }
-        if !directVideoActive && !cinemaActive { queueHandForegroundMask(left:freshLeft,right:freshRight) }
+        if lensCalibrationView == nil && !directVideoActive && !cinemaActive { queueHandForegroundMask(left:freshLeft,right:freshRight) }
         // Resizing consumes both pinches; neither may turn into a click afterward.
-        if !cinemaActive, !securityGameActive,
+        if lensCalibrationView == nil, !cinemaActive, !securityGameActive,
            let left = freshLeft, let right = freshRight, left.clickPinch, right.clickPinch {
             cancelHandInteraction()
             handOwnership.suppressUntilOpen()
@@ -2908,6 +2863,10 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         // Empty Vision updates must not cancel a controller's active press.
         if routed == nil, controllerConnected, now-lastHandSeenTime > 0.45 {
             updateControllerHand()
+            return
+        }
+        if lensCalibrationView != nil {
+            updateCalibrationHand(routed)
             return
         }
         if let sample=routed, sample.isFist, cinemaActive || securityGameActive {
@@ -3502,7 +3461,6 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         input.release(webView: browser)
         if directVideoActive {
             directLeftInput.release(webView: directVideoLeft)
-            directRightInput.release(webView: directVideoRight)
             updateCinemaWebPointers(nil)
         }
     }
@@ -3565,23 +3523,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
             passDescriptor: leftPass
         )
 
-        // Проход 2 — правый глаз в ту же текстуру.
-        let rightPass = MTLRenderPassDescriptor()
-        rightPass.colorAttachments[0].texture = eyeTexture
-        rightPass.colorAttachments[0].loadAction = .load
-        rightPass.colorAttachments[0].storeAction = .store
-        rightPass.depthAttachment.texture = eyeDepthTexture
-        rightPass.depthAttachment.loadAction = .clear
-        rightPass.depthAttachment.storeAction = .dontCare
-        rightPass.depthAttachment.clearDepth = 1.0
-
-        rightRenderer.pointOfView = rightCameraNode
-        rightRenderer.render(
-            atTime: time,
-            viewport: CGRect(x: CGFloat(eyeWidth), y: 0, width: CGFloat(eyeWidth), height: CGFloat(eyeHeight)),
-            commandBuffer: commandBuffer,
-            passDescriptor: rightPass
-        )
+        // No second render: the compositor copies the left source into both eyes.
 
         // Проход 3 — оптика линз плюс сквозное видео.
         let frame = tracking.latestFrameCopy
@@ -3631,9 +3573,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         uniforms.chroma = profile.chroma
         // Full rectangular eye view; overscan preserves the calibrated lens warp.
         uniforms.rClip = 10
-        uniforms.overscan = Float(LensCoverage.overscan(
-            center: SIMD2(Double(uniforms.lensCenterL.x), Double(uniforms.lensCenterL.y)),
-            aspect: Double(uniforms.aspect), k1: Double(profile.k1), k2: Double(profile.k2), chroma: Double(profile.chroma)))
+        uniforms.overscan = VRLensMath.renderScale(profile:profile,aspect:uniforms.aspect)
         uniforms.passthrough = (profile.passthrough && hasCamera && !cinemaActive) ? 1 : 0
 
         guard let frame, profile.passthrough, hasCamera, !cinemaActive else { return uniforms }
@@ -3761,7 +3701,7 @@ extension MainViewController: WKScriptMessageHandler {
         switch message.name {
         case "handarFeedback":
             guard let body = message.body as? [String: Any], body["type"] as? String == "click" else { return }
-            if message.webView !== directVideoRight { playUIConfirmation() }
+            playUIConfirmation()
         case "handarVideo":
             guard
                 let body = message.body as? [String: Any],
@@ -4072,7 +4012,7 @@ addEventListener('resize',()=>{if(current==='fruit')[fruitW,fruitH]=fitCanvas(fc
         accent: "#6b7280",
         body: """
 <div class="hero"><div class="bigicon">⚙</div><div><h1>VR Settings</h1><p>Быстрые действия для шлема. Подробная физическая калибровка остаётся в обычном меню HandAR.</p></div></div>
-<div class="row"><button class="btn primary" onclick="post('center')">Перецентрировать экран</button><button class="btn" onclick="post('controller-diagnostics')">Диагностика VR BOX</button><button class="btn" onclick="post('exit')">Выйти из VR</button></div>
+<div class="row"><button class="btn primary" onclick="post('center')">Перецентрировать экран</button><button class="btn" onclick="post('calibrate')">Совместить изображения</button><button class="btn" onclick="post('controller-diagnostics')">Диагностика VR BOX</button><button class="btn" onclick="post('exit')">Выйти из VR</button></div>
 <div style="margin-top:24px"><p><b>О контроллере:</b> приложение пытается получать Game Controller и motion-профиль. Если iOS не отдаёт VR BOX как контроллер, этот режим не может изобрести его сигналы.</p><p class="small">Нативные сторонние iPhone-приложения нельзя встроить внутрь окна HandAR. Поэтому значки на VR Desktop открывают VR-версии на базе WKWebView. Системный iOS запуск возможен только как отдельный переход из приложения.</p></div>
 """
     )
@@ -4159,6 +4099,7 @@ addEventListener('resize',()=>{if(current==='fruit')[fruitW,fruitH]=fitCanvas(fc
             profile.save()
             menu?.setProfile(profile)
         case "center": resetBrowserAnchor()
+        case "calibrate": startLensCalibration()
         case "exit": leaveVRToMenu()
         case "controller-diagnostics": showVRBoxDiagnostics()
         default: break
@@ -4219,11 +4160,20 @@ addEventListener('resize',()=>{if(current==='fruit')[fruitW,fruitH]=fitCanvas(fc
 }
 
 
-/// Black overlay with two transparent circular holes. It creates the VR-lens
-/// silhouette without applying a Core Animation mask to the WKWebView layers,
-/// which can interfere with hardware-decoded HTML5 video presentation.
-/// Each eye owns its half of the display. Clear its aperture independently:
-/// even-odd filling two overlapping circles produces an opaque central lens.
+/// Two presentations of the same live layer subtree, with zero time offset.
+final class MonoscopicWebReplicatorView: UIView {
+    override class var layerClass: AnyClass { CAReplicatorLayer.self }
+    var copyOffset: CGPoint = .zero {
+        didSet {
+            let copy=layer as! CAReplicatorLayer
+            copy.instanceCount=2
+            copy.instanceDelay=0
+            copy.instanceTransform=CATransform3DMakeTranslation(copyOffset.x,copyOffset.y,0)
+        }
+    }
+}
+
+/// Legacy mask utility retained for its regression test; not used by the output.
 final class DirectVideoLensMaskView: UIView {
     var leftCircle: CGRect = .zero { didSet { if oldValue != leftCircle { setNeedsDisplay() } } }
     var rightCircle: CGRect = .zero { didSet { if oldValue != rightCircle { setNeedsDisplay() } } }
@@ -4263,9 +4213,9 @@ private extension MainViewController {
 extension MainViewController: WKNavigationDelegate, WKUIDelegate {
     private func reportVideoNavigationFailure(_ webView: WKWebView, error: Error) {
         guard (error as NSError).code != NSURLErrorCancelled else { return }
-        if directVideoActive, webView === directVideoLeft || webView === directVideoRight {
+        if directVideoActive, webView === directVideoLeft {
             let message = cinemaWebScreenActive ? "Не удалось загрузить видео. Вернись домой и открой ссылку ещё раз." : "Не удалось загрузить. Нажми «Обновить». " + error.localizedDescription
-            liveLoadErrors[webView === directVideoLeft ? 0 : 1] = message
+            liveLoadError = message
             setDirectVideoNotice(message)
         } else if webView === browser, cinemaActive, !directVideoActive {
             startCinemaWebFallback()
@@ -4273,7 +4223,7 @@ extension MainViewController: WKNavigationDelegate, WKUIDelegate {
     }
 
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
-        guard directVideoActive, webView === directVideoLeft || webView === directVideoRight else {
+        guard directVideoActive, webView === directVideoLeft else {
             if webView === browser { browser.reload() }
             return
         }
@@ -4286,7 +4236,7 @@ extension MainViewController: WKNavigationDelegate, WKUIDelegate {
             webView.reload()
         } else {
             let message = cinemaWebScreenActive ? "Страница остановлена. Вернись домой и открой ссылку ещё раз." : "Страница остановлена. Нажми «Обновить» или «Домой»."
-            liveLoadErrors[webView === directVideoLeft ? 0 : 1] = message
+            liveLoadError = message
             setDirectVideoNotice(message)
         }
     }
@@ -4316,8 +4266,8 @@ extension MainViewController: WKNavigationDelegate, WKUIDelegate {
     }
 
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
-        if directVideoActive, webView === directVideoLeft || webView === directVideoRight {
-            liveLoadErrors[webView === directVideoLeft ? 0 : 1] = nil
+        if directVideoActive, webView === directVideoLeft {
+            liveLoadError = nil
         }
         if directVideoActive, webView === directVideoLeft {
             directVideoGeneration = UUID()
@@ -4331,18 +4281,15 @@ extension MainViewController: WKNavigationDelegate, WKUIDelegate {
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        if directVideoActive, webView === directVideoLeft || webView === directVideoRight {
-            liveLoadErrors[webView === directVideoLeft ? 0 : 1] = nil
+        if directVideoActive, webView === directVideoLeft {
+            liveLoadError = nil
             webView.evaluateJavaScript("window.__handarCinemaSurface = \(cinemaWebScreenActive ? "true" : "false"); window.__handarTuneDirectVideo ? window.__handarTuneDirectVideo() : null;", completionHandler: nil)
             if webView === directVideoLeft {
-                setDirectVideoNotice(liveLoadErrors.compactMap { $0 }.first ?? (liveBrowserActive ? "" : "Если видео не началось, нажми ▶ на странице"))
-                if liveBrowserActive, let url = webView.url, directVideoRight.url != url {
-                    directVideoRight.load(URLRequest(url: url))
-                }
+                setDirectVideoNotice(liveLoadError ?? (liveBrowserActive ? "" : "Если видео не началось, нажми ▶ на странице"))
                 activateDirectVideoAudio()
             }
-            if liveBrowserActive, !directVideoLeft.isLoading, !directVideoRight.isLoading {
-                setDirectVideoNotice(liveLoadErrors.compactMap { $0 }.first ?? "")
+            if liveBrowserActive, !directVideoLeft.isLoading {
+                setDirectVideoNotice(liveLoadError ?? "")
             }
             return
         }
@@ -4846,6 +4793,7 @@ final class WebInputBridge {
 final class MainMenuView: UIView {
     var onEnter: (() -> Void)?
     var onProfileChange: ((VRProfile) -> Void)?
+    var onCalibration: (() -> Void)?
     var onDiagnostics: (() -> Void)?
     var onCinema: ((String) -> Void)?
 
@@ -4863,6 +4811,9 @@ final class MainMenuView: UIView {
     private var profile: VRProfile
 
     private let ipdRow = SliderRow(title: "Межзрачковое расстояние", unit: "мм", minimum: 52, maximum: 76, step: 0.5)
+    private let horizontalRow=SliderRow(title:"Телефон: сдвиг по горизонтали",unit:"мм",minimum:-8,maximum:8,step:0.1)
+    private let verticalRow=SliderRow(title:"Телефон: сдвиг по высоте",unit:"мм",minimum:-8,maximum:8,step:0.1)
+    private let verticalMatchRow=SliderRow(title:"Совмещение по вертикали",unit:"мм",minimum:-4,maximum:4,step:0.05)
     private let lensRow = SliderRow(title: "Расстояние между линзами", unit: "мм", minimum: 52, maximum: 76, step: 0.5)
     private let depthRow = SliderRow(title: "Глаз → экран", unit: "мм", minimum: 30, maximum: 70, step: 0.5)
     private let k1Row = SliderRow(title: "Дисторсия k1", unit: "", minimum: 0, maximum: 0.8, step: 0.005)
@@ -4891,7 +4842,7 @@ final class MainMenuView: UIView {
         titleLabel.font = .systemFont(ofSize: 26, weight: .medium)
         titleLabel.textAlignment = .center
 
-        subtitleLabel.text = "Вставь телефон в шлем и подгони линзы под себя"
+        subtitleLabel.text = "iPhone 13 · VR BOX 3 · один кадр → два глаза"
         subtitleLabel.textColor = UIColor.white.withAlphaComponent(0.55)
         subtitleLabel.font = .systemFont(ofSize: 13, weight: .regular)
         subtitleLabel.textAlignment = .center
@@ -5002,7 +4953,23 @@ final class MainMenuView: UIView {
         cinemaButton.heightAnchor.constraint(equalToConstant: 46).isActive = true
         stack.addArrangedSubview(cinemaSection)
 
-        for row in [ipdRow, lensRow, depthRow, k1Row, k2Row] {
+        let calibrationButton=UIButton(type:.system)
+        var calibrationConfig=UIButton.Configuration.filled()
+        calibrationConfig.title="Совместить изображения · VR BOX 3"
+        calibrationConfig.baseBackgroundColor=UIColor(red:0.15,green:0.37,blue:0.48,alpha:1)
+        calibrationConfig.baseForegroundColor = .white
+        calibrationConfig.cornerStyle = .capsule
+        calibrationButton.configuration=calibrationConfig
+        calibrationButton.addAction(UIAction { [weak self] _ in self?.onCalibration?() },for:.touchUpInside)
+        calibrationButton.heightAnchor.constraint(equalToConstant:46).isActive=true
+        stack.addArrangedSubview(calibrationButton)
+        let calibrationNote=UILabel()
+        calibrationNote.text="Сначала расположи телефон по центру и настрой физические линзы. В калибровке добейся одного креста и круга. Щипок, удержание и контроллер работают. Объём между глазами отключён: справа копия левого кадра."
+        calibrationNote.font = .systemFont(ofSize:12)
+        calibrationNote.textColor=UIColor(white:0.8,alpha:1)
+        calibrationNote.numberOfLines=0
+        stack.addArrangedSubview(calibrationNote)
+        for row in [lensRow, horizontalRow, verticalRow, verticalMatchRow, depthRow, k1Row, k2Row] {
             row.onChange = { [weak self] in self?.collect() }
             stack.addArrangedSubview(row)
         }
@@ -5065,7 +5032,12 @@ final class MainMenuView: UIView {
         else { cameraNote.text="Обычная камера AR 1×: отслеживаются повороты и перемещения по комнате." }
     }
 
+    func updateProfile(_ updated: VRProfile) {profile=updated;applyProfile()}
+
     private func applyProfile() {
+        horizontalRow.value=profile.screenHorizontalOffsetMM ?? 0
+        verticalRow.value=profile.lensVerticalOffsetMM
+        verticalMatchRow.value=profile.rightEyeVerticalOffsetMM ?? 0
         ipdRow.value = profile.ipdMM
         lensRow.value = profile.lensSeparationMM
         depthRow.value = profile.eyeToScreenMM
@@ -5076,6 +5048,9 @@ final class MainMenuView: UIView {
 
     private func collect() {
         profile.ipdMM = ipdRow.value
+        profile.screenHorizontalOffsetMM=horizontalRow.value
+        profile.lensVerticalOffsetMM=verticalRow.value
+        profile.rightEyeVerticalOffsetMM=verticalMatchRow.value
         profile.lensSeparationMM = lensRow.value
         profile.eyeToScreenMM = depthRow.value
         profile.k1 = k1Row.value

@@ -2,7 +2,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
-echo "== Hand AR Browser V82 project check =="
+echo "== Hand AR Browser V83 project check =="
 for f in "HandARBrowser.xcodeproj/project.pbxproj" "HandARBrowser/AppDelegate.swift" "HandARBrowser/MainViewController.swift" "HandARBrowser/HandGesture.swift" "HandARBrowser/CinemaHall.swift" "HandARBrowser/CinemaPlayback.swift" "HandARBrowser/Info.plist" "HandARBrowser/WebInput.js"; do
   [[ -f "$f" ]] && echo "[OK] $f" || { echo "[FAIL] missing $f"; exit 1; }
 done
@@ -33,8 +33,8 @@ grep -Fq "struct VRProfile" "$SRC"
 grep -Fq "enum VRLensMath" "$SRC"
 grep -Fq "static func frustum(eye: Int, profile: VRProfile)" "$SRC"
 grep -Fq "static func lensCenterUV(eye: Int, profile: VRProfile)" "$SRC"
-grep -Fq "let halfEyeWidth = profile.screenWidthMM * 0.25" "$SRC"
-grep -Fq "return SIMD2<Float>(0.5," "$SRC"
+grep -Fq "MonoViewGeometry.lensCenter(eye:eye" "$SRC"
+grep -Fq "return SIMD2(Float(center.x),Float(center.y))" "$SRC"
 grep -Fq "final class VRCompositor" "$SRC"
 grep -Fq "device.makeLibrary(source: VRCompositor.source, options: nil)" "$SRC"
 grep -Fq "vr_fragment" "$SRC"
@@ -43,12 +43,15 @@ grep -Fq "MTKViewDelegate" "$SRC"
 grep -Fq "SCNRenderer(device: metalDevice, options: nil)" "$SRC"
 grep -Fq "CVMetalTextureCacheCreateTextureFromImage" "$SRC"
 
-# --- one scene, two eye cameras on a real IPD ---
+# --- one scene and one camera copied into both lens outputs ---
 grep -Fq "private let worldScene = SCNScene()" "$SRC"
 grep -Fq "private let headNode = SCNNode()" "$SRC"
 grep -Fq "headNode.addChildNode(leftCameraNode)" "$SRC"
-grep -Fq "headNode.addChildNode(rightCameraNode)" "$SRC"
-grep -Fq "profile.ipdMM * 0.0005" "$SRC"
+grep -Fq "leftCameraNode.simdPosition = .zero" "$SRC"
+grep -Fq "float2 off = float2(0.0)" "$SRC"
+! grep -Fq "rightRenderer.render(" "$SRC"
+! grep -Fq "directVideoRight" "$SRC"
+[[ -f "HandARBrowser/LensCalibration.swift" ]]
 grep -Fq "browserWorldDistance: Float = 2.15" "$SRC"
 
 # --- video remains in a spatial window; the hall is opened explicitly ---
@@ -164,7 +167,7 @@ grep -Fq 'applySpatialSurface(home: true, transparent: true)' "$SRC"
 grep -Fq 'case "environment-camera", "environment-dark"' "$SRC"
 grep -Fq 'handar-hover' "$JS"
 
-echo "[OK] V82 static project checks"
+echo "[OK] V83 static project checks"
 
 if command -v swiftc >/dev/null 2>&1; then
   # Parser-only validation can fail on Linux because Apple SDK modules are unavailable;

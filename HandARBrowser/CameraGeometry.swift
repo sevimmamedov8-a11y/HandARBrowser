@@ -122,3 +122,52 @@ enum SpatialWindowSizing {
         return width.isFinite ? min(3.8, max(0.72, width)) : fallback
     }
 }
+
+/// A single central-camera image, placed under two physical lenses. All values
+/// are in display coordinates: source UV is shared; only output alignment varies.
+enum MonoViewGeometry {
+    static func lensCenter(eye: Int, screenWidth: Double, screenHeight: Double,
+                           separation: Double, horizontal: Double = 0,
+                           vertical: Double = 0, rightVertical: Double = 0) -> SIMD2<Double> {
+        let width = max(screenWidth, 1), height = max(screenHeight, 1)
+        let x = (eye == 0 ? 1-separation/width : separation/width) + 2*horizontal/width
+        return SIMD2(min(0.9,max(0.1,x)), min(0.9,max(0.1,0.5-(vertical+(eye == 0 ? 0:rightVertical))/height)))
+    }
+
+    static func renderScale(centers: [SIMD2<Double>], aspect: Double, k1: Double, k2: Double, chroma: Double) -> Double {
+        centers.map { center in
+            let extent = 2*max(max(abs(center.x),abs(1-center.x)),max(abs(center.y),abs(1-center.y)))
+            return extent * LensCoverage.overscan(center:center,aspect:aspect,k1:k1,k2:k2,chroma:chroma)
+        }.max() ?? 1
+    }
+
+    /// Inverse of the compositor's green-channel lookup, before source overscan.
+    static func displayUV(source: SIMD2<Double>, center: SIMD2<Double>, aspect: Double,
+                          k1: Double, k2: Double) -> SIMD2<Double>? {
+        guard aspect.isFinite, aspect > 0 else { return nil }
+        let p=(source-SIMD2(0.5,0.5))*SIMD2(aspect,1)
+        let length=hypot(p.x,p.y)
+        var radius=length
+        for _ in 0..<16 where length > 1e-9 {
+            let r2=radius*radius
+            let derivative=1+3*k1*r2+5*k2*r2*r2
+            guard derivative>1e-8 else { return nil }
+            radius=max(0,radius-(radius*(1+k1*r2+k2*r2*r2)-length)/derivative)
+        }
+        let result=center+p*(length>1e-9 ? radius/length:1)/SIMD2(aspect,1)
+        return result.x.isFinite && result.y.isFinite ? result:nil
+    }
+
+    static func replicaShift(left: SIMD2<Double>, right: SIMD2<Double>, width: Double, height: Double) -> SIMD2<Double> {
+        SIMD2(width*0.5*(1+right.x-left.x),height*(right.y-left.y))
+    }
+
+    // One crop is shared by both copies so neither can bleed into the other eye.
+    // The camera behind the floating window still fills the entire display.
+    static func sourceViewport(width: Double, height: Double, shift: SIMD2<Double>) -> (origin: SIMD2<Double>, size: SIMD2<Double>) {
+        let half=width*0.5
+        let origin=SIMD2(max(0,half-shift.x),max(0,-shift.y))
+        let end=SIMD2(min(half,width-shift.x),min(height,height-shift.y))
+        return (origin,SIMD2(max(0,end.x-origin.x),max(0,end.y-origin.y)))
+    }
+}

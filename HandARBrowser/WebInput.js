@@ -150,6 +150,7 @@
   }
 
   function evaluateVideoState() {
+    if (window.__handarVideoToolsReady) autoFocusPlayingVideo();
     if (document.fullscreenElement || document.webkitFullscreenElement) {
       postVideoState(true);
       return;
@@ -201,6 +202,70 @@
   // видео внутри WKWebView, чтобы оно попало в тот же стерео-VR-композитор.
   const handarPatchedVideos = new WeakSet();
   let handarFullscreenVideo = null;
+  let handarVideoControls = null;
+  const handarDismissedVideos = new WeakMap();
+  const handarAudioStarted = new WeakMap();
+
+  function videoIdentity(video) {
+    return location.pathname + location.search + '|' + (video.currentSrc || video.src || '');
+  }
+
+  function shouldFocusVideo(video) {
+    if (!video || video.paused || video.ended || video.readyState < 2 || document.hidden) return false;
+    const coverage = viewportCoverage(video.getBoundingClientRect());
+    // YouTube thumbnail previews must never steal the page or turn on audio.
+    const youtube = /(^|\.)youtube(?:-nocookie)?\.com$/.test(location.hostname);
+    if (youtube) return /^\/(watch|shorts\/|embed\/)/.test(location.pathname) && coverage > 0.08;
+    return coverage > 0.35;
+  }
+
+  function autoFocusPlayingVideo() {
+    if (window.__handarCinemaSurface) return; // The 3D hall owns its screen.
+    if (handarFullscreenVideo && !handarFullscreenVideo.isConnected) exitInlineFullscreen();
+    updateVideoControls();
+    const video = findDominantVideo().video;
+    if (!shouldFocusVideo(video) || handarDismissedVideos.get(video) === videoIdentity(video)) return;
+    if (handarFullscreenVideo !== video) enterInlineFullscreen(video);
+    if (handarAudioStarted.get(video) !== videoIdentity(video) && !window.__handarVolumeChosen) {
+      handarAudioStarted.set(video, videoIdentity(video));
+      if (window.__handarEnableAudio) window.__handarEnableAudio(true);
+    }
+    updateVideoControls();
+  }
+
+  function updateVideoControls() {
+    if (!handarVideoControls || !handarFullscreenVideo) return;
+    const video = handarFullscreenVideo;
+    handarVideoControls.querySelector('[data-action="play"]').textContent = video.paused ? '▶ Смотреть' : 'Ⅱ Пауза';
+    handarVideoControls.querySelector('[data-action="sound"]').textContent = video.muted || video.volume <= 0 ? 'Вкл звук' : '+ звук';
+  }
+
+  function showVideoControls() {
+    if (!handarVideoControls) {
+      handarVideoControls = document.createElement('div');
+      handarVideoControls.className = 'handar-video-tools';
+      handarVideoControls.setAttribute('role', 'toolbar');
+      handarVideoControls.setAttribute('aria-label', 'Управление VR-видео');
+      const actions = [['page','К странице'],['back','−10 с'],['play','Ⅱ Пауза'],['next','+10 с'],['sound','Вкл звук']];
+      actions.forEach(function (item) {
+        const button = document.createElement('button');
+        button.type = 'button'; button.dataset.action = item[0]; button.textContent = item[1];
+        button.addEventListener('click', function (event) {
+          event.preventDefault(); event.stopPropagation();
+          if (item[0] === 'page') exitInlineFullscreen();
+          else if (item[0] === 'play') window.__handarTogglePlay();
+          else if (item[0] === 'sound') window.__handarSetVolume(0.15);
+          else window.__handarSeekVideo(item[0] === 'back' ? -10 : 10, false);
+          updateVideoControls();
+        });
+        handarVideoControls.appendChild(button);
+      });
+    }
+    // Keep controls outside site stacking contexts and above the video.
+    document.documentElement.appendChild(handarVideoControls);
+    handarVideoControls.hidden = false;
+    updateVideoControls();
+  }
 
   function videoContainer(video) {
     return video.closest('.html5-video-player, .html5-video-container, .video-js, .video-container, [data-video-player]')
@@ -210,17 +275,20 @@
 
   function enterInlineFullscreen(video) {
     if (!(video instanceof HTMLVideoElement)) return;
+    if (handarFullscreenVideo && handarFullscreenVideo !== video) exitInlineFullscreen();
     const container = videoContainer(video);
     handarFullscreenVideo = video;
     container.classList.add('handar-inline-video-fullscreen');
     video.classList.add('handar-inline-video-element');
     document.documentElement.classList.add('handar-video-fullscreen');
     if (document.body) document.body.classList.add('handar-video-fullscreen');
-    try { video.play(); } catch (e) {}
+    if (video.paused) { try { const p=video.play(); if(p&&p.catch)p.catch(function(){}); } catch (e) {} }
+    showVideoControls();
     postVideoState(true);
   }
 
   function exitInlineFullscreen() {
+    if (handarVideoControls) handarVideoControls.hidden = true;
     if (!handarFullscreenVideo) {
       document.documentElement.classList.remove('handar-video-fullscreen');
       if (document.body) document.body.classList.remove('handar-video-fullscreen');
@@ -228,6 +296,7 @@
       return;
     }
     const video = handarFullscreenVideo;
+    handarDismissedVideos.set(video, videoIdentity(video));
     const container = videoContainer(video);
     container.classList.remove('handar-inline-video-fullscreen');
     video.classList.remove('handar-inline-video-element');
@@ -263,6 +332,15 @@
 
   const fullscreenStyle = document.createElement('style');
   fullscreenStyle.textContent = `
+    .handar-video-tools { position:fixed!important; bottom:12px!important; left:50%!important;
+      transform:translateX(-50%)!important; display:flex; gap:8px; padding:10px;
+      border:1px solid #ffffff45; border-radius:22px; background:#181b24ed;
+      max-width:calc(100vw - 24px); flex-wrap:wrap; justify-content:center;
+      z-index:2147483647!important; font:16px -apple-system,sans-serif; }
+    .handar-video-tools[hidden] { display:none!important; }
+    .handar-video-tools button { min-height:48px; min-width:76px; padding:8px 12px;
+      border:1px solid #ffffff35; border-radius:14px; background:#ffffff18; color:white;
+      font:inherit; cursor:pointer; touch-action:manipulation; }
     html.handar-video-fullscreen,
     body.handar-video-fullscreen {
       width: 100% !important;
@@ -291,7 +369,12 @@
       object-fit: contain !important;
     }
   `;
-  (document.head || document.documentElement).appendChild(fullscreenStyle);
+  function installFullscreenStyle() {
+    const parent = document.head || document.documentElement;
+    if (parent) parent.appendChild(fullscreenStyle);
+    else requestAnimationFrame(installFullscreenStyle);
+  }
+  installFullscreenStyle();
 
   if (Element.prototype.requestFullscreen) {
     const oldRequestFullscreen = Element.prototype.requestFullscreen;
@@ -354,6 +437,8 @@
     patchVideos(document);
   }
   startVideoObserver();
+  window.__handarVideoToolsReady = true;
+  window.__handarExitVideoFocus = exitInlineFullscreen;
 
   window.addEventListener('pagehide', function () {
     exitInlineFullscreen();
@@ -370,6 +455,7 @@
   // Called on explicit playback/audio controls, never in a repeating watchdog.
   window.__handarEnableAudio=function(resume){
     const v=playbackVideo();if(!v)return false;
+    try { window.webkit.messageHandlers.handarFeedback.postMessage({type:'media-audio'}); } catch(e) {}
     const playing=!v.paused;
     try {
       v.defaultMuted=false;

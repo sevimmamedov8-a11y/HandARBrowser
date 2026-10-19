@@ -1738,7 +1738,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
             let controller = webView.configuration.userContentController
             let scripts = controller.userScripts.filter { !$0.source.hasPrefix("window.__handarBrowseOnly=") }
             controller.removeAllUserScripts()
-            controller.addUserScript(WKUserScript(source: "window.__handarBrowseOnly=\(browsing ? "true" : "false");", injectionTime: .atDocumentStart, forMainFrameOnly: true))
+            controller.addUserScript(WKUserScript(source: "window.__handarBrowseOnly=\(browsing ? "true" : "false");window.__handarCinemaSurface=\(browsing ? "false" : "true");", injectionTime: .atDocumentStart, forMainFrameOnly: true))
             for script in scripts { controller.addUserScript(script) }
             webView.backgroundColor = browsing ? .systemBackground : .black
             webView.scrollView.backgroundColor = webView.backgroundColor
@@ -3726,7 +3726,14 @@ extension MainViewController: WKScriptMessageHandler {
     ) {
         switch message.name {
         case "handarFeedback":
-            guard let body = message.body as? [String: Any], body["type"] as? String == "click" else { return }
+            guard let body = message.body as? [String: Any] else { return }
+            if body["type"] as? String == "media-audio" {
+                if (directVideoActive && message.webView === directVideoLeft) || message.webView === browser {
+                    activateDirectVideoAudio()
+                }
+                return
+            }
+            guard body["type"] as? String == "click" else { return }
             playUIConfirmation()
         case "handarVideo":
             guard
@@ -3987,7 +3994,7 @@ body{background:#05060b}
       <div class="gamecard" onclick="startFruit()"><div><div class="gameemoji">🍉🍓</div><h3>Fruit Slice VR</h3><p>Твоя версия игры с нарезкой фруктов. Двигай рукой и режь летящие фрукты, избегая бомб.</p><span class="tag">Рука + pinch</span></div><div>▶ Играть</div></div>
       <div class="gamecard" onclick="startNeon()"><div><div class="gameemoji">☄️✨</div><h3>Neon Dodge</h3><p>Держи указатель подальше от метеоров и продержись 30 секунд, собирая очки.</p><span class="tag">Рука + движение</span></div><div>▶ Играть</div></div>
       <div class="gamecard" onclick="startStack()"><div><div class="gameemoji">🧱🏗️</div><h3>Stack Rush</h3><p>Точно ставь движущиеся блоки друг на друга и строй башню как можно выше.</p><span class="tag">Рука + pinch</span></div><div>▶ Играть</div></div>
-      <div class="gamecard" onclick="post('security-game')"><div><div class="gameemoji">🔦🪪</div><h3>Security VR</h3><p>3D-охранник клуба: сканируй гостей, проверяй на трезвость, лови контрабанду. Своей рукой можно подносить кисть к его руке — схватить и таскать, у двери отпустить — выкинуть. Можно бить кулаком и швырять предметы со стойки.</p><span class="tag">Полная 3D-сцена + хват рука-к-руке</span></div><div>▶ Играть</div></div>
+      <div class="gamecard" onclick="post('security-game')"><div><div class="gameemoji">🔦🪪</div><h3>Security VR</h3><p>Охрана клуба: сканер и алкотестер работают наведением. Каждые 5 решений меняются правила смены. Собирай серии правильных решений, улучшай точность и личный рекорд. Есть пауза, захват гостей и предметов.</p><span class="tag">Смены · Серии · Рекорд · Управление наведением</span></div><div>▶ Играть</div></div>
     </div>
   </section>
   <section id="fruitScreen" class="screen"><div class="gamebar"><h2>Fruit Slice VR</h2><div class="score">🍉 <span id="fruitScore">0</span> &nbsp; ❤️ <span id="fruitLives">3</span></div><button class="gamebtn" onclick="showHome()">← Игры</button></div><div class="arena"><canvas id="fruitCanvas"></canvas><div class="help">Сожми большой палец с указательным и проведи через фрукт. Бомбы режь нельзя.</div></div></section>

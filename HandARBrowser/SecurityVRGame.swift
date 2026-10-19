@@ -179,6 +179,7 @@ private final class MyHand {
     private var fingers: [SCNNode] = []
     private(set) var worldPosition = SIMD3<Float>(0, 0, 0)
     private(set) var worldSpeed: Float = 0
+    private var hasPosition = false
 
     init() {
         let skin = SCNMaterial()
@@ -218,10 +219,11 @@ private final class MyHand {
     func update(targetWorld: SIMD3<Float>, direction: SIMD3<Float>, dt: Float, gripping: Bool) {
         let previous = worldPosition
         worldPosition = targetWorld
-        if dt > 0.001 {
+        if hasPosition, dt > 0.001 {
             let instant = simd_length(targetWorld - previous) / dt
             worldSpeed = instant * 0.35 + worldSpeed * 0.65
-        }
+        } else { worldSpeed = 0 }
+        hasPosition = true
         node.simdPosition = targetWorld
         node.simdOrientation = simd_quatf(
             from: SIMD3<Float>(0, 1, 0),
@@ -236,8 +238,13 @@ private final class MyHand {
         }
     }
 
-    func reset() {
+    func resetMotion() {
+        hasPosition = false
         worldSpeed = 0
+    }
+
+    func reset() {
+        resetMotion()
         node.removeFromParentNode()
     }
 }
@@ -824,6 +831,30 @@ private final class SecurityGuest {
 
 // MARK: - Игра
 
+// Pure game rules also run in the portable regression suite.
+struct SecurityShiftProgress {
+    var decisions = 0
+    var correct = 0
+    var streak = 0
+    var longestStreak = 0
+    var accuracy: Int { decisions == 0 ? 0 : correct * 100 / decisions }
+    mutating func record(correct value: Bool) -> Int {
+        decisions += 1
+        if value { correct += 1; streak += 1 } else { streak = 0 }
+        longestStreak = max(longestStreak, streak)
+        return value ? min(max(streak - 1, 0) * 10, 50) : 0
+    }
+    static func requiresInspection(wave: Int) -> Bool { wave % 3 == 2 }
+    static func admits(contraband: Bool, drunk: Bool, aggressive: Bool, wave: Int) -> Bool {
+        !contraband && !drunk && (wave % 3 != 0 || !aggressive)
+    }
+    static func rule(wave: Int) -> String {
+        if wave % 3 == 2 { return "Полный досмотр: сканер + алкотестер перед решением" }
+        if wave % 3 == 0 { return "Строгая смена: агрессивных тоже не впускать" }
+        return "Обычная смена: без контрабанды и алкоголя"
+    }
+}
+
 final class SecurityVRGame {
     var onExitRequested: (() -> Void)?
     var onInteraction: (() -> Void)?
@@ -836,6 +867,9 @@ final class SecurityVRGame {
     private var score = 0
     private var wave = 1
     private var servedInWave = 0
+    private var progress = SecurityShiftProgress()
+    private var bestScore = UserDefaults.standard.integer(forKey: "securityVR.bestScore")
+    private var paused = false
 
     private var guest: SecurityGuest?
     private var spawnCooldown: Double = 0.5
@@ -853,15 +887,18 @@ final class SecurityVRGame {
     private let toastLabel = TextSprite()
     private let toolLabel = TextSprite()
     private let rulesBoard = TextSprite()
+    private let inspectionLabel = TextSprite()
+    private let shiftLabel = TextSprite()
 
     private let acceptButton = SecurityButton(title: "✅ ВПУСТИТЬ", color: UIColor(red: 0.15, green: 0.70, blue: 0.32, alpha: 1))
     private let rejectButton = SecurityButton(title: "❌ ОТКАЗАТЬ", color: UIColor(red: 0.80, green: 0.16, blue: 0.22, alpha: 1))
     private let rulesButton = SecurityButton(title: "📜 ПРАВИЛА", color: UIColor(red: 0.35, green: 0.35, blue: 0.42, alpha: 1), hitRadius: 0.22, fontSize: 4.6)
     private let exitButton = SecurityButton(title: "🚪 ВЫХОД", color: UIColor(white: 0.25, alpha: 1), hitRadius: 0.22, fontSize: 4.6)
+    private let pauseButton = SecurityButton(title: "Ⅱ / ▶ ПАУЗА", color: .darkGray, hitRadius: 0.22)
     private var toolButtons: [SecurityTool: SecurityButton] = [:]
     private var decisionButtons: [SecurityButton] { [acceptButton, rejectButton] }
     private var allButtons: [SecurityButton] {
-        decisionButtons + [rulesButton, exitButton] + toolButtons.values.sorted { $0.node.position.x < $1.node.position.x }
+        decisionButtons + [rulesButton, exitButton, pauseButton] + toolButtons.values.sorted { $0.node.position.x < $1.node.position.x }
     }
 
     private var rulesVisible = false
@@ -881,6 +918,7 @@ final class SecurityVRGame {
 
     private var previousPinch = false
     private var uiClickGate = ReleaseClickGate<ObjectIdentifier>()
+    private var toolDwellGate = ReleaseClickGate<SecurityTool>()
     private let dwellRing = DwellProgressRing()
     private var lastFrameTime = CACurrentMediaTime()
 
@@ -895,6 +933,7 @@ final class SecurityVRGame {
     func start(in scene: SCNScene, cameraOrigin: SIMD3<Float>, cameraForward: SIMD3<Float>) {
         guard !isRunning else { return }
         uiClickGate.cancel()
+        toolDwellGate.cancel()
         isRunning = true
         self.scene = scene
 
@@ -922,6 +961,8 @@ final class SecurityVRGame {
         score = 0
         wave = 1
         servedInWave = 0
+        progress = SecurityShiftProgress()
+        paused = false
         spawnCooldown = 0.5
         walkSpeed = 0.8
         contrabandChance = 0.35
@@ -944,6 +985,7 @@ final class SecurityVRGame {
 
     func stop() {
         uiClickGate.cancel()
+        toolDwellGate.cancel()
         guard isRunning else { return }
         isRunning = false
         guest?.removeFromWorld()
@@ -1208,6 +1250,15 @@ final class SecurityVRGame {
     }
 
     private func buildHUD() {
+        pauseButton.node.position = SCNVector3(0, 2.4, -0.1)
+        pauseButton.node.scale = SCNVector3(0.8, 0.8, 0.8)
+        root.addChildNode(pauseButton.node)
+        inspectionLabel.position = SCNVector3(0, 1.5, 0.2)
+        inspectionLabel.scale = SCNVector3(0.0017, 0.0017, 0.0017)
+        root.addChildNode(inspectionLabel)
+        shiftLabel.position = SCNVector3(0, 2.65, -0.3)
+        shiftLabel.scale = SCNVector3(0.0015, 0.0015, 0.0015)
+        root.addChildNode(shiftLabel)
         // Верхний ряд — деньги/очки/волна
         moneyLabel.setText("💰 $0", color: UIColor(red: 1, green: 0.82, blue: 0.25, alpha: 1))
         moneyLabel.position = SCNVector3(-1.05, 1.92, 0.0)
@@ -1274,9 +1325,9 @@ final class SecurityVRGame {
     private static let rulesText = """
     📜 ПРАВИЛА КЛУБА
 
-    1. 📡 СКАНЕР — удержание на груди:
+    1. 📡 СКАНЕР — наведение на грудь:
     обыск контрабанды.
-    2. 🫁 АЛКО — удержание на лице:
+    2. 🫁 АЛКО — наведение на лицо:
     проверка на трезвость.
     3. 📦 С контрабандой и 🍺 пьяных
     в клуб не пускай.
@@ -1291,12 +1342,30 @@ final class SecurityVRGame {
     8. 💦 Водянка — агрессору в нос,
     ⚡ ШОКЕР оглушает (тоже штраф
     по мирным!).
+    9. В режиме щипка своди пальцы для
+    сканирования. В режиме удержания
+    просто держи курсор на цели.
+    10. Каждые 5 решений — новая смена.
+    Читай её правило над входом.
+    Пауза и потеря руки останавливают игру.
     """
 
     private func refreshHUD() {
+        if score > bestScore {
+            bestScore = score
+            UserDefaults.standard.set(bestScore, forKey: "securityVR.bestScore")
+        }
         moneyLabel.setText("💰 $\(money)", color: UIColor(red: 1, green: 0.82, blue: 0.25, alpha: 1))
-        scoreLabel.setText("⭐ Очки: \(score)")
-        waveLabel.setText("👥 Волна \(wave)")
+        scoreLabel.setText("⭐ \(score) · Рекорд \(bestScore)")
+        waveLabel.setText("Смена \(wave) · \(servedInWave)/5 · Серия \(progress.streak) · \(progress.accuracy)%")
+        shiftLabel.setText(SecurityShiftProgress.rule(wave: wave))
+    }
+
+    private func refreshInspection() {
+        guard let guest else { inspectionLabel.setText("Ожидание гостя"); return }
+        let body = guest.scanned ? (guest.hasContraband ? "ЗАПРЕТ" : "чисто") : "не проверен"
+        let breath = guest.breathTested ? (guest.isDrunk ? "АЛКОГОЛЬ" : "трезвый") : "не проверен"
+        inspectionLabel.setText("Сканер: \(body) · Алкотестер: \(breath)")
     }
 
     private func refreshToolHighlight() {
@@ -1374,7 +1443,8 @@ final class SecurityVRGame {
     }
 
     /// Отпустили щипок: предмет летит по броску, гость падает на пол.
-    private func releaseHold() {
+    private func releaseHold(cancelled: Bool = false) {
+        if cancelled { heldVelocity = .zero }
         if let item = heldItem {
             heldItem = nil
             let currentWorld = item.presentation.simdWorldPosition
@@ -1404,17 +1474,21 @@ final class SecurityVRGame {
         if let guest = heldGuest {
             heldGuest = nil
             heldGuestHand = nil
+            if cancelled { guest.dropToFloor(); return }
             if guest.root.position.z < 0 {
                 // Дотащил до половины комнаты со дверью — значит выкидывает.
                 guest.ejectThroughDoor()
                 guest.dropToFloor()
-                money += 35
-                score += 50
-                if guest.isAggressive {
+                let correct = !SecurityShiftProgress.admits(contraband: guest.hasContraband, drunk: guest.isDrunk,
+                                                           aggressive: guest.isAggressive, wave: wave)
+                score += progress.record(correct: correct)
+                money += correct ? 35 : -20
+                score += correct ? 50 : -60
+                if guest.isAggressive && correct {
                     money += 15
                     score += 40
                 }
-                toastLabel.setText("🚪 Выкинул гостя за дверь! +$35")
+                toastLabel.setText(correct ? "🚪 Нарушитель выведен! +$35" : "Отказал чистому гостю: -$20")
                 refreshHUD()
                 servedInWave += 1
                 if servedInWave >= 5 { nextWave() }
@@ -1495,9 +1569,11 @@ final class SecurityVRGame {
 
     func cancelInput() {
         uiClickGate.cancel()
+        toolDwellGate.cancel()
         dwellRing.isHidden=true
         previousPinch = false
-        if isRunning { releaseHold() }
+        myHand.resetMotion()
+        if isRunning { releaseHold(cancelled: true); guest?.cancelScan() }
     }
 
     func update(ray: WorldRay?, pinch requestedPinch: Bool, allowBegin: Bool = true, dwell: Bool = false) {
@@ -1511,10 +1587,12 @@ final class SecurityVRGame {
         let pinchReleased = !pinch && previousPinch
         previousPinch = pinch
 
-        updateGuest(dt: dt)
-        updateEffects(dt: dt)
-        updateMyHand(ray: ray, dt: dt, gripping: pinch)
-        punchCooldown = max(punchCooldown - dt, 0)
+        if ray == nil {
+            cancelInput()
+            myHand.node.isHidden = true
+            hintLabel.setText("Пауза: наведи руку или контроллер обратно в зал")
+            return
+        }
 
         // Подсветка наведением
         for button in allButtons {
@@ -1536,17 +1614,36 @@ final class SecurityVRGame {
                 selectedTool = tool
                 refreshToolHighlight()
             } else if uiTarget === exitButton { onExitRequested?() }
+            else if uiTarget === pauseButton {
+                paused.toggle()
+                releaseHold(cancelled: true)
+                guest?.cancelScan()
+            }
             else if uiTarget === rulesButton {
                 rulesVisible.toggle()
                 rulesBoard.isHidden = !rulesVisible
-            } else if guest?.phase == .atGate, uiTarget === acceptButton { decide(accept:true) }
+            } else if paused || rulesVisible { return }
+            else if guest?.phase == .atGate, uiTarget === acceptButton { decide(accept:true) }
             else if guest?.phase == .atGate, uiTarget === rejectButton { decide(accept:false) }
             else { return }
             onInteraction?()
             UIImpactFeedbackGenerator(style:.light).impactOccurred()
             return
         }
-        if uiTarget != nil { return }
+        if paused || rulesVisible {
+            toolDwellGate.cancel()
+            myHand.resetMotion()
+            guest?.cancelScan()
+            myHand.node.isHidden = true
+            hintLabel.setText(paused ? "Пауза · нажми Ⅱ / ▶ для продолжения" : "Правила открыты · игра на паузе")
+            return
+        }
+        updateGuest(dt: dt)
+        updateEffects(dt: dt)
+        updateMyHand(ray: ray, dt: dt, gripping: pinch)
+        punchCooldown = max(punchCooldown - dt, 0)
+        refreshInspection()
+        if uiTarget != nil { guest?.cancelScan(); toolDwellGate.cancel(); return }
 
         // Попадания в гостя (мировые координаты — как у луча трекинга).
         var hitChest = false
@@ -1572,7 +1669,7 @@ final class SecurityVRGame {
         updateFreeItems(dt: dt)
 
         // Удар кулаком: быстрый замах вплотную к гостю (не держа его).
-        if heldItem == nil, heldGuest == nil, myHand.worldSpeed > 1.8, let guest,
+        if !dwell, heldItem == nil, heldGuest == nil, myHand.worldSpeed > 1.8, let guest,
            guest.phase != .leaving, guest.phase != .held, guest.phase != .dropping {
             punchGuest(guest, at: myHand.worldPosition)
         }
@@ -1598,7 +1695,7 @@ final class SecurityVRGame {
         }
 
         // Удержание щипка — сканирование текущим инструментом.
-        if pinch, heldItem == nil, let guest, guest.phase == .atGate {
+        if (pinch || dwell), heldItem == nil, heldGuest == nil, let guest, guest.phase == .atGate {
             switch selectedTool {
             case .scanner where hitChest:
                 if !guest.scanned { guest.beginScan(kind: .body) }
@@ -1607,13 +1704,15 @@ final class SecurityVRGame {
                 if !guest.breathTested { guest.beginScan(kind: .face) }
                 guest.addScanProgress(dt * 0.9)
             default:
-                if hitChest || hitFace {
-                    // удержание без сканирующего инструмента — ничего
-                }
+                guest.cancelScan()
             }
-        }
+        } else { guest?.cancelScan() }
 
-        guard pinchPressed else { return }
+        let actionable = guest != nil && (guest?.phase == .atGate || guest?.phase == .attacking)
+            && (hitChest || hitFace) && (selectedTool == .waterPistol || selectedTool == .taser)
+        let dwellAction = toolDwellGate.update(target: dwell && actionable ? selectedTool : nil,
+                                             down: false, allowBegin: false, dwell: dwell, at: now) != nil
+        guard pinchPressed || dwellAction else { return }
 
         if let ray {
             // Кисть к его кисти + щипок — хват «рука к руке».
@@ -1709,8 +1808,8 @@ final class SecurityVRGame {
 
         if guest.phase == .atGate, guest.arrived, heldItem == nil, heldGuest == nil {
             switch selectedTool {
-            case .scanner: hintLabel.setText("📡 Щипок на груди (удержание) — осмотр. Голова — поговорить")
-            case .breathalyzer: hintLabel.setText("🫁 Щипок на лицо (удержание) — проверка на трезвость")
+            case .scanner: hintLabel.setText("📡 Наведи на грудь и удерживай · в режиме щипка сведи пальцы")
+            case .breathalyzer: hintLabel.setText("🫁 Наведи на лицо и удерживай · в режиме щипка сведи пальцы")
             case .waterPistol: hintLabel.setText("💦 Щипок по гостю — брызнуть водой")
             case .taser: hintLabel.setText("⚡ Щипок по гостю — оглушить")
             case .hand: hintLabel.setText("🤝 Кисть к его руке + щипок — схватить")
@@ -1755,20 +1854,23 @@ final class SecurityVRGame {
 
     private func decide(accept: Bool) {
         guard let guest, guest.phase == .atGate else { return }
-
-        if accept, guest.isAggressive && !guest.scanned {
-            // Отказ агрессивному провоцирует нападение; пускать можно, но рискованно.
+        if SecurityShiftProgress.requiresInspection(wave: wave), (!guest.scanned || !guest.breathTested) {
+            toastLabel.setText("Сначала заверши сканирование груди и алкотестер")
+            return
         }
+        let clean = SecurityShiftProgress.admits(contraband: guest.hasContraband, drunk: guest.isDrunk,
+                                                 aggressive: guest.isAggressive, wave: wave)
+        let bonus = progress.record(correct: accept == clean)
+        score += bonus
         if !accept, guest.isAggressive {
             guest.beginAttack()
             toastLabel.setText("😡 Он разозлился и бросился на тебя!")
             hintLabel.setText("🚨 ОН НАПАЁТ! 💦 или ⚡!")
             servedInWave += 1
             if servedInWave >= 5 { nextWave() }
+            refreshHUD()
             return
         }
-
-        let clean = !guest.hasContraband && !guest.isDrunk
         if accept && clean {
             score += 100
             money += 20
@@ -1789,6 +1891,10 @@ final class SecurityVRGame {
             score -= 90
             money -= 30
             toastLabel.setText("🥴 Пьяного в клуб! -$30")
+        } else if accept && !clean {
+            score -= 100
+            money -= 30
+            toastLabel.setText("🚫 Нарушил строгие правила: агрессивный в клубе. -$30")
         } else {
             score -= 60
             toastLabel.setText("❌ Отказал чистому гостю. -60")

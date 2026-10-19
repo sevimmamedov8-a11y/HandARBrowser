@@ -32,6 +32,7 @@ final class Harness {
  var notice="",opened:[URL]=[],cancels=0,opaque=false,fallbacks=0
  func setDirectVideoNotice(_ text:String) {notice=text}
  func cancelHandInteraction() {cancels+=1}
+ func releasePointer() {}
  func activateDirectVideoAudio() {}
  func updateBrowserSnapshot() {}
  func updateVRDesktopStatus() {}

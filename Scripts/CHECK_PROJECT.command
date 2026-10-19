@@ -2,7 +2,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
-echo "== Hand AR Browser V81 project check =="
+echo "== Hand AR Browser V82 project check =="
 for f in "HandARBrowser.xcodeproj/project.pbxproj" "HandARBrowser/AppDelegate.swift" "HandARBrowser/MainViewController.swift" "HandARBrowser/HandGesture.swift" "HandARBrowser/CinemaHall.swift" "HandARBrowser/CinemaPlayback.swift" "HandARBrowser/Info.plist" "HandARBrowser/WebInput.js"; do
   [[ -f "$f" ]] && echo "[OK] $f" || { echo "[FAIL] missing $f"; exit 1; }
 done
@@ -49,9 +49,9 @@ grep -Fq "private let headNode = SCNNode()" "$SRC"
 grep -Fq "headNode.addChildNode(leftCameraNode)" "$SRC"
 grep -Fq "headNode.addChildNode(rightCameraNode)" "$SRC"
 grep -Fq "profile.ipdMM * 0.0005" "$SRC"
-grep -Fq "browserWorldDistance: Float = 1.65" "$SRC"
+grep -Fq "browserWorldDistance: Float = 2.15" "$SRC"
 
-# --- cinema mode: video in TikTok/YouTube fills the field of view ---
+# --- video remains in a spatial window; the hall is opened explicitly ---
 grep -Fq "private static let cinemaPanelWidth" "$SRC"
 grep -Fq "private static let cinemaPanelHeight" "$SRC"
 grep -Fq "func setCinemaMode(_ active: Bool)" "$SRC"
@@ -164,7 +164,7 @@ grep -Fq 'applySpatialSurface(home: true, transparent: true)' "$SRC"
 grep -Fq 'case "environment-camera", "environment-dark"' "$SRC"
 grep -Fq 'handar-hover' "$JS"
 
-echo "[OK] V81 static project checks"
+echo "[OK] V82 static project checks"
 
 if command -v swiftc >/dev/null 2>&1; then
   # Parser-only validation can fail on Linux because Apple SDK modules are unavailable;

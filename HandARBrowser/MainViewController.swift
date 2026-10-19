@@ -307,9 +307,6 @@ final class VRCompositor {
         float2 p = (eyeUV - center) * float2(u.aspect, 1.0);
         float r2 = dot(p, p);
         float r = sqrt(r2);
-        if (u.rClip < 5.0 && r > u.rClip) {
-            return float4(0.0, 0.0, 0.0, 1.0);
-        }
 
         // Предыскажение: берём источник дальше от центра, чтобы линза,
         // растягивающая картинку наружу, вернула прямые линии прямыми.
@@ -319,9 +316,6 @@ final class VRCompositor {
         float2 sampleR = center + p * (f * (1.0 + u.chroma)) * inv;
         float2 sampleB = center + p * (f * (1.0 - u.chroma)) * inv;
 
-        if (sampleG.x < 0.0 || sampleG.x > 1.0 || sampleG.y < 0.0 || sampleG.y > 1.0) {
-            return float4(0.0, 0.0, 0.0, 1.0);
-        }
 
         // Never let bilinear filtering read pixels from the other eye.
         float2 inset = float2(1.0 / float(eyes.get_width()), 0.5 / float(eyes.get_height()));
@@ -343,7 +337,10 @@ final class VRCompositor {
             float2 camScale = (eye < 0.5) ? u.camScaleL : u.camScaleR;
             float2 camOffset = (eye < 0.5) ? u.camOffsetL : u.camOffsetR;
             camUV = sampleG * camScale + camOffset;
-            validCamUV = camUV.x >= 0.0 && camUV.x <= 1.0 && camUV.y >= 0.0 && camUV.y <= 1.0;
+            // Rounding / intrinsics updates at the last pixel must not create a
+            // black border. The calibrated coverage already fits the full frame.
+            camUV = clamp(camUV, float2(0.0), float2(1.0));
+            validCamUV = true;
             if (validCamUV) {
                 float yy = camY.sample(smp, camUV).r;
                 float2 cc = camCbCr.sample(smp, camUV).rg;
@@ -366,14 +363,7 @@ final class VRCompositor {
             }
         }
 
-        // Мягкий край именно круглой линзы: внутри круга 100%, на
-        // последних ~0.008 единицы плавно уходим в чёрный.
-        float vignette = 1.0;
-        if (u.rClip < 5.0) {
-            float softEdge = max(u.rClip - 0.008, 0.0);
-            vignette = 1.0 - smoothstep(softEdge, u.rClip, r);
-        }
-        return float4(color * vignette, 1.0);
+        return float4(color, 1.0);
     }
     """
 
@@ -432,6 +422,8 @@ struct ToolbarItem {
         case back
         case home
         case center
+        case reload
+        case size
     }
 
     let title: String
@@ -627,6 +619,12 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     private let cinemaWebPointers = [UIView(), UIView()]
     private var cinemaScreenMappings: [CinemaScreenHomography?] = [nil, nil]
     private var cinemaWebScreenActive: Bool { cinemaActive && directVideoActive }
+    private var liveWebTransform: simd_float4x4? {
+        cinemaWebScreenActive ? cinemaHall.screenWorldTransform : browserWorldTransform
+    }
+    private var liveWebSize: SIMD2<Float> {
+        cinemaWebScreenActive ? SIMD2(CinemaHall.screenWidth, CinemaHall.screenHeight) : SIMD2(browserWorldWidth, browserWorldHeight)
+    }
     private var directVideoLeft: WKWebView!
     private var directVideoRight: WKWebView!
     private let directVideoLensMask = DirectVideoLensMaskView(frame: .zero)
@@ -694,7 +692,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     private var linkItems: [ToolbarItem] = []
     private var toolbarButtonNodes: [SCNNode] = []
     private var toolbarCenterY: Float = 0
-    private let toolbarButtonHeight: Float = 0.072
+    private let toolbarButtonHeight: Float = 0.14
     private var highlightedToolbarIndex: Int?
     private var toolbarImages: [(normal: UIImage, highlighted: UIImage)] = []
 
@@ -769,7 +767,8 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     private static let cinemaPanelHeight: Float = 1.77
     private var browserWorldWidth: Float = MainViewController.defaultPanelWidth
     private var browserWorldHeight: Float = MainViewController.defaultPanelHeight
-    private let browserWorldDistance: Float = 1.65
+    // Leave visible room around the floating window, including its toolbar.
+    private let browserWorldDistance: Float = 2.15
     private var isCinemaMode = false
     private var browserPlaneGeometry: SCNPlane!
     private var browserFrameGeometry: SCNBox!
@@ -1125,60 +1124,14 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         browserHandleNode = handleNode
     }
 
-    /// Переключает браузер между обычным VR-экраном и большим VR-экраном
-    /// для видео. Это всё ещё та же мировая стерео-панель: меняется только
-    /// её размер, поэтому YouTube остаётся внутри VR-композитора.
+    /// A site's fullscreen request stays inside its spatial window. The hall
+    /// is an explicit, separate app; playing a movie must not resize the desktop.
     private func setCinemaMode(_ active: Bool) {
-        // В 3D-зале экраном зала управляет CinemaHall: размеры и содержимое
-        // панели меняем только сами, иначе полноэкранное видео на странице
-        // сломало бы экран и включило прямой видеослой поверх зала.
-        guard inVR, !cinemaActive else { return }
-
-        if !active {
-            isCinemaMode = false
-            browserWorldWidth = Self.defaultPanelWidth
-            browserWorldHeight = Self.defaultPanelHeight
-            browserPlaneGeometry.width = CGFloat(browserWorldWidth)
-            browserPlaneGeometry.height = CGFloat(browserWorldHeight)
-            browserFrameGeometry.width = CGFloat(browserWorldWidth) + 0.018
-            browserFrameGeometry.height = CGFloat(browserWorldHeight) + 0.018
-            browserHandleNode.position = SCNVector3(0, -Double(browserWorldHeight) * 0.5 - 0.028, 0)
-            toolbarNode.isHidden = false
-            hideDirectVideoStage()
-            startBrowserCapture()
-            return
+        guard inVR, !cinemaActive, !directVideoActive else { return }
+        isCinemaMode = false
+        if active, let url = browser.url, ["https", "http"].contains(url.scheme?.lowercased() ?? "") {
+            openExternalPage(url)
         }
-
-        guard let url = browser.url, isDirectVideoSite(url) else {
-            // Сохраняем старый fallback для сайтов, где прямой WKWebView слой
-            // не нужен. Для YouTube/TikTok ниже используется реальный video layer.
-            isCinemaMode = true
-            browserWorldWidth = Self.cinemaPanelWidth
-            browserWorldHeight = browserWorldWidth * Self.defaultPanelAspect
-            browserPlaneGeometry.width = CGFloat(browserWorldWidth)
-            browserPlaneGeometry.height = CGFloat(browserWorldHeight)
-            browserFrameGeometry.width = CGFloat(browserWorldWidth) + 0.018
-            browserFrameGeometry.height = CGFloat(browserWorldHeight) + 0.018
-            browserHandleNode.position = SCNVector3(0, -Double(browserWorldHeight) * 0.5 - 0.028, 0)
-            toolbarNode.isHidden = true
-            startBrowserCapture()
-            return
-        }
-
-        isCinemaMode = true
-        browserWorldWidth = Self.cinemaPanelWidth
-        browserWorldHeight = browserWorldWidth * Self.defaultPanelAspect
-        browserPlaneGeometry.width = CGFloat(browserWorldWidth)
-        browserPlaneGeometry.height = CGFloat(browserWorldHeight)
-        browserFrameGeometry.width = CGFloat(browserWorldWidth) + 0.018
-        browserFrameGeometry.height = CGFloat(browserWorldHeight) + 0.018
-        browserHandleNode.position = SCNVector3(0, -Double(browserWorldHeight) * 0.5 - 0.028, 0)
-        toolbarNode.isHidden = true
-
-        pauseAndMuteBrowserMedia()
-        activateMediaAudioSession()
-        presentDirectVideoStage(url: url)
-        UIImpactFeedbackGenerator(style: .soft).impactOccurred()
     }
 
     private func isDirectVideoSite(_ url: URL) -> Bool {
@@ -1190,13 +1143,14 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         var items: [ToolbarItem] = [
             ToolbarItem(title: "Домой", action: .home),
             ToolbarItem(title: "Назад", action: .back),
-            ToolbarItem(title: "YouTube", action: .open(Self.youTubeURL)),
-            ToolbarItem(title: "Центр", action: .center)
+            ToolbarItem(title: "Обновить", action: .reload),
+            ToolbarItem(title: "Центр", action: .center),
+            ToolbarItem(title: "Размер", action: .size)
         ]
 
         let gap: Float = 0.014
         let count = Float(items.count)
-        let buttonWidth = min(0.32, (browserWorldWidth - gap * (count - 1)) / count)
+        let buttonWidth = min(0.42, (browserWorldWidth - gap * (count - 1)) / count)
         toolbarCenterY = -browserWorldHeight * 0.5 - 0.085 - toolbarButtonHeight * 0.5
 
         for index in items.indices {
@@ -1487,7 +1441,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
             pointer.isHidden = true
             directVideoStage.addSubview(pointer)
         }
-        for _ in 0..<2 {
+        for eye in 0..<2 {
             let button = UIButton(type: .system)
             var config = UIButton.Configuration.filled()
             config.title = "‹ Домой"
@@ -1514,12 +1468,14 @@ final class MainViewController: UIViewController, MTKViewDelegate {
             let label = UILabel()
             label.textColor = .white
             label.backgroundColor = UIColor(white: 0.1, alpha: 0.88)
-            label.font = .systemFont(ofSize: 12)
+            label.font = .systemFont(ofSize: 22, weight: .medium)
             label.textAlignment = .center
             label.numberOfLines = 3
             label.layer.cornerRadius = 10
             label.clipsToBounds = true
-            directVideoStage.addSubview(label)
+            // A loading/error notice belongs to the window, not to the headset.
+            label.isUserInteractionEnabled = false
+            (eye == 0 ? directVideoLeft! : directVideoRight!).addSubview(label)
             directVideoStatusLabels.append(label)
         }
     }
@@ -1688,34 +1644,15 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     }
 
     private func layoutDirectVideoStage() {
-        let bounds = view.bounds
-        directVideoStage.frame = bounds
+        directVideoStage.frame = view.bounds
         directVideoLensMask.isHidden = true
-        for button in directVideoExitButtons + liveNavigationButtons { button.isHidden = cinemaWebScreenActive }
-        if cinemaWebScreenActive { updateCinemaWebScreen(); return }
-        let half = bounds.width * 0.5
-        let header: CGFloat = 50
-        for (eye, webView) in [directVideoLeft!, directVideoRight!].enumerated() {
-            // Each viewport occupies exactly one half, including all four corners.
-            let origin = CGFloat(eye) * half
-            cinemaEyeContainers[eye].frame = CGRect(x: origin, y: header, width: half, height: max(1, bounds.height-header))
-            cinemaEyeContainers[eye].clipsToBounds = true
-            webView.layer.transform = CATransform3DIdentity
-            webView.layer.anchorPoint = CGPoint(x: 0.5, y: 0.5)
-            webView.frame = cinemaEyeContainers[eye].bounds
-            webView.isHidden = false
-            webView.layer.cornerRadius = 0
-            webView.layer.masksToBounds = false
-            cinemaWebPointers[eye].isHidden = true
-            directVideoExitButtons[eye].frame = CGRect(x: origin+half*0.5-58, y: 7, width: 116, height: 36)
-            liveNavigationButtons[eye*2].frame = CGRect(x: origin+half*0.5-108, y: 7, width: 42, height: 36)
-            liveNavigationButtons[eye*2+1].frame = CGRect(x: origin+half*0.5+66, y: 7, width: 42, height: 36)
-            directVideoStatusLabels[eye].frame = CGRect(x: origin+20, y: bounds.height-86, width: half-40, height: 64)
-        }
+        // Navigation is the same world-space toolbar used by the menu/apps.
+        for button in directVideoExitButtons + liveNavigationButtons { button.isHidden = true }
+        if directVideoActive { updateCinemaWebScreen() }
     }
 
     private func navigateLiveBrowser(back: Bool) {
-        cancelHandInteraction()
+        releasePointer() // Keep the toolbar's dwell latch until the finger leaves.
         playUIConfirmation()
         liveProcessRecoveries.removeAll()
         if back {
@@ -1738,7 +1675,8 @@ final class MainViewController: UIViewController, MTKViewDelegate {
 
     private func projectedCinemaCorner(_ local: SIMD3<Float>, eye: Int) -> SIMD2<Double>? {
         let camera = eye == 0 ? leftCameraNode : rightCameraNode
-        let world = cinemaHall.screenWorldTransform * SIMD4<Float>(local, 1)
+        guard let transform = liveWebTransform else { return nil }
+        let world = transform * SIMD4<Float>(local, 1)
         let point = camera.simdWorldTransform.inverse * world
         let depth = -point.z
         guard depth > 0.03 else { return nil }
@@ -1765,10 +1703,14 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     }
 
     private func updateCinemaWebScreen() {
-        guard cinemaWebScreenActive, view.bounds.width > 1, view.bounds.height > 1 else { return }
+        guard directVideoActive, liveWebTransform != nil, view.bounds.width > 1, view.bounds.height > 1 else {
+            directVideoLeft?.isHidden = true
+            directVideoRight?.isHidden = true
+            return
+        }
         let halfWidth = view.bounds.width * 0.5
-        let sourceSize = CGSize(width: 960, height: 540)
-        let w = CinemaHall.screenWidth * 0.5, h = CinemaHall.screenHeight * 0.5
+        let sourceSize = cinemaWebScreenActive ? CGSize(width: 960, height: 540) : CGSize(width: 1280, height: 720)
+        let w = liveWebSize.x * 0.5, h = liveWebSize.y * 0.5
         let localCorners = [SIMD3<Float>(-w,h,0.012), SIMD3<Float>(w,h,0.012),
                             SIMD3<Float>(w,-h,0.012), SIMD3<Float>(-w,-h,0.012)]
         CATransaction.begin()
@@ -1801,8 +1743,9 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         }
         directVideoLensMask.isHidden = true
         for eye in 0..<2 {
-            directVideoStatusLabels[eye].frame = CGRect(x: CGFloat(eye)*halfWidth+20,
-                y: view.bounds.height-86, width: halfWidth-40, height: 64)
+            directVideoStatusLabels[eye].frame = CGRect(x: 36, y: sourceSize.height-126,
+                width: sourceSize.width-72, height: 90)
+            (eye == 0 ? directVideoLeft! : directVideoRight!).bringSubviewToFront(directVideoStatusLabels[eye])
         }
         CATransaction.commit()
     }
@@ -1827,14 +1770,6 @@ final class MainViewController: UIViewController, MTKViewDelegate {
             directLeftInput.release(webView: directVideoLeft)
             directRightInput.release(webView: directVideoRight)
             return
-        }
-        if let frame = tracking.latestFrameCopy {
-            let oriented = sample.indexTip.applying(frame.displayTransform(for: currentInterfaceOrientation(), viewportSize: view.bounds.size))
-            let point = CGPoint(x: oriented.x * view.bounds.width, y: oriented.y * view.bounds.height)
-            if handleDirectVideoExit(at: point, pinch: sample.clickPinch, allowBegin:sample.clickBegan, dwell:usesDwell) {
-                updateCinemaWebPointers(nil)
-                return
-            }
         }
         directVideoPointer.isHidden = true
         if cinemaHall.update(ray: ray, pinch: sample.clickPinch, allowBegin:sample.clickBegan, dwell:usesDwell) {
@@ -1861,28 +1796,6 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         updateDirectVideoInput(normalizedPoint: uv, pinch: sample.clickPinch, allowBegin:sample.clickBegan, dwell:usesDwell)
     }
 
-    private func directVideoTarget(for point: CGPoint) -> (WKWebView, CGPoint)? {
-        if cinemaWebScreenActive {
-            let eye = point.x < view.bounds.midX ? 0 : 1
-            let local = SIMD2<Double>(Double(point.x - CGFloat(eye) * view.bounds.width * 0.5), Double(point.y))
-            guard let mapping = cinemaScreenMappings[eye], let uv = mapping.unmap(local),
-                  (0...1).contains(uv.x), (0...1).contains(uv.y) else { return nil }
-            return (eye == 0 ? directVideoLeft : directVideoRight, CGPoint(x: CGFloat(uv.x), y: CGFloat(uv.y)))
-        }
-        guard let left = directVideoLeft, let right = directVideoRight else { return nil }
-        let candidates: [(WKWebView, CGRect)] = [
-            (left, cinemaEyeContainers[0].frame),
-            (right, cinemaEyeContainers[1].frame)
-        ]
-        for (w, frame) in candidates {
-            guard frame.contains(point), frame.width > 1, frame.height > 1 else { continue }
-            let local = CGPoint(x: (point.x - frame.minX) / frame.width,
-                                y: (point.y - frame.minY) / frame.height)
-            return (w, local)
-        }
-        return nil
-    }
-
     private func setDirectVideoNotice(_ message: String) {
         for label in directVideoStatusLabels {
             label.text = message
@@ -1895,37 +1808,10 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         if cinemaActive { exitCinema() }
         else {
             hideDirectVideoStage()
-            setCinemaMode(false)
+            isCinemaMode = false
             openVRDesktop()
             startBrowserCapture()
         }
-    }
-
-    private func handleDirectVideoExit(at point: CGPoint, pinch: Bool, allowBegin: Bool = true, dwell: Bool = false) -> Bool {
-        updateFlatWebPointers(nil)
-        let buttons = directVideoExitButtons + liveNavigationButtons
-        let selected = buttons.firstIndex { !$0.isHidden && $0.frame.contains(point) }
-        for (index,button) in buttons.enumerated() { button.isHighlighted = index == selected }
-        let confirmed = directVideoClickGate.update(target:selected,down:pinch,allowBegin:allowBegin,dwell:dwell,at:CACurrentMediaTime())
-        directDwellRing.isHidden = directVideoClickGate.dwellProgress <= 0
-        if !directDwellRing.isHidden {
-            if directDwellRing.superlayer == nil { directVideoStage.layer.addSublayer(directDwellRing) }
-            CATransaction.begin();CATransaction.setDisableActions(true)
-            directDwellRing.path=UIBezierPath(arcCenter:point,radius:18,startAngle:-.pi/2,endAngle:1.5 * .pi,clockwise:true).cgPath
-            directDwellRing.fillColor=UIColor.clear.cgColor;directDwellRing.strokeColor=UIColor.cyan.cgColor
-            directDwellRing.lineWidth=3;directDwellRing.strokeEnd=CGFloat(directVideoClickGate.dwellProgress)
-            CATransaction.commit()
-        }
-        guard selected != nil else { return false }
-        directVideoPointer.isHidden = false
-        directVideoPointer.center = point
-        let mirror = CGPoint(x: point.x < view.bounds.midX ? point.x+view.bounds.width*0.5 : point.x-view.bounds.width*0.5, y: point.y)
-        cinemaWebPointers[point.x < view.bounds.midX ? 1 : 0].center = mirror
-        cinemaWebPointers[point.x < view.bounds.midX ? 1 : 0].isHidden = false
-        directLeftInput.release(webView:directVideoLeft)
-        directRightInput.release(webView:directVideoRight)
-        if let confirmed { buttons[confirmed].sendActions(for: .touchUpInside) }
-        return true
     }
 
     private func presentDirectVideoStage(url: URL, browsing: Bool = false) {
@@ -1945,10 +1831,17 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         directVideoGeneration = UUID()
         directVideoSyncInFlight = false
         stopBrowserCapture()
-        // The hall keeps rendering behind the projected live screen.
-        vrView?.isPaused = !cinemaActive
-        directVideoStage.backgroundColor = cinemaActive ? .clear : .black
-        directVideoStage.isOpaque = !cinemaActive
+        // Keep camera, world, frame and toolbar rendering behind the live window.
+        vrView?.isPaused = false
+        directVideoStage.backgroundColor = .clear
+        directVideoStage.isOpaque = false
+        if !cinemaActive {
+            applySpatialSurface(home: false, transparent: false)
+            browserPlaneNode.geometry = nil // Hide the stale snapshot, keep its children.
+            browserHandleNode.isHidden = false
+            toolbarNode.isHidden = false
+            isCinemaMode = false
+        }
         directVideoClickGate.cancel()
         directVideoURL = url
         setDirectVideoNotice("Загружаю страницу…")
@@ -1975,6 +1868,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         vrView?.isPaused = !inVR
         directVideoClickGate.cancel()
         directVideoActive = false
+        browserPlaneNode.geometry = browserPlaneGeometry
         liveBrowserActive = false
         cinemaScreenMappings = [nil, nil]
         updateCinemaWebPointers(nil)
@@ -2273,8 +2167,8 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     /// панель в этот момент ещё скрыта, доигрывать переход не для кого.
     private func resetPanelToDefaultSizeInstantly() {
         isCinemaMode = false
-        browserWorldWidth = Self.defaultPanelWidth
-        browserWorldHeight = Self.defaultPanelHeight
+        browserWorldWidth = SpatialWindowSizing.restoredWidth(defaults: .standard, fallback: Self.defaultPanelWidth)
+        browserWorldHeight = browserWorldWidth * Self.defaultPanelAspect
 
         updatePanelSize(width: browserWorldWidth)
         toolbarNode.opacity = 1
@@ -2897,7 +2791,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         case .b:
             if pressed {
                 if directVideoActive {
-                    closeDirectVideo()
+                    if cinemaActive { closeDirectVideo() } else { navigateLiveBrowser(back: true) }
                 } else if browser.canGoBack {
                     browser.goBack()
                 }
@@ -2918,24 +2812,6 @@ final class MainViewController: UIViewController, MTKViewDelegate {
             controllerHandRoot.isHidden = true
             updateCinemaWebPointers(controllerPointer)
             updateDirectVideoInput(normalizedPoint: controllerPointer, pinch: controllerButtonDown)
-            return
-        }
-        if directVideoActive {
-            controllerHandRoot.isHidden = true
-            let screen = CGPoint(x: controllerPointer.x * view.bounds.width * 0.5, y: controllerPointer.y * view.bounds.height)
-            if handleDirectVideoExit(at: screen, pinch: controllerButtonDown) { return }
-            if let (_, local) = directVideoTarget(for: screen) {
-                directVideoPointer.isHidden = false
-                directVideoPointer.center = screen
-                directVideoPointer.backgroundColor = controllerButtonDown ? UIColor(red: 0.35, green: 0.85, blue: 1, alpha: 0.9) : .white
-                lastBrowserInteractionTime = CACurrentMediaTime()
-                updateDirectVideoInput(normalizedPoint: local, pinch: controllerButtonDown)
-                if controllerButtonDown { activateDirectVideoAudio() }
-            } else {
-                directVideoPointer.isHidden = true
-                directLeftInput.release(webView: directVideoLeft)
-                directRightInput.release(webView: directVideoRight)
-            }
             return
         }
         guard inVR, controllerConnected, let transform = browserWorldTransform else {
@@ -2962,54 +2838,18 @@ final class MainViewController: UIViewController, MTKViewDelegate {
             hit: world
         )
         lastBrowserInteractionTime = CACurrentMediaTime()
-        input.update(normalizedPoint: CGPoint(x: x, y: y), pinch: controllerButtonDown, webView: browser)
-    }
-
-    private func updateFlatWebPointers(_ uv: CGPoint?) {
-        directVideoPointer.isHidden = true
-        for eye in 0..<2 {
-            guard let uv else { cinemaWebPointers[eye].isHidden = true; continue }
-            let frame = cinemaEyeContainers[eye].frame
-            cinemaWebPointers[eye].center = CGPoint(x: frame.minX+uv.x*frame.width, y: frame.minY+uv.y*frame.height)
-            cinemaWebPointers[eye].isHidden = false
+        if directVideoActive {
+            updateDirectVideoInput(normalizedPoint: CGPoint(x: x, y: y), pinch: controllerButtonDown)
+        } else {
+            input.update(normalizedPoint: CGPoint(x: x, y: y), pinch: controllerButtonDown, webView: browser)
         }
     }
 
     private func updateDirectVideoInput(normalizedPoint: CGPoint, pinch: Bool, allowBegin: Bool = true, dwell: Bool = false) {
-        if !cinemaWebScreenActive { updateFlatWebPointers(normalizedPoint) }
+        updateCinemaWebPointers(normalizedPoint)
         // Both eyes must accept the same play/consent controls.
         directLeftInput.update(normalizedPoint: normalizedPoint, pinch: pinch, webView: directVideoLeft, allowBegin:allowBegin, dwell:dwell)
         directRightInput.update(normalizedPoint: normalizedPoint, pinch: pinch, webView: directVideoRight, allowBegin:allowBegin, dwell:dwell)
-    }
-
-    private func handleDirectVideoHands(left: HandSample?, right: HandSample?) {
-        guard let sample = right ?? left, let frame = tracking.latestFrameCopy else {
-            updateFlatWebPointers(nil)
-            directVideoPointer.isHidden = true
-            directLeftInput.release(webView: directVideoLeft)
-            directRightInput.release(webView: directVideoRight)
-            return
-        }
-        let oriented = sample.indexTip.applying(
-            frame.displayTransform(for: currentInterfaceOrientation(), viewportSize: view.bounds.size)
-        )
-        let screenPoint = CGPoint(x: oriented.x * view.bounds.width * 0.5, y: oriented.y * view.bounds.height)
-        if handleDirectVideoExit(at: screenPoint, pinch: sample.clickPinch, allowBegin:sample.clickBegan, dwell:usesDwell) { return }
-        guard let (_, local) = directVideoTarget(for: screenPoint) else {
-            directVideoPointer.isHidden = true
-            if !sample.clickPinch {
-                directLeftInput.release(webView: directVideoLeft)
-                directRightInput.release(webView: directVideoRight)
-            }
-            return
-        }
-        directVideoPointer.isHidden = false
-        directVideoPointer.center = screenPoint
-        directVideoPointer.backgroundColor = sample.clickPinch ? UIColor(red: 0.35, green: 0.85, blue: 1, alpha: 0.9) : .white
-        lastBrowserInteractionTime = CACurrentMediaTime()
-        updateDirectVideoInput(normalizedPoint: local, pinch: sample.clickPinch, allowBegin:sample.clickBegan, dwell:usesDwell)
-        if sample.clickPinch { activateDirectVideoAudio() }
-
     }
 
     private func cancelHandInteraction() {
@@ -3021,7 +2861,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         toolbarClickGate.cancel()
         toolbarDwellRing.isHidden=true
         directDwellRing.isHidden=true
-        updateFlatWebPointers(nil)
+        updateCinemaWebPointers(nil)
         directVideoClickGate.cancel()
     }
 
@@ -3034,7 +2874,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         if freshLeft != nil || freshRight != nil { lastHandSeenTime = now }
         if !directVideoActive && !cinemaActive { queueHandForegroundMask(left:freshLeft,right:freshRight) }
         // Resizing consumes both pinches; neither may turn into a click afterward.
-        if !cinemaActive, !securityGameActive, !directVideoActive,
+        if !cinemaActive, !securityGameActive,
            let left = freshLeft, let right = freshRight, left.clickPinch, right.clickPinch {
             cancelHandInteraction()
             handOwnership.suppressUntilOpen()
@@ -3070,16 +2910,12 @@ final class MainViewController: UIViewController, MTKViewDelegate {
             updateControllerHand()
             return
         }
-        if let sample=routed, sample.isFist, cinemaActive || directVideoActive || securityGameActive {
+        if let sample=routed, sample.isFist, cinemaActive || securityGameActive {
             cancelHandInteraction()
             return
         }
         if cinemaWebScreenActive {
             handleCinemaWebHands(left: left, right: right)
-            return
-        }
-        if directVideoActive {
-            handleDirectVideoHands(left: left, right: right)
             return
         }
         if securityGameActive {
@@ -3168,8 +3004,8 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         showRay(from: ray, hit: hit.point)
         showPointerDot(at: hit.point, transform: transform, active: sample.clickPinch)
 
-        // Планка ссылок над браузером. Во время видео она скрыта —
-        // пропускаем и зону попадания, иначе палец «щёлкал» бы по невидимке.
+        // The shared toolbar stays below the window during browser playback.
+        // Invisible controls (e.g. in the hall) must not receive a hit.
         if !isCinemaMode, !toolbarNode.isHidden, abs(hit.localY - toolbarCenterY) <= toolbarButtonHeight * 0.5 {
             let index = linkItems.firstIndex { hit.localX >= $0.minX && hit.localX <= $0.maxX }
             highlightToolbar(index)
@@ -3193,11 +3029,13 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         }
 
         lastBrowserInteractionTime = CACurrentMediaTime()
-        input.update(
-            normalizedPoint: CGPoint(x: CGFloat(normalizedX), y: CGFloat(normalizedY)),
-            pinch: sample.clickPinch,
-            webView: browser, allowBegin: sample.clickBegan, dwell:usesDwell
-        )
+        let uv = CGPoint(x: CGFloat(normalizedX), y: CGFloat(normalizedY))
+        if directVideoActive {
+            updateDirectVideoInput(normalizedPoint: uv, pinch: sample.clickPinch, allowBegin: sample.clickBegan, dwell: usesDwell)
+        } else {
+            input.update(normalizedPoint: uv, pinch: sample.clickPinch, webView: browser,
+                         allowBegin: sample.clickBegan, dwell: usesDwell)
+        }
     }
 
     private func updateResize(left: HandSample, right: HandSample) {
@@ -3227,6 +3065,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         guard isResizing else { return }
         isResizing = false
         resizeStartHandDistance = 0
+        UserDefaults.standard.set(Double(browserWorldWidth), forKey: SpatialWindowSizing.storageKey)
         commitAnchor()
         UIImpactFeedbackGenerator(style: .soft).impactOccurred()
     }
@@ -3246,7 +3085,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         let gap: Float = 0.014
         let count = Float(toolbarButtonNodes.count)
         if count > 0 {
-            let buttonWidth = min(0.32, max(0.06, (browserWorldWidth - gap * (count - 1)) / count))
+            let buttonWidth = min(0.42, max(0.06, (browserWorldWidth - gap * (count - 1)) / count))
             toolbarCenterY = -browserWorldHeight * 0.5 - 0.085 - toolbarButtonHeight * 0.5
             for index in toolbarButtonNodes.indices {
                 let minX = -(buttonWidth * count + gap * (count - 1)) * 0.5 + Float(index) * (buttonWidth + gap)
@@ -3279,14 +3118,20 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         case .open(let url):
             openExternalPage(url)
         case .back:
-            if browser.canGoBack {
-                browser.goBack()
-            }
+            if directVideoActive { navigateLiveBrowser(back: true) }
+            else if browser.canGoBack { browser.goBack() }
         case .home:
-            openVRDesktop()
+            if directVideoActive { closeDirectVideo() } else { openVRDesktop() }
         case .center:
             resetBrowserAnchor()
             UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        case .reload:
+            if directVideoActive { navigateLiveBrowser(back: false) } else { browser.reload() }
+        case .size:
+            releasePointer()
+            let width = SpatialWindowSizing.nextWidth(after: browserWorldWidth)
+            updatePanelSize(width: width)
+            UserDefaults.standard.set(Double(width), forKey: SpatialWindowSizing.storageKey)
         }
     }
 
@@ -3655,6 +3500,11 @@ final class MainViewController: UIViewController, MTKViewDelegate {
 
     private func releasePointer() {
         input.release(webView: browser)
+        if directVideoActive {
+            directLeftInput.release(webView: directVideoLeft)
+            directRightInput.release(webView: directVideoRight)
+            updateCinemaWebPointers(nil)
+        }
     }
 
     private func showAlert(_ message: String) {
@@ -3687,7 +3537,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
 
         let drawableSize = view.drawableSize
         guard drawableSize.width > 1, drawableSize.height > 1 else { return }
-        if cinemaWebScreenActive { updateCinemaWebScreen() }
+        if directVideoActive { updateCinemaWebScreen() }
 
         ensureEyeTextures(for: drawableSize)
         guard let eyeTexture, let eyeDepthTexture else { return }
@@ -4238,19 +4088,18 @@ addEventListener('resize',()=>{if(current==='fruit')[fruitW,fruitH]=fitCanvas(fc
     }
 
     private func openVRDesktop() {
+        if directVideoActive { hideDirectVideoStage() }
         isCinemaMode = false
-        browserWorldWidth = Self.defaultPanelWidth
-        browserWorldHeight = Self.defaultPanelHeight
         updatePanelSize(width: browserWorldWidth)
         toolbarNode.isHidden = true
         applySpatialSurface(home: true, transparent: true)
         browser.loadHTMLString(Self.vrDesktopHTML, baseURL: URL(string: "https://handar.vision/"))
+        startBrowserCapture()
     }
 
     private func openVRApp(id: String) {
+        if directVideoActive { hideDirectVideoStage(); startBrowserCapture() }
         isCinemaMode = false
-        browserWorldWidth = Self.defaultPanelWidth
-        browserWorldHeight = Self.defaultPanelHeight
         updatePanelSize(width: browserWorldWidth)
         toolbarNode.isHidden = false
         applySpatialSurface(home: false, transparent: true)
@@ -4415,7 +4264,7 @@ extension MainViewController: WKNavigationDelegate, WKUIDelegate {
     private func reportVideoNavigationFailure(_ webView: WKWebView, error: Error) {
         guard (error as NSError).code != NSURLErrorCancelled else { return }
         if directVideoActive, webView === directVideoLeft || webView === directVideoRight {
-            let message = cinemaWebScreenActive ? "Не удалось загрузить видео. Вернись домой и открой ссылку ещё раз." : "Не удалось загрузить. Нажми ↻. " + error.localizedDescription
+            let message = cinemaWebScreenActive ? "Не удалось загрузить видео. Вернись домой и открой ссылку ещё раз." : "Не удалось загрузить. Нажми «Обновить». " + error.localizedDescription
             liveLoadErrors[webView === directVideoLeft ? 0 : 1] = message
             setDirectVideoNotice(message)
         } else if webView === browser, cinemaActive, !directVideoActive {
@@ -4436,7 +4285,7 @@ extension MainViewController: WKNavigationDelegate, WKUIDelegate {
             setDirectVideoNotice("Восстанавливаю страницу…")
             webView.reload()
         } else {
-            let message = cinemaWebScreenActive ? "Страница остановлена. Вернись домой и открой ссылку ещё раз." : "Страница остановлена. Нажми ↻ для повторной загрузки или «Домой»."
+            let message = cinemaWebScreenActive ? "Страница остановлена. Вернись домой и открой ссылку ещё раз." : "Страница остановлена. Нажми «Обновить» или «Домой»."
             liveLoadErrors[webView === directVideoLeft ? 0 : 1] = message
             setDirectVideoNotice(message)
         }
@@ -4473,7 +4322,7 @@ extension MainViewController: WKNavigationDelegate, WKUIDelegate {
         if directVideoActive, webView === directVideoLeft {
             directVideoGeneration = UUID()
             directVideoSyncInFlight = false
-            cancelHandInteraction()
+            releasePointer()
             setDirectVideoNotice("Загружаю страницу…")
         }
         if webView === browser {

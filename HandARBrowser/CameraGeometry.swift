@@ -109,3 +109,16 @@ enum LensCoverage {
         return max(1, maximum * (1+abs(chroma))) * 1.00001
     }
 }
+
+enum SpatialWindowSizing {
+    static let storageKey = "handar.window.width.v1"
+    static let presets: [Float] = [1.9, 2.9, 3.8]
+    static func nextWidth(after width: Float) -> Float {
+        presets.first { $0 > width + 0.1 } ?? presets[0]
+    }
+    static func restoredWidth(defaults: UserDefaults, fallback: Float) -> Float {
+        guard let number = defaults.object(forKey: storageKey) as? NSNumber else { return fallback }
+        let width = number.floatValue
+        return width.isFinite ? min(3.8, max(0.72, width)) : fallback
+    }
+}

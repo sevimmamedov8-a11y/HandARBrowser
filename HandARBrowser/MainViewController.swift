@@ -4739,9 +4739,23 @@ final class HandTracker {
         } } ?? false
         let visibleTips = [VNHumanHandPoseObservation.JointName.indexTip,.middleTip,.ringTip,.littleTip]
             .filter { fresh($0) != nil }.count
-        let palmSafe = fresh(.wrist,confidence:0.7) != nil && fresh(.middleMCP,confidence:0.7) != nil
-            && (fresh(.indexMCP,confidence:0.7) != nil || fresh(.littleMCP,confidence:0.7) != nil)
-            && [wrist,middleBase].allSatisfy { $0.x > 0.05 && $0.x < 0.95 && $0.y > 0.05 && $0.y < 0.95 }
+        // Keep Vision calls and CGFloat comparisons in separate expressions:
+        // Apple's Swift compiler can exhaust its solver on the combined chain.
+        let wristReliable: Bool = fresh(.wrist, confidence: 0.7) != nil
+        let middleReliable: Bool = fresh(.middleMCP, confidence: 0.7) != nil
+        let indexBaseReliable: Bool = fresh(.indexMCP, confidence: 0.7) != nil
+        let littleBaseReliable: Bool = fresh(.littleMCP, confidence: 0.7) != nil
+        func insideFrameMargin(_ point: CGPoint) -> Bool {
+            guard point.x > 0.05, point.x < 0.95 else { return false }
+            guard point.y > 0.05, point.y < 0.95 else { return false }
+            return true
+        }
+        let palmJointsReliable: Bool = wristReliable && middleReliable
+        let sideBaseReliable: Bool = indexBaseReliable || littleBaseReliable
+        let wristInside: Bool = insideFrameMargin(wrist)
+        let middleInside: Bool = insideFrameMargin(middleBase)
+        let palmInside: Bool = wristInside && middleInside
+        let palmSafe: Bool = palmJointsReliable && sideBaseReliable && palmInside
         let hiddenFist = state.occludedFist.update(visibleTips:visibleTips,
             palmReliable:palmSafe,pinchEngaged:state.pinch.isEngaged,
             hiddenAllowed:index == nil && known < 3,at:time)

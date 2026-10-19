@@ -171,6 +171,8 @@ final class UltraWideCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDele
         }
     }
     private func configure() throws {
+        // Camera is video-only. Leave the movie playback audio session alone.
+        capture.automaticallyConfiguresApplicationAudioSession = false
         guard let device=AVCaptureDevice.default(.builtInUltraWideCamera,for:.video,position:.back),motion.isDeviceMotionAvailable else {
             throw captureError("Камера 0,5× недоступна на этом iPhone. Выбери AR 1×.")
         }

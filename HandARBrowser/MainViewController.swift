@@ -1421,8 +1421,8 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         let config = WKWebViewConfiguration()
         config.defaultWebpagePreferences.allowsContentJavaScript = true
         config.allowsInlineMediaPlayback = true
-        // The silent eye must never start an audible player before its script runs.
-        config.mediaTypesRequiringUserActionForPlayback = role == "right" ? .audio : []
+        // V83+ has ONE audible source; the other eye is only a layer copy.
+        config.mediaTypesRequiringUserActionForPlayback = []
         config.allowsPictureInPictureMediaPlayback = false
         config.preferences.isElementFullscreenEnabled = false
         config.websiteDataStore = browser.configuration.websiteDataStore
@@ -1464,7 +1464,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
           window.__handarDirectRole = '\(role)';
           window.__handarDirectMuted = \(muted);
           var wanted=true, blocked=false, pending=false, lastPlay=-Infinity, lastSeek=-Infinity;
-          var configured=new WeakSet();
+          var configured=new WeakSet(),soundAttempted=new WeakSet();
           function video(){
             var all=[].slice.call(document.querySelectorAll('video'));
             all.sort(function(a,b){return (b.clientWidth*b.clientHeight)-(a.clientWidth*a.clientHeight);});
@@ -1475,7 +1475,6 @@ final class MainViewController: UIViewController, MTKViewDelegate {
             if(!configured.has(v)){
               configured.add(v);
               v.setAttribute('playsinline','');v.setAttribute('webkit-playsinline','');v.playsInline=true;
-              if(!window.__handarBrowseOnly&&!window.__handarDirectMuted&&v.muted)v.muted=false;
             }
             // Muting the slave is mandatory before play(). Never repeatedly unmute
             // the master: WebKit can pause playback when mute changes without a gesture.
@@ -1503,12 +1502,19 @@ final class MainViewController: UIViewController, MTKViewDelegate {
             configure(v);
             if(window.__handarCinemaSurface && v.readyState>=2 && (!v.paused || v.currentTime>0)){
               document.documentElement.classList.add('handar-cinema-surface');
+              if(!window.__handarDirectMuted&&!window.__handarVolumeChosen&&!v.paused&&!soundAttempted.has(v)){
+                soundAttempted.add(v);
+                if(window.__handarEnableAudio)window.__handarEnableAudio(true);
+              }
             }
           };
           window.__handarDirectPlay=function(){
             var v=video(); if(!v) return;
             window.__handarSetPlaybackIntent(true);configure(v);
-            if(!window.__handarDirectMuted && v.muted)v.muted=false;
+            if(!window.__handarDirectMuted){
+              if(window.__handarEnableAudio)window.__handarEnableAudio(false);
+              else {if(v.muted)v.muted=false;if(v.volume<=0)v.volume=0.65;}
+            }
             ensurePlaying(v,true);
           };
           window.__handarEnsureDirectVideo=function(){
@@ -1518,7 +1524,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
             var v=video();if(!v)return 'null';
             return JSON.stringify({t:v.currentTime||0,p:v.paused,w:wanted&&!v.ended,b:blocked,
               s:v.playbackRate||1,r:v.readyState,d:Number.isFinite(v.duration)?v.duration:0,
-              q:!!v.seeking,a:Date.now(),e:v.error?v.error.message:null});
+              q:!!v.seeking,a:Date.now(),m:!!v.muted,v:v.volume,e:v.error?v.error.message:null});
           };
           window.__handarSyncDirectVideo=function(master){
             var v=video();if(!v||!master)return;configure(v);
@@ -1789,10 +1795,13 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     private func activateMediaAudioSession() {
         do {
             let session = AVAudioSession.sharedInstance()
-            try session.setCategory(.playback, mode: .moviePlayback, options: [.allowBluetoothA2DP])
+            // Playback already supports A2DP. Its explicit option is invalid
+            // for an output-only category and can reject the whole session.
+            try session.setCategory(.playback, mode: .moviePlayback, options: [])
             try session.setActive(true)
             mediaAudioSessionActive = true
         } catch {
+            mediaAudioSessionActive = false
             NSLog("HandAR media audio session: %@", error.localizedDescription)
         }
     }
@@ -1812,7 +1821,8 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     }
 
     private func activateDirectVideoAudio() {
-        if !mediaAudioSessionActive { activateMediaAudioSession() }
+        // A previous activation flag may be stale after an iOS interruption.
+        activateMediaAudioSession()
     }
 
     // The legacy name remains at cinema control call sites. This polls ONE
@@ -1830,7 +1840,15 @@ final class MainViewController: UIViewController, MTKViewDelegate {
             if let error=self.liveLoadError { self.setDirectVideoNotice(error) }
             else if let error=state["e"] as? String { self.setDirectVideoNotice("Ошибка видео: "+error) }
             else if state["b"] as? Bool==true { self.setDirectVideoNotice("Нажми ▶ для продолжения видео") }
+            else if self.cinemaWebScreenActive,AVAudioSession.sharedInstance().outputVolume<=0 {
+                self.setDirectVideoNotice("Увеличь громкость кнопками iPhone")
+            }
+            else if self.cinemaWebScreenActive,!paused,
+                    (state["m"] as? Bool==true || (state["v"] as? Double ?? 1)<=0) {
+                self.setDirectVideoNotice("Звук выключен. Нажми «Вкл звук» под экраном")
+            }
             else if !paused,(state["r"] as? Int ?? 0)>=2 { self.setDirectVideoNotice("") }
+            self.cinemaHall.setSoundEnabled(state["m"] as? Bool != true && (state["v"] as? Double ?? 1)>0)
             self.cinemaHall.setPlayingState(!paused)
             self.cinemaHall.setTime(current:time,duration:state["d"] as? Double ?? 0)
         }
@@ -2231,7 +2249,10 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         cinemaHall.onRestart = { [weak self] in self?.cinemaRestart() }
         cinemaPlayback.onProgress = { [weak self] current, duration in
             self?.cinemaHall.setTime(current: current, duration: duration)
-            if let self { self.cinemaHall.setPlayingState(self.cinemaPlayback.isPlaying) }
+            if let self {
+                self.cinemaHall.setPlayingState(self.cinemaPlayback.isPlaying)
+                self.cinemaHall.setSoundEnabled(self.cinemaPlayback.isSoundEnabled)
+            }
         }
         cinemaPlayback.onStarted = { [weak self] in
             self?.cinemaHall.setNotice("")
@@ -2398,6 +2419,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     }
 
     private func cinemaTogglePlay() {
+        activateDirectVideoAudio()
         if cinemaPlayback.isActive {
             cinemaPlayback.toggle()
             cinemaHall.setPlayingState(cinemaPlayback.isPlaying)
@@ -2408,7 +2430,9 @@ final class MainViewController: UIViewController, MTKViewDelegate {
 
     private func cinemaVolume(_ delta: Float) {
         guard cinemaPlayback.isActive else { adjustCinemaVolume(delta); return }
+        activateDirectVideoAudio()
         cinemaPlayback.volume += delta
+        cinemaHall.setSoundEnabled(cinemaPlayback.isSoundEnabled)
     }
 
     private func cinemaSeek(by seconds: Double) {
@@ -2421,6 +2445,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     }
 
     private func cinemaRestart() {
+        activateDirectVideoAudio()
         if cinemaWebScreenActive {
             directVideoLeft.evaluateJavaScript("window.__handarSeekVideo && window.__handarSeekVideo(0, true);") { [weak self] _, _ in self?.syncDirectVideoEyes() }
             return
@@ -2449,6 +2474,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     }
 
     private func adjustCinemaVolume(_ delta: Float) {
+        activateDirectVideoAudio()
         let js = "window.__handarSetVolume ? window.__handarSetVolume(\(delta)) : null;"
         if directVideoActive {
             directVideoLeft?.evaluateJavaScript(js, completionHandler: nil)

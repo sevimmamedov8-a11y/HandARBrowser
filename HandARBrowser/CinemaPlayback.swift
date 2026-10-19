@@ -42,6 +42,8 @@ final class CinemaPlayback: NSObject {
         ])
         let item = AVPlayerItem(asset: asset)
         let player = AVPlayer(playerItem: item)
+        player.isMuted = false
+        player.volume = 1
         player.actionAtItemEnd = .pause
         player.automaticallyWaitsToMinimizeStalling = true
 
@@ -146,7 +148,10 @@ final class CinemaPlayback: NSObject {
     func setVolume(_ value: Float) {
         guard value.isFinite else { return }
         player?.volume = min(max(value, 0), 1)
+        if value > 0 { player?.isMuted = false }
     }
+
+    var isSoundEnabled: Bool { player.map { !$0.isMuted && $0.volume > 0 } ?? false }
 
     var volume: Float {
         get { player?.volume ?? 0 }

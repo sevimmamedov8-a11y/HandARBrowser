@@ -740,6 +740,10 @@ final class CinemaHall {
         playButton.setTitle(playing ? "Пауза" : "Смотреть")
     }
 
+    func setSoundEnabled(_ enabled: Bool) {
+        volUpButton.setTitle(enabled ? "+ звук" : "Вкл звук")
+    }
+
     func cancelInput() {
         buttonClickGate.cancel()
         dwellRing.isHidden=true

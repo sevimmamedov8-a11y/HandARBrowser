@@ -366,18 +366,35 @@
     all.sort((a,b)=>(b.clientWidth*b.clientHeight)-(a.clientWidth*a.clientHeight));
     return all[0]||null;
   }
+  // Restore the ONE source player; a higher volume does not clear muted.
+  // Called on explicit playback/audio controls, never in a repeating watchdog.
+  window.__handarEnableAudio=function(resume){
+    const v=playbackVideo();if(!v)return false;
+    const playing=!v.paused;
+    try {
+      v.defaultMuted=false;
+      if(v.removeAttribute)v.removeAttribute('muted');
+      if(v.volume<=0)v.volume=0.65;
+      if(v.muted)v.muted=false;
+      if(resume!==false && v.paused && playing){
+        if(window.__handarSetPlaybackIntent)window.__handarSetPlaybackIntent(true);
+        const p=v.play();if(p&&p.catch)p.catch(function(){});
+      }
+      return !v.muted && v.volume>0;
+    } catch(e) {return false}
+  };
   window.__handarSeekVideo=function(seconds,absolute){
     const v=playbackVideo();if(!v||!Number.isFinite(seconds))return;
     const target=absolute?seconds:(v.currentTime||0)+seconds;
     const end=Number.isFinite(v.duration)?v.duration:Number.MAX_VALUE;
-    try{v.currentTime=Math.max(0,Math.min(end,target));if(absolute){if(window.__handarSetPlaybackIntent)window.__handarSetPlaybackIntent(true);const p=v.play();if(p&&p.catch)p.catch(function(){});}}catch(e){}
+    try{v.currentTime=Math.max(0,Math.min(end,target));if(absolute){if(window.__handarSetPlaybackIntent)window.__handarSetPlaybackIntent(true);window.__handarEnableAudio(false);const p=v.play();if(p&&p.catch)p.catch(function(){});}}catch(e){}
   };
   window.__handarTogglePlay = function () {
     var v = playbackVideo();
     if (!v) return 'none';
     try {
       if(window.__handarSetPlaybackIntent)window.__handarSetPlaybackIntent(v.paused);
-      if (v.paused) { const p=v.play(); if(p&&p.catch)p.catch(function(){}); return 'play'; }
+      if (v.paused) { window.__handarEnableAudio(false);const p=v.play(); if(p&&p.catch)p.catch(function(){}); return 'play'; }
       v.pause(); return 'pause';
     } catch (e) { return 'none'; }
   };
@@ -388,7 +405,11 @@
   };
   window.__handarSetVolume = function (delta) {
     var v = playbackVideo();
-    if (!v) return;
-    try { v.volume = Math.max(0, Math.min(1, v.volume + delta)); } catch (e) {}
+    if (!v || !Number.isFinite(delta)) return;
+    try {
+      window.__handarVolumeChosen=true;
+      v.volume = Math.max(0, Math.min(1, v.volume + delta));
+      if(delta>0)window.__handarEnableAudio(true);
+    } catch (e) {}
   };
 })();

@@ -13,6 +13,7 @@ def method(name):
     while depth:
         depth+=(hall[end]=='{')-(hall[end]=='}');end+=1
     return hall[begin:end]
+layout=hall[hall.index('enum CinemaHallLayout {'):hall.index('/// Blue tiered auditorium')]
 shim=r'''
 import Foundation
 struct Matrix {
@@ -37,7 +38,7 @@ final class Node {
  }
 }
 final class Hall {
- static let screenCenterHeight:Float=1.85,screenDistance:Float=4
+ static let screenCenterHeight=CinemaHallLayout.screenCenterHeight,screenDistance=CinemaHallLayout.screenDistance
  let root=Node()
  var screenWorldTransform=matrix_identity_float4x4
 '''
@@ -61,15 +62,15 @@ for angle in stride(from:Float(0),to:Float(6.3),by:0.13) {
  }
 }
 hall.alignViewer(origin:SIMD3(0,1,0),forward:SIMD3(0,1,0))
-check(hall.screenWorldTransform.columns.3.z == -4)
+check(hall.screenWorldTransform.columns.3.z == -Hall.screenDistance)
 check(hall.screenWorldTransform.columns.3.y == 1)
 hall.alignViewer(origin:SIMD3(0,1,0),forward:SIMD3(.nan,0,0))
-check(hall.screenWorldTransform.columns.3.z == -4)
+check(hall.screenWorldTransform.columns.3.z == -Hall.screenDistance)
 print("PASS: \(checks) actual cinema entrance heading, height and degenerate-pose checks")
 '''
 with tempfile.TemporaryDirectory(prefix='handar-alignment-') as directory:
     script=Path(directory)/'alignment.swift'
-    script.write_text(shim+method('alignViewer')+'\n'+method('updateScreenTransform')+tests,encoding='utf-8')
+    script.write_text(layout+shim+method('alignViewer')+'\n'+method('updateScreenTransform')+tests,encoding='utf-8')
     run_swift_sources([script])
 assert 'self.cinemaActive, self.cinemaNeedsAlignment' in controller
 assert 'headNode.simdTransform=tracking.headTransform(frame)' in controller

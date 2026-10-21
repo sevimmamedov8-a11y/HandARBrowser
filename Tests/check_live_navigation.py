@@ -25,7 +25,7 @@ final class WKWebView {
 }
 final class Harness {
  let browser=WKWebView(),directVideoLeft=WKWebView(),toolbarNode=Node()
- var inVR=true,cinemaActive=false,isCinemaMode=false,cinemaWebScreenActive=false
+ var inVR=true,cinemaActive=false,isCinemaMode=false,cinemaWebScreenActive=false,panoramaActive=false
  var directVideoActive=true,liveBrowserActive=true,directVideoSyncInFlight=true
  var liveProcessRecoveries:Set<ObjectIdentifier>=[];var liveLoadError:String?
  var directVideoGeneration=UUID(),snapshotGeneration=UUID()
@@ -85,6 +85,11 @@ struct Tests {
   h.directVideoActive=false;h.cinemaActive=true
   h.reportVideoNavigationFailure(h.browser,error:NSError(domain:NSURLErrorDomain,code:NSURLErrorTimedOut))
   check(h.fallbacks==1,"cinema retains live-video fallback")
+  h.panoramaActive=true
+  let reloads=h.browser.reloads,opened=h.opened.count
+  check(policy(h.browser,url) == .cancel && h.opened.count==opened,"hidden page cannot open over a panorama")
+  h.webViewWebContentProcessDidTerminate(h.browser)
+  check(h.browser.reloads==reloads,"hidden browser crash cannot trigger reloads during offline travel")
   print("PASS: \(count) live navigation, cancellation, process recovery and visible error checks")
  }
 }

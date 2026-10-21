@@ -80,7 +80,7 @@ private func renderTextImage(
 }
 
 /// Текстовая плашка, всегда повёрнутая к камере.
-private final class CineText: SCNNode {
+final class CineText: SCNNode {
     private var current = ""
     private let plane = SCNPlane(width: 1, height: 1)
     private let planeNode = SCNNode()
@@ -122,7 +122,7 @@ private final class CineText: SCNNode {
 }
 
 /// 3D-кнопка на панели управления.
-private final class CineButton {
+final class CineButton {
     let node = SCNNode()
     private let plate: SCNNode
     private let textNode = SCNNode()
@@ -195,6 +195,50 @@ private final class CineButton {
 
 // MARK: - Кинотеатр ----------------------------------------------------------
 
+/// Session-only comfort actions. Deadlines use the monotonic frame clock.
+struct CinemaComfortState {
+    private(set) var isReclined = false
+    private(set) var isPeeking = false
+    private(set) var reclineDeadline: Double?
+    private(set) var remoteDeadline: Double?
+    var remoteSummoned: Bool { remoteDeadline != nil }
+
+    mutating func requestRecline(at time: Double) -> Bool {
+        guard time.isFinite, !isPeeking else { return false }
+        if reclineDeadline != nil { reclineDeadline = nil; return false }
+        if isReclined { isReclined = false; return true }
+        reclineDeadline = time + 3
+        return false
+    }
+    mutating func setPeeking(_ value: Bool) {
+        isPeeking = value
+        reclineDeadline = nil
+        remoteDeadline = nil
+    }
+    mutating func toggleRemote(at time: Double) {
+        guard time.isFinite, !isPeeking else { return }
+        remoteDeadline = remoteSummoned ? nil : time + 12
+    }
+    mutating func keepRemote(at time: Double) {
+        if remoteSummoned, time.isFinite { remoteDeadline = time + 12 }
+    }
+    mutating func dismissRemote() { remoteDeadline = nil }
+    mutating func cancelRecline() { reclineDeadline = nil }
+    mutating func advance(at time: Double) -> (realign: Bool, restoreRemote: Bool) {
+        guard time.isFinite else { return (false, false) }
+        var realign = false, restore = false
+        if let deadline = reclineDeadline, time >= deadline {
+            reclineDeadline = nil
+            // A suspended frame stream must not unexpectedly rotate the room later.
+            if time - deadline < 0.5 { isReclined = true; realign = true }
+        }
+        if let deadline = remoteDeadline, time >= deadline {
+            remoteDeadline = nil; restore = true
+        }
+        return (realign, restore)
+    }
+}
+
 /// Dimensions in metres; the camera sits in row five, facing the screen.
 /// The visual reference is the blue auditorium photographed at Gənclik Mall.
 /// These are reconstructed proportions, not an architectural survey.
@@ -238,6 +282,17 @@ final class CinemaHall {
     var onVolume: ((Float) -> Void)?
     var onSeek: ((Double) -> Void)?
     var onRestart: (() -> Void)?
+    var onRemoteRequested: (() -> Void)?
+    var onPeekRequested: (() -> Void)?
+    var onRealignRequested: (() -> Void)?
+    private(set) var comfort = CinemaComfortState()
+    private let comfortRoot = SCNNode()
+    private var remotePanel: SCNNode?
+    private var latchedComfortButton: CineButton?
+    private let summonButton = CineButton(title: "Пульт", color: UIColor(white: 0.12, alpha: 1))
+    private let reclineButton = CineButton(title: "Полулёжа", color: UIColor(white: 0.12, alpha: 1))
+    private let peekButton = CineButton(title: "Камера", color: UIColor(white: 0.12, alpha: 1))
+    private var comfortButtons: [CineButton] { [summonButton, reclineButton, peekButton] }
 
     private(set) var isRunning = false
     private(set) var lightsOn = false
@@ -269,7 +324,7 @@ final class CinemaHall {
 
     private var allButtons: [CineButton] {
         [lightButton, playButton, backButton, fwdButton,
-         volDownButton, volUpButton, restartButton, exitButton]
+         volDownButton, volUpButton, restartButton, exitButton] + comfortButtons
     }
 
     // MARK: Старт / стоп
@@ -278,6 +333,9 @@ final class CinemaHall {
         guard !isRunning else { return }
         cancelInput()
         isRunning = true
+        comfort = CinemaComfortState()
+        latchedComfortButton = nil
+        root.isHidden = false
         self.scene = scene
 
         alignViewer(origin:cameraOrigin,forward:cameraForward)
@@ -320,11 +378,133 @@ final class CinemaHall {
         updateScreenTransform()
     }
 
+    /// Rotate the room around the seated eye, never around its floor origin.
+    func alignReclinedViewer(origin: SIMD3<Float>, forward direction: SIMD3<Float>) {
+        let length = simd_length(direction)
+        guard length.isFinite, length > 0.0001 else { return }
+        let rotation = simd_quatf(from: SIMD3<Float>(0, 0, -1), to: direction / length)
+        root.simdOrientation = rotation
+        root.simdPosition = origin - rotation.act(SIMD3<Float>(0, Self.screenCenterHeight, 0))
+        updateScreenTransform()
+    }
+
+    func attachComfortControls(to head: SCNNode) {
+        comfortRoot.removeFromParentNode()
+        comfortRoot.childNodes.forEach { $0.removeFromParentNode() }
+        comfortRoot.position = SCNVector3(0, -0.53, -1.55)
+        comfortRoot.scale = SCNVector3(0.78, 0.78, 0.78)
+        let plateMaterial = SCNMaterial()
+        plateMaterial.cineConstant(UIColor(white: 0.035, alpha: 1))
+        let plate = boxNode(1.64, 0.29, 0.025, plateMaterial)
+        plate.position.z = -0.03
+        comfortRoot.addChildNode(plate)
+        for (index, button) in comfortButtons.enumerated() {
+            button.node.constraints = []
+            button.node.position = SCNVector3(Float(index - 1) * 0.56, 0, 0)
+            comfortRoot.addChildNode(button.node)
+        }
+        head.addChildNode(comfortRoot)
+        refreshComfortTitles(at: CACurrentMediaTime())
+    }
+
+    /// A head-locked button cannot be reached by a head-directed ray. Keep
+    /// this dock at the entrance/recenter pose while hands are resting.
+    func setHeadAiming(_ enabled: Bool, head: SCNNode) {
+        guard isRunning, let scene else { return }
+        comfortRoot.removeFromParentNode()
+        comfortRoot.simdOrientation = simd_quatf()
+        comfortRoot.position = SCNVector3(0, -0.53, -1.55)
+        comfortRoot.scale = SCNVector3(0.78, 0.78, 0.78)
+        head.addChildNode(comfortRoot)
+        if enabled {
+            let transform = comfortRoot.simdWorldTransform
+            comfortRoot.removeFromParentNode()
+            scene.rootNode.addChildNode(comfortRoot)
+            comfortRoot.simdWorldTransform = transform
+        }
+        cancelInput()
+    }
+
+    /// Native controls need holes in the live UIKit video surface above SceneKit.
+    var overlayPanels: [(transform: simd_float4x4, width: Float, height: Float)] {
+        guard isRunning, !comfort.isPeeking else { return [] }
+        var panels = [(comfortRoot.simdWorldTransform, Float(1.68), Float(0.33))]
+        if let panel = remotePanel {
+            panels.append((panel.simdWorldTransform, CinemaHallLayout.remoteWidth + 0.06,
+                           CinemaHallLayout.remoteHeight + 0.06))
+        }
+        return panels
+    }
+
+    func refreshComfortTitles(at time: Double) {
+        summonButton.setTitle(comfort.remoteSummoned ? "Убрать" : "Пульт")
+        if let deadline = comfort.reclineDeadline {
+            reclineButton.setTitle("Через \(max(1, Int(ceil(deadline - time))))с")
+        } else {
+            reclineButton.setTitle(comfort.isReclined ? "Сидя" : "Полулёжа")
+        }
+        peekButton.setTitle(comfort.isPeeking ? "В зал" : "Камера")
+        summonButton.node.opacity = comfort.isPeeking ? 0.3 : 1
+        reclineButton.node.opacity = comfort.isPeeking ? 0.3 : 1
+    }
+
+    func restoreRemote() {
+        comfort.dismissRemote()
+        guard let panel = remotePanel else { return }
+        panel.simdPosition = CinemaHallLayout.remotePosition
+        let eye = SIMD3<Float>(0, Self.screenCenterHeight, 0)
+        panel.simdOrientation = simd_quatf(from: SIMD3<Float>(0, 0, 1),
+                                        to: simd_normalize(eye - CinemaHallLayout.remotePosition))
+        let scale = CinemaHallLayout.remoteScale
+        panel.scale = SCNVector3(scale, scale, scale)
+        refreshComfortTitles(at: CACurrentMediaTime())
+    }
+
+    func toggleRemote(headTransform: simd_float4x4, at time: Double) {
+        guard isRunning, !comfort.isPeeking, let panel = remotePanel else { return }
+        cancelInput()
+        comfort.toggleRemote(at: time)
+        if comfort.remoteSummoned {
+            var local = matrix_identity_float4x4
+            local.columns.0.x = CinemaHallLayout.remoteScale
+            local.columns.1.y = CinemaHallLayout.remoteScale
+            local.columns.2.z = CinemaHallLayout.remoteScale
+            local.columns.3 = SIMD4<Float>(0, 0, -1.65, 1)
+            panel.simdWorldTransform = simd_mul(headTransform, local)
+        } else { restoreRemote() }
+        refreshComfortTitles(at: time)
+    }
+
+    func setPeeking(_ value: Bool) {
+        cancelInput()
+        comfort.setPeeking(value)
+        restoreRemote()
+        root.isHidden = value
+        refreshComfortTitles(at: CACurrentMediaTime())
+    }
+
+    func cancelPendingRecline() {
+        comfort.cancelRecline()
+        refreshComfortTitles(at: CACurrentMediaTime())
+    }
+
+    func tick(at time: Double) {
+        guard isRunning else { return }
+        let event = comfort.advance(at: time)
+        if event.restoreRemote { cancelInput(); restoreRemote() }
+        if event.realign { onRealignRequested?() }
+        refreshComfortTitles(at: time)
+    }
+
     func stop() {
         cancelInput()
         guard isRunning else { return }
         isRunning = false
         root.removeFromParentNode()
+        comfortRoot.removeFromParentNode()
+        remotePanel = nil
+        comfort = CinemaComfortState()
+        latchedComfortButton = nil
         ceilingStrips.removeAll()
         scene = nil
     }
@@ -544,6 +724,7 @@ final class CinemaHall {
         let scale = CinemaHallLayout.remoteScale
         panel.scale = SCNVector3(scale, scale, scale)
         root.addChildNode(panel)
+        remotePanel = panel
 
         let material = SCNMaterial()
         material.cineConstant(UIColor(red: 0.032, green: 0.043, blue: 0.075, alpha: 1))
@@ -601,13 +782,32 @@ final class CinemaHall {
     @discardableResult
     func update(ray: WorldRay?, pinch: Bool, allowBegin: Bool = true, dwell: Bool = false) -> Bool {
         guard isRunning else { return false }
-        let target = ray.flatMap { ray in allButtons.first { $0.hitTest(ray:ray) } }
+        let candidates = comfort.isPeeking ? [peekButton] : allButtons
+        let target = ray.flatMap { ray in candidates.first { $0.hitTest(ray:ray) } }
+        if let latched = latchedComfortButton {
+            if target === latched { return true }
+            latchedComfortButton = nil
+        }
+        if let target, !comfortButtons.contains(where: { $0 === target }) {
+            comfort.keepRemote(at: CACurrentMediaTime())
+        }
         for button in allButtons { button.setHighlight(button === target) }
         let committed=buttonClickGate.update(target:target.map { ObjectIdentifier($0) },down:pinch,allowBegin:allowBegin,dwell:dwell,at:CACurrentMediaTime())
         dwellRing.show(on:target?.node,progress:buttonClickGate.dwellProgress)
         guard committed != nil, let target else { return target != nil }
         onInteraction?()
 
+        if comfortButtons.contains(where: { $0 === target }) {
+            latchedComfortButton = target
+            dwellRing.isHidden = true
+            if target === summonButton { onRemoteRequested?() }
+            if target === peekButton { onPeekRequested?() }
+            if target === reclineButton {
+                if comfort.requestRecline(at: CACurrentMediaTime()) { onRealignRequested?() }
+                refreshComfortTitles(at: CACurrentMediaTime())
+            }
+            return true
+        }
         if target === lightButton {
             setLights(!lightsOn)
             onToggleLights?(lightsOn)

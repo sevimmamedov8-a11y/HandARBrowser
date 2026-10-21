@@ -12,7 +12,7 @@ source = (root / "HandARBrowser/CinemaHall.swift").read_text(encoding="utf-8")
 
 
 def method(name):
-    start = source.index("    private func " + name) if "    private func " + name in source else source.index("    func " + name)
+    start = source.index("    private func " + name + "(") if "    private func " + name + "(" in source else source.index("    func " + name + "(")
     end = source.index("{", start) + 1
     depth = 1
     while depth:
@@ -137,6 +137,7 @@ final class CinemaHall {
  let root=SCNNode(),noticeLabel=CineText(),timeLabel=CineText(),panelTitle=CineText()
  let lightButton=CineButton("Light"),playButton=CineButton("Play"),backButton=CineButton("-10s"),fwdButton=CineButton("+10s")
  let volDownButton=CineButton("Vol -"),volUpButton=CineButton("Vol +"),restartButton=CineButton("Restart"),exitButton=CineButton("Home")
+ var remotePanel:SCNNode?
  let ambientLight=Light()
  var ceilingStrips:[SCNNode]=[],lightsOn=false
  var buttons:[CineButton]{[playButton,lightButton,backButton,fwdButton,volDownButton,volUpButton,restartButton,exitButton]}
@@ -250,7 +251,8 @@ print("PASS: \(checks) cinema layout, clear sightlines, remote hit areas and rec
 builders = "\n".join(method(name) for name in [
     "boxNode", "buildRoom", "buildScreenArea", "buildSeats", "buildAestheticDetails", "buildControlPanel", "setLights"
 ])
-with tempfile.TemporaryDirectory(prefix="handar-room-") as directory:
-    script = Path(directory) / "room.swift"
-    script.write_text(shim + method("hitTest") + fields + builders + tests + "\n" + layout, encoding="utf-8")
-    run_swift_sources([script])
+if __name__ == "__main__":
+    with tempfile.TemporaryDirectory(prefix="handar-room-") as directory:
+        script = Path(directory) / "room.swift"
+        script.write_text(shim + method("hitTest") + fields + builders + tests + "\n" + layout, encoding="utf-8")
+        run_swift_sources([script])

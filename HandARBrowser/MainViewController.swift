@@ -714,7 +714,13 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     private let securityGame = SecurityVRGame()
     private var cinemaActive = false
     private let cinemaHall = CinemaHall()
+    private let panorama = OfflinePanorama()
+    private var panoramaActive: Bool { panorama.isRunning }
+    private let cinemaControlMasks = [CAShapeLayer(), CAShapeLayer()]
     private let cinemaPlayback = CinemaPlayback()
+    private var cameraPassthroughRequested: Bool {
+        panoramaActive ? false : (cinemaActive ? cinemaHall.comfort.isPeeking : profile.passthrough)
+    }
     private var cinemaProbeTimer: Timer?
     private var cinemaProbeGeneration = UUID()
     private var snapshotGeneration = UUID()
@@ -736,6 +742,9 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     private var dragOffset = SIMD3<Float>(repeating: 0)
 
     private var handClickMode = HandClickMode.load()
+    private var pointerControlMode = PointerControlMode.load()
+    private var usesHeadAim: Bool { pointerControlMode == .head }
+    private var headAimSession = HeadAimSession()
     private var usesDwell: Bool { handClickMode == .dwell }
     private let toolbarDwellRing = DwellProgressRing()
     private var handOwnership = HandInputOwnership()
@@ -929,7 +938,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
             guard let self,self.inVR else { return };self.leaveVRToMenu()
         }
         handInputWatchdog = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
-            guard let self, self.inVR, self.handOwnership.hand != nil,
+            guard let self, self.inVR, !self.usesHeadAim, self.handOwnership.hand != nil,
                   CACurrentMediaTime()-self.lastHandDeliveryTime > 0.2 else { return }
             self.cancelHandInteraction()
             self.handOwnership.reset()
@@ -1125,7 +1134,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     /// A site's fullscreen request stays inside its spatial window. The hall
     /// is an explicit, separate app; playing a movie must not resize the desktop.
     private func setCinemaMode(_ active: Bool) {
-        guard inVR, !cinemaActive, !directVideoActive else { return }
+        guard inVR, !cinemaActive, !panoramaActive, !directVideoActive else { return }
         isCinemaMode = false
         if active, let url = browser.url, ["https", "http"].contains(url.scheme?.lowercased() ?? "") {
             openExternalPage(url)
@@ -1626,8 +1635,8 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         presentDirectVideoStage(url: url, browsing: true)
     }
 
-    private func projectedCinemaCorner(_ local: SIMD3<Float>, eye: Int) -> SIMD2<Double>? {
-        guard let transform=liveWebTransform else { return nil }
+    private func projectedCinemaCorner(_ local: SIMD3<Float>, eye: Int, using supplied: simd_float4x4? = nil) -> SIMD2<Double>? {
+        guard let transform=supplied ?? liveWebTransform else { return nil }
         // One central camera, including the live page. Eye only controls alignment.
         let point=leftCameraNode.simdWorldTransform.inverse * (transform * SIMD4<Float>(local,1))
         let depth = -point.z
@@ -1698,31 +1707,12 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     }
 
     private func handleCinemaWebHands(left: HandSample?, right: HandSample?) {
-        guard let sample = right ?? left, let ray = tracking.worldRay(visionPoint: sample.indexTip) else {
-            cinemaHall.update(ray: nil, pinch: false)
-            updateCinemaWebPointers(nil)
-            directLeftInput.release(webView: directVideoLeft)
+        guard let sample = right ?? left else {
+            handleCinemaRay(nil, down: false, allowBegin: false, dwell: usesDwell)
             return
         }
-        if cinemaHall.update(ray: ray, pinch: sample.clickPinch, allowBegin:sample.clickBegan, dwell:usesDwell) {
-            updateCinemaWebPointers(nil)
-            directLeftInput.release(webView: directVideoLeft)
-            return
-        }
-        guard let hit = planeHit(ray: ray, transform: cinemaHall.screenWorldTransform) else {
-            updateCinemaWebPointers(nil)
-            directLeftInput.release(webView: directVideoLeft)
-            return
-        }
-        let uv = CGPoint(x: CGFloat(hit.localX / CinemaHall.screenWidth + 0.5),
-                         y: CGFloat(0.5 - hit.localY / CinemaHall.screenHeight))
-        guard (0...1).contains(uv.x), (0...1).contains(uv.y) else {
-            updateCinemaWebPointers(nil)
-            directLeftInput.release(webView: directVideoLeft)
-            return
-        }
-        updateCinemaWebPointers(uv)
-        updateDirectVideoInput(normalizedPoint: uv, pinch: sample.clickPinch, allowBegin:sample.clickBegan, dwell:usesDwell)
+        handleCinemaRay(tracking.worldRay(visionPoint: sample.indexTip), down: sample.clickPinch,
+                        allowBegin: sample.clickBegan, dwell: usesDwell)
     }
 
     private func setDirectVideoNotice(_ message: String) {
@@ -1800,6 +1790,8 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         directVideoSyncTimer?.invalidate()
         directVideoSyncTimer = nil
         directVideoStage.isHidden = true
+        liveWebReplicator.alpha = 1
+        liveWebReplicator.layer.mask = nil
         directVideoURL = nil
         directLeftInput.release(webView: directVideoLeft)
         pauseAndMute(directVideoLeft)
@@ -1950,7 +1942,9 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     private func wireServices() {
         tracking.onFrame = { [weak self] pixelBuffer, orientation in
             guard let self, self.inVR else { return }
-            self.hands.process(pixelBuffer: pixelBuffer, orientation: orientation)
+            if !self.usesHeadAim || self.lensCalibrationView != nil {
+                self.hands.process(pixelBuffer: pixelBuffer, orientation: orientation)
+            }
         }
 
         let cameraDelivery = LatestMainDelivery<CameraFrame> { [weak self] frame in
@@ -2061,7 +2055,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     }
 
     private func startLensCalibration() {
-        guard lensCalibrationView == nil, !cinemaActive, !securityGameActive else { return }
+        guard lensCalibrationView == nil, !cinemaActive, !securityGameActive, !panoramaActive else { return }
         let wasInVR=inVR
         let present: () -> Void = { [weak self] in
             guard let self,self.inVR else { return }
@@ -2108,6 +2102,8 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         hands.reset()
         inVR = true
         handClickMode = HandClickMode.load()
+        pointerControlMode = PointerControlMode.load()
+        headAimSession.reset()
         headNode.simdTransform=matrix_identity_float4x4
         didCreateInitialAnchor = false
         browserAnchor = nil
@@ -2168,6 +2164,8 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         if !inVR {
             inVR = true
             handClickMode = HandClickMode.load()
+            pointerControlMode = PointerControlMode.load()
+            headAimSession.reset()
             headNode.simdTransform=matrix_identity_float4x4
             applyEyeGeometry()
             requestLandscapeMode()
@@ -2217,10 +2215,63 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         hidePointerDot()
     }
 
+    // MARK: Offline 360° travel
+
+    private func startPanorama(id: String) {
+        guard inVR, !cinemaActive, !securityGameActive,
+              let asset = OfflinePanoramaAsset.load(id: id) else {
+            showAlert("Не найден файл панорамы. Проверь ресурсы сборки.")
+            return
+        }
+        cancelHandInteraction(); endDrag(); endResize()
+        handOwnership.suppressUntilOpen(); menuSwipe.reset()
+        stopBrowserCapture(); browser.stopLoading(); pauseAndMute(browser)
+        hideDirectVideoStage()
+        spatialHomeVisible = false
+        browserPlaneNode.isHidden = true; toolbarNode.isHidden = true
+        hidePointer(); hidePointerDot(); controllerHandRoot.isHidden = true
+        panorama.onInteraction = { [weak self] in self?.playUIConfirmation() }
+        panorama.onExit = { [weak self] in self?.exitPanorama() }
+        panorama.onRecenter = { [weak self] in
+            guard let self else { return }
+            self.panorama.recenter(head: self.headNode)
+        }
+        panorama.start(asset: asset, scene: worldScene, head: headNode)
+    }
+
+    private func exitPanorama() {
+        cancelHandInteraction()
+        panorama.stop()
+        handOwnership.suppressUntilOpen()
+        resetBrowserAnchor()
+        openVRApp(id: "travel")
+        startBrowserCapture()
+        hidePointer(); hidePointerDot()
+    }
+
+    private func handlePanoramaRay(_ ray: WorldRay?, down: Bool, allowBegin: Bool, dwell: Bool) {
+        panorama.update(ray: ray, pinch: down, allowBegin: allowBegin, dwell: dwell)
+        if panoramaActive, let ray {
+            showPointerDot(at: ray.point(at: 0.9), transform: headNode.simdWorldTransform, active: down)
+            rayNode.isHidden = true
+        } else { hidePointerDot() }
+    }
+
+    private func updatePanoramaController() {
+        let frustum = VRLensMath.frustum(eye: 0, profile: profile)
+        let x = frustum.left + Float(controllerPointer.x) * (frustum.right - frustum.left)
+        let y = frustum.top - Float(controllerPointer.y) * (frustum.top - frustum.bottom)
+        let t = headNode.simdWorldTransform
+        let d = t * SIMD4<Float>(x, y, -1, 0)
+        let ray = WorldRay(origin: headNode.simdWorldPosition, direction: simd_normalize(SIMD3(d.x, d.y, d.z)))
+        controllerHandRoot.isHidden = true
+        handlePanoramaRay(ray, down: controllerButtonDown, allowBegin: true, dwell: false)
+    }
+
     // MARK: Кинотеатр
 
     /// Вход в 3D-кинозал. Браузерная панель становится экраном, вокруг неё
-    /// строится зал с креслами и панелью управления под экраном.
+    /// строится зал с креслами, правым пультом и быстрыми действиями.
     private func enterCinema(url: URL?) {
         cancelHandInteraction()
         handOwnership.suppressUntilOpen()
@@ -2230,6 +2281,8 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         if !inVR {
             inVR = true
             handClickMode = HandClickMode.load()
+            pointerControlMode = PointerControlMode.load()
+            headAimSession.reset()
             headNode.simdTransform=matrix_identity_float4x4
             didCreateInitialAnchor = false
             browserAnchor = nil
@@ -2270,6 +2323,9 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         cinemaHall.onVolume = { [weak self] delta in self?.cinemaVolume(delta) }
         cinemaHall.onSeek = { [weak self] delta in self?.cinemaSeek(by: delta) }
         cinemaHall.onRestart = { [weak self] in self?.cinemaRestart() }
+        cinemaHall.onRemoteRequested = { [weak self] in self?.toggleCinemaRemote() }
+        cinemaHall.onPeekRequested = { [weak self] in self?.toggleCinemaPeek() }
+        cinemaHall.onRealignRequested = { [weak self] in self?.alignCinemaToCurrentPose() }
         cinemaPlayback.onProgress = { [weak self] current, duration in
             self?.cinemaHall.setTime(current: current, duration: duration)
             if let self {
@@ -2292,6 +2348,8 @@ final class MainViewController: UIViewController, MTKViewDelegate {
             }
         }
         cinemaHall.start(in: worldScene, cameraOrigin: headNode.simdWorldPosition, cameraForward: forward)
+        cinemaHall.attachComfortControls(to: headNode)
+        cinemaHall.setHeadAiming(usesHeadAim, head: headNode)
 
         // Браузерная панель становится экраном зала.
         browserWorldWidth = CinemaHall.screenWidth
@@ -2456,11 +2514,148 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         guard cinemaActive, cinemaHall.isRunning else { return }
         cinemaNeedsAlignment = false
         let transform=headNode.simdWorldTransform
-        cinemaHall.alignViewer(origin:headNode.simdWorldPosition,
-                               forward:SIMD3(-transform.columns.2.x,0,-transform.columns.2.z))
+        cinemaHall.restoreRemote()
+        let forward = SIMD3<Float>(-transform.columns.2.x, -transform.columns.2.y, -transform.columns.2.z)
+        if cinemaHall.comfort.isReclined {
+            cinemaHall.alignReclinedViewer(origin: headNode.simdWorldPosition, forward: forward)
+        } else {
+            cinemaHall.alignViewer(origin: headNode.simdWorldPosition, forward: forward)
+        }
+        cinemaHall.setHeadAiming(usesHeadAim, head: headNode)
         browserPlaneNode.simdWorldTransform=cinemaHall.screenWorldTransform
         updateCinemaWebScreen()
         cancelHandInteraction()
+    }
+
+    private func toggleCinemaRemote() {
+        guard cinemaActive, !cinemaHall.comfort.isPeeking else { return }
+        cancelHandInteraction()
+        controllerButtonDown = false
+        cinemaHall.toggleRemote(headTransform: headNode.simdWorldTransform, at: CACurrentMediaTime())
+    }
+
+    private func toggleCinemaPeek() {
+        guard cinemaActive else { return }
+        let peeking = !cinemaHall.comfort.isPeeking
+        if peeking {
+            guard let frame = tracking.latestFrameCopy, tracking.isCurrent(frame),
+                  CACurrentMediaTime() - frame.timestamp < 0.25 else {
+                cinemaHall.setNotice("Камера пока недоступна")
+                return
+            }
+        }
+        setCinemaPeeking(peeking)
+    }
+
+    private func setCinemaPeeking(_ peeking: Bool) {
+        cancelHandInteraction()
+        controllerButtonDown = false
+        hidePointer()
+        controllerHandRoot.isHidden = true
+        cinemaHall.setPeeking(peeking)
+        browserPlaneNode.isHidden = peeking
+        // Hide only the presentation. Keep the single player/page alive; do not
+        // reload, mute, or send play when returning from the camera.
+        liveWebReplicator.alpha = peeking ? 0 : 1
+        updateCinemaWebPointers(nil)
+    }
+
+    private func updateCinemaControlOcclusion() {
+        guard cinemaWebScreenActive, !cinemaHall.comfort.isPeeking else {
+            liveWebReplicator.layer.mask = nil
+            return
+        }
+        let bounds = liveWebReplicator.bounds
+        let half = Double(bounds.width / 2)
+        let shift = SIMD2<Double>(Double(liveWebReplicator.copyOffset.x), Double(liveWebReplicator.copyOffset.y))
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        defer { CATransaction.commit() }
+        var previous: CALayer?
+        liveWebReplicator.layer.mask = nil
+        for (index, panel) in cinemaHall.overlayPanels.enumerated() {
+            guard cinemaControlMasks.indices.contains(index) else { break }
+            let w = panel.width / 2, h = panel.height / 2
+            let corners = [SIMD3<Float>(-w, h, 0.045), SIMD3<Float>(w, h, 0.045),
+                           SIMD3<Float>(w, -h, 0.045), SIMD3<Float>(-w, -h, 0.045)]
+            let left = corners.compactMap { projectedCinemaCorner($0, eye: 0, using: panel.transform) }
+            guard left.count == 4 else { continue }
+            let path = UIBezierPath(rect: bounds)
+            for eye in 0..<2 {
+                let polygon = eye == 0 ? left : left.map { $0 + shift }
+                let clipped = CinemaControlMask.clipped(polygon, minX: Double(eye) * half,
+                    maxX: Double(eye + 1) * half, maxY: Double(bounds.height))
+                guard let first = clipped.first else { continue }
+                path.move(to: CGPoint(x: first.x, y: first.y))
+                for point in clipped.dropFirst() { path.addLine(to: CGPoint(x: point.x, y: point.y)) }
+                path.close()
+            }
+            let mask = cinemaControlMasks[index]
+            mask.mask = nil
+            mask.frame = bounds
+            mask.fillColor = UIColor.white.cgColor
+            mask.fillRule = .evenOdd
+            mask.path = path.cgPath
+            // Multiply independent masks. Overlapping holes must stay clear,
+            // unlike one even-odd path which would reveal video at intersections.
+            if let previous { previous.mask = mask } else { liveWebReplicator.layer.mask = mask }
+            previous = mask
+        }
+    }
+
+    private func tickCinemaComfort(at time: Double) {
+        guard cinemaActive else { return }
+        let frame = tracking.latestFrameCopy
+        let fresh = frame.map { tracking.isCurrent($0) && time >= $0.timestamp && time - $0.timestamp < 0.5 } ?? false
+        if !fresh, cinemaHall.comfort.reclineDeadline != nil {
+            cinemaHall.cancelPendingRecline()
+            cinemaHall.setNotice("Камера недоступна — настройка наклона отменена")
+        }
+        cinemaHall.tick(at: time)
+        if cinemaHall.comfort.isPeeking {
+            if !fresh {
+                setCinemaPeeking(false)
+                cinemaHall.setNotice("Камера недоступна — возврат в зал")
+            }
+        }
+        browserPlaneNode.isHidden = cinemaHall.comfort.isPeeking
+        liveWebReplicator.alpha = cinemaHall.comfort.isPeeking ? 0 : 1
+    }
+
+    /// Both a tracked hand and the controller use the same spatial controls.
+    private func handleCinemaRay(_ ray: WorldRay?, down: Bool, allowBegin: Bool, dwell: Bool) {
+        guard cinemaActive else { return }
+        let consumed = cinemaHall.update(ray: ray, pinch: down, allowBegin: allowBegin, dwell: dwell)
+        guard !consumed, !cinemaHall.comfort.isPeeking, let ray,
+              let hit = planeHit(ray: ray, transform: cinemaHall.screenWorldTransform) else {
+            releasePointer()
+            hidePointer()
+            return
+        }
+        let uv = CGPoint(x: CGFloat(hit.localX / CinemaHall.screenWidth + 0.5),
+                         y: CGFloat(0.5 - hit.localY / CinemaHall.screenHeight))
+        guard (0...1).contains(uv.x), (0...1).contains(uv.y) else {
+            releasePointer(); hidePointer(); return
+        }
+        if cinemaWebScreenActive {
+            updateDirectVideoInput(normalizedPoint: uv, pinch: down, allowBegin: allowBegin, dwell: dwell)
+        } else if !cinemaPlayback.isActive {
+            input.update(normalizedPoint: uv, pinch: down, webView: browser, allowBegin: allowBegin, dwell: dwell)
+        }
+    }
+
+    private func updateCinemaController() {
+        let frustum = VRLensMath.frustum(eye: 0, profile: profile)
+        let x = frustum.left + Float(controllerPointer.x) * (frustum.right - frustum.left)
+        let y = frustum.top - Float(controllerPointer.y) * (frustum.top - frustum.bottom)
+        let transform = headNode.simdWorldTransform
+        let direction = transform * SIMD4<Float>(x, y, -1, 0)
+        let ray = WorldRay(origin: headNode.simdWorldPosition,
+                           direction: simd_normalize(SIMD3(direction.x, direction.y, direction.z)))
+        controllerHandRoot.isHidden = true
+        handleCinemaRay(ray, down: controllerButtonDown, allowBegin: true, dwell: false)
+        if cinemaActive {
+            showPointerDot(at: ray.point(at: 0.9), transform: transform, active: controllerButtonDown)
+        }
     }
 
     private func cinemaVolume(_ delta: Float) {
@@ -2535,6 +2730,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         handOwnership.reset()
         hands.reset()
         tracking.pause()
+        panorama.stop()
         stopBrowserCapture()
         hideDirectVideoStage()
         releasePointer()
@@ -2575,6 +2771,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     @objc private func handleRecenterTap() {
         // В кинотеатре тап по экрану не должен перетягивать экран зала.
         guard inVR, !cinemaActive else { return }
+        if panoramaActive { panorama.recenter(head: headNode); return }
         resetBrowserAnchor()
         UIImpactFeedbackGenerator(style: .light).impactOccurred()
     }
@@ -2620,7 +2817,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
 
     private func ensureBrowserAnchor(using cameraTransform: simd_float4x4) {
         guard inVR, !didCreateInitialAnchor else { return }
-        guard !cinemaActive else { return }
+        guard !cinemaActive, !panoramaActive else { return }
         guard view.bounds.width > view.bounds.height, view.bounds.width > 100 else { return }
 
         let position = SIMD3<Float>(
@@ -2687,10 +2884,11 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         browserPlaneNode.simdWorldTransform = transform
         // Во время Security VR браузерный слой должен оставаться скрытым:
         // иначе меню просвечивает сквозь игровую комнату.
-        browserPlaneNode.isHidden = !inVR || securityGameActive
+        browserPlaneNode.isHidden = !inVR || securityGameActive || panoramaActive
     }
 
     private func resetBrowserAnchor() {
+        if panoramaActive { panorama.recenter(head: headNode); return }
         if cinemaActive { alignCinemaToCurrentPose(); return }
         if let anchor = browserAnchor {
             tracking.remove(anchor: anchor)
@@ -2704,7 +2902,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
 
     private func startBrowserCapture() {
         stopBrowserCapture()
-        guard inVR, !directVideoActive, !cinemaPlayback.isActive, !securityGameActive else { return }
+        guard inVR, !directVideoActive, !cinemaPlayback.isActive, !securityGameActive, !panoramaActive else { return }
         browserCaptureEnabled = true
         scheduleBrowserCapture()
     }
@@ -2756,7 +2954,65 @@ final class MainViewController: UIViewController, MTKViewDelegate {
 
     // MARK: Руки и указатель
 
+    private func setPointerControlMode(_ mode: PointerControlMode) {
+        guard pointerControlMode != mode else { return }
+        cancelHandInteraction()
+        endDrag(); endResize()
+        handOwnership.reset(); hands.reset(); menuSwipe.reset()
+        pointerControlMode = mode; mode.save()
+        controllerButtonDown = false
+        controllerHandRoot.isHidden = true
+        leftHandSkeletonNode.isHidden = true; rightHandSkeletonNode.isHidden = true
+        hidePointer(); hidePointerDot()
+        cinemaHall.setHeadAiming(usesHeadAim, head: headNode)
+        menu?.updatePointerControlMode()
+        updateVRDesktopStatus()
+    }
+
+    private func updateHeadAim(at time: Double) {
+        guard inVR, usesHeadAim, lensCalibrationView == nil else { return }
+        let frame = tracking.latestFrameCopy
+        let ready = headAimSession.update(at: time, poseTime: frame?.timestamp ?? -.infinity,
+                                          current: frame.map { tracking.isCurrent($0) } ?? false)
+        guard ready else {
+            // Do not reset the session's settling timer while waiting for it.
+            releasePointer(); hidePointer(); hidePointerDot()
+            cinemaHall.cancelInput(); securityGame.cancelInput(); panorama.cancelInput()
+            toolbarClickGate.cancel()
+            return
+        }
+        let transform = headNode.simdWorldTransform
+        let forward = SIMD3<Float>(-transform.columns.2.x, -transform.columns.2.y, -transform.columns.2.z)
+        guard forward.x.isFinite, forward.y.isFinite, forward.z.isFinite,
+              simd_length(forward) > 0.001 else {
+            headAimSession.reset(); cancelHandInteraction(); return
+        }
+        let ray = WorldRay(origin: headNode.simdWorldPosition, direction: simd_normalize(forward))
+        controllerHandRoot.isHidden = true
+        if panoramaActive {
+            handlePanoramaRay(ray, down: false, allowBegin: false, dwell: true)
+        } else if cinemaActive {
+            // Looking at the film must never activate the video's pause surface.
+            _ = cinemaHall.update(ray: ray, pinch: false, allowBegin: false, dwell: true)
+            if cinemaWebScreenActive, !cinemaHall.comfort.isPeeking,
+               let hit = planeHit(ray: ray, transform: cinemaHall.screenWorldTransform) {
+                let uv = CGPoint(x: CGFloat(hit.localX / CinemaHall.screenWidth + 0.5),
+                                 y: CGFloat(0.5 - hit.localY / CinemaHall.screenHeight))
+                updateCinemaWebPointers((0...1).contains(uv.x) && (0...1).contains(uv.y) ? uv : nil)
+            } else { updateCinemaWebPointers(nil) }
+        } else if securityGameActive {
+            securityGame.update(ray: ray, pinch: false, allowBegin: false, dwell: true)
+        } else {
+            handleWindowRay(ray, down: false, allowBegin: false, dwell: true, at: time)
+        }
+        if inVR, usesHeadAim {
+            showPointerDot(at: ray.point(at: 0.9), transform: transform, active: false)
+            rayNode.isHidden = true
+        }
+    }
+
     private func handleControllerStick(x: CGFloat, y: CGFloat) {
+        guard !usesHeadAim || lensCalibrationView != nil else { return }
         guard inVR, controllerConnected else { return }
         guard CACurrentMediaTime() - lastHandSeenTime > 0.45 else { return }
         let dead: CGFloat = 0.12
@@ -2773,6 +3029,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     }
 
     private func handleControllerGyro(_ rate: SIMD3<Float>) {
+        guard !usesHeadAim || lensCalibrationView != nil else { return }
         guard inVR, controllerConnected else { return }
         guard CACurrentMediaTime() - lastHandSeenTime > 0.45 else { return }
         let dt: CGFloat = 1.0 / 30.0
@@ -2785,6 +3042,10 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     }
 
     private func handleControllerButton(_ button: VRBoxButton, pressed: Bool) {
+        if usesHeadAim, lensCalibrationView == nil {
+            if button == .menu, pressed { leaveVRToMenu() }
+            return
+        }
         guard inVR, controllerConnected else { return }
         guard CACurrentMediaTime() - lastHandSeenTime > 0.45 else { return }
         if lensCalibrationView != nil {
@@ -2792,6 +3053,25 @@ final class MainViewController: UIViewController, MTKViewDelegate {
             case .a: controllerButtonDown=pressed;updateControllerHand()
             case .b, .x, .menu: if pressed {finishLensCalibration()}
             default: break
+            }
+            return
+        }
+        if panoramaActive {
+            switch button {
+            case .a: controllerButtonDown = pressed; updatePanoramaController()
+            case .b, .x: if pressed { exitPanorama() }
+            case .y: if pressed { panorama.recenter(head: headNode) }
+            case .menu: if pressed { leaveVRToMenu() }
+            }
+            return
+        }
+        if cinemaActive {
+            switch button {
+            case .a: controllerButtonDown = pressed; updateCinemaController()
+            case .b: if pressed { toggleCinemaPeek(); playUIConfirmation() }
+            case .x: if pressed { toggleCinemaRemote(); playUIConfirmation() }
+            case .y: if pressed { alignCinemaToCurrentPose(); playUIConfirmation() }
+            case .menu: if pressed { leaveVRToMenu() }
             }
             return
         }
@@ -2819,15 +3099,15 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     }
 
     private func updateControllerHand() {
+        guard !usesHeadAim || lensCalibrationView != nil else { return }
         if let calibration=lensCalibrationView {
             calibration.updatePointer(CGPoint(x:controllerPointer.x*view.bounds.width*0.5,y:controllerPointer.y*view.bounds.height),
                 down:controllerButtonDown,dwell:false,time:CACurrentMediaTime())
             return
         }
-        if cinemaWebScreenActive {
-            controllerHandRoot.isHidden = true
-            updateCinemaWebPointers(controllerPointer)
-            updateDirectVideoInput(normalizedPoint: controllerPointer, pinch: controllerButtonDown)
+        if panoramaActive { updatePanoramaController(); return }
+        if cinemaActive {
+            updateCinemaController()
             return
         }
         guard inVR, controllerConnected, let transform = browserWorldTransform else {
@@ -2872,25 +3152,27 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     }
 
     private func cancelHandInteraction() {
+        headAimSession.reset()
         lensCalibrationView?.cancelInteraction()
         input.release(webView: browser)
         directLeftInput.release(webView: directVideoLeft)
         cinemaHall.cancelInput()
         securityGame.cancelInput()
+        panorama.cancelInput()
         toolbarClickGate.cancel()
         toolbarDwellRing.isHidden=true
         updateCinemaWebPointers(nil)
     }
 
     private func handleHands(left rawLeft: HandSample?, right rawRight: HandSample?) {
-        guard inVR else { return }
+        guard inVR, !usesHeadAim || lensCalibrationView != nil else { return }
         let now = CACurrentMediaTime()
         let freshLeft = rawLeft.flatMap { now-$0.timestamp <= 0.2 && now >= $0.timestamp && tracking.acceptsHand(timestamp:$0.timestamp) ? $0 : nil }
         let freshRight = rawRight.flatMap { now-$0.timestamp <= 0.2 && now >= $0.timestamp && tracking.acceptsHand(timestamp:$0.timestamp) ? $0 : nil }
         lastHandDeliveryTime = max(freshLeft?.timestamp ?? -.infinity, freshRight?.timestamp ?? -.infinity)
         if freshLeft != nil || freshRight != nil { lastHandSeenTime = now }
-        if lensCalibrationView == nil && !directVideoActive && !cinemaActive { queueHandForegroundMask(left:freshLeft,right:freshRight) }
-        if spatialHomeVisible, !cinemaActive, !securityGameActive, lensCalibrationView == nil,
+        if lensCalibrationView == nil && !directVideoActive && !cinemaActive && !panoramaActive { queueHandForegroundMask(left:freshLeft,right:freshRight) }
+        if spatialHomeVisible, !cinemaActive, !securityGameActive, !panoramaActive, lensCalibrationView == nil,
            !isDragging, !isResizing {
             let sample = [freshRight,freshLeft].compactMap{$0}.first{$0.openPalmCenter != nil}
             let point=sample?.openPalmCenter
@@ -2906,7 +3188,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
             }
         } else { menuSwipe.reset() }
         // Resizing consumes both pinches; neither may turn into a click afterward.
-        if lensCalibrationView == nil, !cinemaActive, !securityGameActive,
+        if lensCalibrationView == nil, !cinemaActive, !securityGameActive, !panoramaActive,
            let left = freshLeft, let right = freshRight, left.clickPinch, right.clickPinch {
             cancelHandInteraction()
             handOwnership.suppressUntilOpen()
@@ -2946,8 +3228,16 @@ final class MainViewController: UIViewController, MTKViewDelegate {
             updateCalibrationHand(routed)
             return
         }
-        if let sample=routed, sample.isFist, cinemaActive || securityGameActive {
+        if let sample=routed, sample.isFist, cinemaActive || securityGameActive || panoramaActive {
             cancelHandInteraction()
+            return
+        }
+        if panoramaActive {
+            let sample = right ?? left
+            let ray = sample.flatMap { tracking.worldRay(visionPoint: $0.indexTip) }
+            handlePanoramaRay(ray, down: sample?.clickPinch ?? false,
+                              allowBegin: sample?.clickBegan ?? false, dwell: usesDwell)
+            controllerHandRoot.isHidden = true
             return
         }
         if cinemaWebScreenActive {
@@ -2967,23 +3257,9 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         }
 
         if cinemaActive {
-            // Кинотеатр: панель управления за спиной + браузерный экран спереди.
-            // Клик «съедается», только если попал в кнопку панели; иначе
-            // проваливаемся дальше — экран (браузер) продолжает принимать ввод.
-            if let sample = right ?? left,
-               let ray = tracking.worldRay(visionPoint: sample.indexTip) {
-                let consumed = cinemaHall.update(ray: ray, pinch: sample.clickPinch, allowBegin:sample.clickBegan, dwell:usesDwell)
-                lastHandSeenTime = CACurrentMediaTime()
-                controllerHandRoot.isHidden = true
-                if consumed {
-                    releasePointer()
-                    hidePointer()
-                    hidePointerDot()
-                    return
-                }
-            } else {
-                cinemaHall.update(ray: nil, pinch: false)
-            }
+            handleCinemaWebHands(left: left, right: right)
+            controllerHandRoot.isHidden = true
+            return
         }
 
         if left != nil || right != nil {
@@ -3020,6 +3296,10 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         }
         endDrag()
 
+        handleWindowRay(ray, down: sample.clickPinch, allowBegin: sample.clickBegan, dwell: usesDwell, at: now)
+    }
+
+    private func handleWindowRay(_ ray: WorldRay, down: Bool, allowBegin: Bool, dwell: Bool, at now: Double) {
         guard let transform = browserWorldTransform else {
             toolbarClickGate.cancel()
             showRay(from: ray, hit: nil)
@@ -3038,7 +3318,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         }
 
         showRay(from: ray, hit: hit.point)
-        showPointerDot(at: hit.point, transform: transform, active: sample.clickPinch)
+        showPointerDot(at: hit.point, transform: transform, active: down)
 
         // The shared toolbar stays below the window during browser playback.
         // Invisible controls (e.g. in the hall) must not receive a hit.
@@ -3046,7 +3326,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
             let index = linkItems.firstIndex { hit.localX >= $0.minX && hit.localX <= $0.maxX }
             highlightToolbar(index)
             releasePointer()
-            let committed=toolbarClickGate.update(target:index,down:sample.clickPinch,allowBegin:sample.clickBegan,dwell:usesDwell,at:now)
+            let committed=toolbarClickGate.update(target:index,down:down,allowBegin:allowBegin,dwell:dwell,at:now)
             toolbarDwellRing.show(on:index.map { toolbarButtonNodes[$0] },progress:toolbarClickGate.dwellProgress)
             if let index = committed {
                 perform(item:linkItems[index])
@@ -3067,10 +3347,10 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         lastBrowserInteractionTime = CACurrentMediaTime()
         let uv = CGPoint(x: CGFloat(normalizedX), y: CGFloat(normalizedY))
         if directVideoActive {
-            updateDirectVideoInput(normalizedPoint: uv, pinch: sample.clickPinch, allowBegin: sample.clickBegan, dwell: usesDwell)
+            updateDirectVideoInput(normalizedPoint: uv, pinch: down, allowBegin: allowBegin, dwell: dwell)
         } else {
-            input.update(normalizedPoint: uv, pinch: sample.clickPinch, webView: browser,
-                         allowBegin: sample.clickBegan, dwell: usesDwell)
+            input.update(normalizedPoint: uv, pinch: down, webView: browser,
+                         allowBegin: allowBegin, dwell: dwell)
         }
     }
 
@@ -3572,7 +3852,11 @@ final class MainViewController: UIViewController, MTKViewDelegate {
 
         let drawableSize = view.drawableSize
         guard drawableSize.width > 1, drawableSize.height > 1 else { return }
+        panorama.followPosition(head: headNode)
+        updateHeadAim(at: CACurrentMediaTime())
+        tickCinemaComfort(at: CACurrentMediaTime())
         if directVideoActive { updateCinemaWebScreen() }
+        updateCinemaControlOcclusion()
 
         ensureEyeTextures(for: drawableSize)
         guard let eyeTexture, let eyeDepthTexture else { return }
@@ -3610,7 +3894,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
             frame: frame,
             hasCamera: cameraTextures != nil
         )
-        uniforms.handMaskEnabled = syncHandMaskTexture() ? 1 : 0
+        uniforms.handMaskEnabled = !panoramaActive && syncHandMaskTexture() ? 1 : 0
 
         let handMaskTexture = handMaskTexture ?? eyeTexture
         if let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: passDescriptor) {
@@ -3651,9 +3935,9 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         // Full rectangular eye view; overscan preserves the calibrated lens warp.
         uniforms.rClip = 10
         uniforms.overscan = VRLensMath.renderScale(profile:profile,aspect:uniforms.aspect)
-        uniforms.passthrough = (profile.passthrough && hasCamera && !cinemaActive) ? 1 : 0
+        uniforms.passthrough = (cameraPassthroughRequested && hasCamera) ? 1 : 0
 
-        guard let frame, profile.passthrough, hasCamera, !cinemaActive else { return uniforms }
+        guard let frame, cameraPassthroughRequested, hasCamera else { return uniforms }
 
         guard let projection = tracking.projection(for: frame) else {
             uniforms.passthrough = 0
@@ -3688,7 +3972,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
 
     private func makeCameraTextures(from frame: CameraFrame?) -> (MTLTexture, MTLTexture)? {
         guard
-            profile.passthrough,
+            cameraPassthroughRequested,
             let frame,
             let cache = textureCache
         else {
@@ -3863,7 +4147,7 @@ button.handar-confirmed{outline:2px solid #ffffffb0;outline-offset:2px}
 <main class="workspace">
 <header class="status"><span id="time">--:--</span><span class="divider"></span><span>Главный экран</span><span id="controllerState"></span></header>
 <nav class="rail glass" aria-label="Разделы"><button data-view="people" aria-label="Люди"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8" r="3"/><path d="M3 20v-2a6 6 0 0 1 12 0v2M16 5a3 3 0 0 1 0 6M18 14a5 5 0 0 1 3 5"/></svg></button><button class="active" data-view="apps" aria-label="Приложения" aria-pressed="true"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="6" r="1.5"/><circle cx="12" cy="6" r="1.5"/><circle cx="18" cy="6" r="1.5"/><circle cx="6" cy="12" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="18" cy="12" r="1.5"/><circle cx="6" cy="18" r="1.5"/><circle cx="12" cy="18" r="1.5"/><circle cx="18" cy="18" r="1.5"/></svg></button><button data-view="environments" aria-label="Окружения"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m2 19 7-12 5 8 3-5 5 9ZM7 10l2 2 2-2"/><circle cx="17" cy="5" r="2"/></svg></button></nav>
-<section class="view" id="apps" aria-label="Приложения"><div class="app-page" data-page="0"><div class="app-row"><button class="app" data-id="cinema" aria-label="Кино"><div class="icon teal"><svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M7 5v14M17 5v14M3 9h4M3 15h4M17 9h4M17 15h4"/></svg></div><span>Кино</span></button><button class="app" data-id="spotify" aria-label="Музыка"><div class="icon red"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 17V6l9-2v11M10 8l9-2"/><ellipse cx="7" cy="17" rx="3" ry="2.3" fill="white" stroke="none"/><ellipse cx="16" cy="15" rx="3" ry="2.3" fill="white" stroke="none"/></svg></div><span>Музыка</span></button><button class="app" data-id="safari" aria-label="Safari"><div class="icon blue"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10" fill="#36a8f5" stroke="#b9e8ff"/><g stroke="#fff" stroke-width=".6"><path d="M12 3v1.6" transform="rotate(0 12 12)"/><path d="M12 3v1.6" transform="rotate(30 12 12)"/><path d="M12 3v1.6" transform="rotate(60 12 12)"/><path d="M12 3v1.6" transform="rotate(90 12 12)"/><path d="M12 3v1.6" transform="rotate(120 12 12)"/><path d="M12 3v1.6" transform="rotate(150 12 12)"/><path d="M12 3v1.6" transform="rotate(180 12 12)"/><path d="M12 3v1.6" transform="rotate(210 12 12)"/><path d="M12 3v1.6" transform="rotate(240 12 12)"/><path d="M12 3v1.6" transform="rotate(270 12 12)"/><path d="M12 3v1.6" transform="rotate(300 12 12)"/><path d="M12 3v1.6" transform="rotate(330 12 12)"/></g><path d="m16 7-3 6-2-2Z" fill="#ff5263" stroke="none"/><path d="m8 17 3-6 2 2Z" fill="white" stroke="none"/></svg></div><span>Safari</span></button><button class="app" data-id="photos" aria-label="Фото"><div class="icon pink"><svg viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="7" rx="3.4" ry="5.2" fill="#ffb92e" opacity=".82" transform="rotate(0 12 12)" stroke="none"/><ellipse cx="12" cy="7" rx="3.4" ry="5.2" fill="#ff7b28" opacity=".82" transform="rotate(45 12 12)" stroke="none"/><ellipse cx="12" cy="7" rx="3.4" ry="5.2" fill="#fc4267" opacity=".82" transform="rotate(90 12 12)" stroke="none"/><ellipse cx="12" cy="7" rx="3.4" ry="5.2" fill="#d758bb" opacity=".82" transform="rotate(135 12 12)" stroke="none"/><ellipse cx="12" cy="7" rx="3.4" ry="5.2" fill="#7c75d7" opacity=".82" transform="rotate(180 12 12)" stroke="none"/><ellipse cx="12" cy="7" rx="3.4" ry="5.2" fill="#49a3eb" opacity=".82" transform="rotate(225 12 12)" stroke="none"/><ellipse cx="12" cy="7" rx="3.4" ry="5.2" fill="#57c990" opacity=".82" transform="rotate(270 12 12)" stroke="none"/><ellipse cx="12" cy="7" rx="3.4" ry="5.2" fill="#c2d94c" opacity=".82" transform="rotate(315 12 12)" stroke="none"/></svg></div><span>Фото</span></button></div><div class="app-row"><button class="app" data-id="gmail" aria-label="Почта"><div class="icon red"><svg viewBox="0 0 24 24"><path d="M4 6h16v12H4z"/><path d="m4 7 8 6 8-6"/></svg></div><span>Почта</span></button><button class="app" data-id="messages" aria-label="Сообщения"><div class="icon green"><svg viewBox="0 0 24 24"><path d="M4 5h16v11H9l-5 4z"/></svg></div><span>Сообщения</span></button><button class="app" data-id="maps" aria-label="Карты"><div class="icon orange"><svg viewBox="0 0 24 24"><path d="M12 20s6-6 6-10a6 6 0 1 0-12 0c0 4 6 10 6 10Z"/><circle cx="12" cy="10" r="2"/></svg></div><span>Карты</span></button><button class="app" data-id="notes" aria-label="Заметки"><div class="icon orange"><svg viewBox="0 0 24 24"><path d="M6 4h12v16H6z"/><path d="M9 8h6M9 12h6M9 16h4"/></svg></div><span>Заметки</span></button><button class="app" data-id="settings" aria-label="Настройки"><div class="icon gray"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 0 0-.1-1.2l2-1.5-2-3.4-2.3.9a7 7 0 0 0-2-1.1L14.3 3h-4.6l-.4 2.7a7 7 0 0 0-2 1.1L5 5.9 3 9.3l2 1.5A7 7 0 0 0 5 12c0 .4 0 .8.1 1.2l-2 1.5 2 3.4 2.3-.9a7 7 0 0 0 2 1.1l.4 2.7h4.6l.4-2.7a7 7 0 0 0 2-1.1l2.3.9 2-3.4-2-1.5c.1-.4.1-.8.1-1.2Z"/></svg></div><span>Настройки</span></button></div><div class="app-row"><button class="app" data-id="files" aria-label="Файлы"><div class="icon blue"><svg viewBox="0 0 24 24"><path d="M4 7h6l2 2h8v9H4z"/><path d="M4 10h16"/></svg></div><span>Файлы</span></button><button class="app" data-id="telegram" aria-label="Telegram"><div class="icon cyan"><svg viewBox="0 0 24 24"><path class="solid" d="M20.8 4.4 3.2 11.2c-1 .4-1 1.1-.2 1.4l4.5 1.4 1.7 5.1c.2.6.1.9.8.9.5 0 .8-.2 1.1-.5l2.1-2 4.4 3.3c.8.4 1.4.2 1.6-.7l3.1-14.4c.3-1.2-.5-1.8-1.5-1.3Z"/></svg></div><span>Telegram</span></button><button class="app" data-id="games" aria-label="Игры"><div class="icon purple"><svg viewBox="0 0 24 24"><rect x="4" y="7" width="16" height="11" rx="3"/><path d="M8 12h4M10 10v4"/><circle cx="16" cy="11.5" r="1" fill="#fff" stroke="none"/><circle cx="18" cy="14.5" r="1" fill="#fff" stroke="none"/></svg></div><span>Игры</span></button><button class="app" data-id="calculator" aria-label="Калькулятор"><div class="icon dark"><svg viewBox="0 0 24 24"><rect x="5" y="3" width="14" height="18" rx="2"/><path d="M8 7h8M8 11h2M12 11h2M16 11h0M8 15h2M12 15h2M8 18h8"/></svg></div><span>Калькулятор</span></button></div></div><div class="app-page" data-page="1" hidden><div class="app-row"><button class="app" data-id="youtube" aria-label="YouTube"><div class="icon red"><svg viewBox="0 0 24 24"><path class="solid" d="M21 7.4a2.8 2.8 0 0 0-2-2C17.2 5 12 5 12 5s-5.2 0-7 .4a2.8 2.8 0 0 0-2 2A29 29 0 0 0 2.6 12 29 29 0 0 0 3 16.6a2.8 2.8 0 0 0 2 2c1.8.4 7 .4 7 .4s5.2 0 7-.4a2.8 2.8 0 0 0 2-2 29 29 0 0 0 .4-4.6A29 29 0 0 0 21 7.4Z"/><path d="m10 9 5 3-5 3z" fill="#e21c2a" stroke="none"/></svg></div><span>YouTube</span></button><button class="app" data-id="tiktok" aria-label="TikTok"><div class="icon dark"><svg viewBox="0 0 24 24"><path d="M14 5v9a4 4 0 1 1-3.2-3.9"/><path d="M14 5c1.2 2.2 2.8 3.4 5 3.6"/></svg></div><span>TikTok</span></button><button class="app" data-id="discord" aria-label="Discord"><div class="icon indigo"><svg viewBox="0 0 24 24"><path d="M7 7.8c2.9-1.1 7.1-1.1 10 0 1.5 1.3 2.3 4.6 1.9 7.6-1.9 1.3-3.7 2-5.5 2.4l-.8-1.1"/><path d="M7 7.8c-1.5 1.3-2.3 4.6-1.9 7.6 1.9 1.3 3.7 2 5.5 2.4l.8-1.1"/><circle cx="9.2" cy="12.5" r="1"/><circle cx="14.8" cy="12.5" r="1"/></svg></div><span>Discord</span></button><button class="app" data-id="google" aria-label="Google"><div class="icon dark"><svg viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.2-5.5"/><path d="M20 7v5h-5"/></svg></div><span>Google</span></button></div><div class="app-row"><button class="app" data-id="wikipedia" aria-label="Wikipedia"><div class="icon gray"><svg viewBox="0 0 24 24"><path d="M4 6h4l4 10 4-10h4"/><path d="M9 18h6"/></svg></div><span>Wikipedia</span></button><button class="app" data-id="reddit" aria-label="Reddit"><div class="icon orange"><svg viewBox="0 0 24 24"><circle cx="12" cy="13" r="6.5"/><circle cx="9.5" cy="12.5" r=".9" fill="#fff" stroke="none"/><circle cx="14.5" cy="12.5" r=".9" fill="#fff" stroke="none"/><path d="M9 15c1.7 1.2 4.3 1.2 6 0"/><path d="m14.5 6 1.8-2.2"/><circle cx="17.2" cy="3.5" r="1"/></svg></div><span>Reddit</span></button><button class="app" data-id="phone" aria-label="Телефон"><div class="icon green"><svg viewBox="0 0 24 24"><path d="M7 4c1.1 0 2 .9 2 2 0 1-.2 1.8-.6 2.6-.2.4-.1.8.2 1.1l2.1 2.1c.3.3.7.4 1.1.2.8-.4 1.6-.6 2.6-.6 1.1 0 2 .9 2 2v3c0 1.1-.9 2-2 2C9.8 18.4 5.6 14.2 4.6 9.1 4.4 8.1 5.2 7 6.3 6.7z"/></svg></div><span>Телефон</span></button></div></div><div class="pages" aria-label="Страницы"><button class="page-dot active" data-show-page="0" aria-label="Первая страница" aria-pressed="true"></button><button class="page-dot" data-show-page="1" aria-label="Вторая страница" aria-pressed="false"></button></div></section>
+<section class="view" id="apps" aria-label="Приложения"><div class="app-page" data-page="0"><div class="app-row"><button class="app" data-id="cinema" aria-label="Кино"><div class="icon teal"><svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M7 5v14M17 5v14M3 9h4M3 15h4M17 9h4M17 15h4"/></svg></div><span>Кино</span></button><button class="app" data-id="spotify" aria-label="Музыка"><div class="icon red"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 17V6l9-2v11M10 8l9-2"/><ellipse cx="7" cy="17" rx="3" ry="2.3" fill="white" stroke="none"/><ellipse cx="16" cy="15" rx="3" ry="2.3" fill="white" stroke="none"/></svg></div><span>Музыка</span></button><button class="app" data-id="safari" aria-label="Safari"><div class="icon blue"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10" fill="#36a8f5" stroke="#b9e8ff"/><g stroke="#fff" stroke-width=".6"><path d="M12 3v1.6" transform="rotate(0 12 12)"/><path d="M12 3v1.6" transform="rotate(30 12 12)"/><path d="M12 3v1.6" transform="rotate(60 12 12)"/><path d="M12 3v1.6" transform="rotate(90 12 12)"/><path d="M12 3v1.6" transform="rotate(120 12 12)"/><path d="M12 3v1.6" transform="rotate(150 12 12)"/><path d="M12 3v1.6" transform="rotate(180 12 12)"/><path d="M12 3v1.6" transform="rotate(210 12 12)"/><path d="M12 3v1.6" transform="rotate(240 12 12)"/><path d="M12 3v1.6" transform="rotate(270 12 12)"/><path d="M12 3v1.6" transform="rotate(300 12 12)"/><path d="M12 3v1.6" transform="rotate(330 12 12)"/></g><path d="m16 7-3 6-2-2Z" fill="#ff5263" stroke="none"/><path d="m8 17 3-6 2 2Z" fill="white" stroke="none"/></svg></div><span>Safari</span></button><button class="app" data-id="photos" aria-label="Фото"><div class="icon pink"><svg viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="7" rx="3.4" ry="5.2" fill="#ffb92e" opacity=".82" transform="rotate(0 12 12)" stroke="none"/><ellipse cx="12" cy="7" rx="3.4" ry="5.2" fill="#ff7b28" opacity=".82" transform="rotate(45 12 12)" stroke="none"/><ellipse cx="12" cy="7" rx="3.4" ry="5.2" fill="#fc4267" opacity=".82" transform="rotate(90 12 12)" stroke="none"/><ellipse cx="12" cy="7" rx="3.4" ry="5.2" fill="#d758bb" opacity=".82" transform="rotate(135 12 12)" stroke="none"/><ellipse cx="12" cy="7" rx="3.4" ry="5.2" fill="#7c75d7" opacity=".82" transform="rotate(180 12 12)" stroke="none"/><ellipse cx="12" cy="7" rx="3.4" ry="5.2" fill="#49a3eb" opacity=".82" transform="rotate(225 12 12)" stroke="none"/><ellipse cx="12" cy="7" rx="3.4" ry="5.2" fill="#57c990" opacity=".82" transform="rotate(270 12 12)" stroke="none"/><ellipse cx="12" cy="7" rx="3.4" ry="5.2" fill="#c2d94c" opacity=".82" transform="rotate(315 12 12)" stroke="none"/></svg></div><span>Фото</span></button></div><div class="app-row"><button class="app" data-id="gmail" aria-label="Почта"><div class="icon red"><svg viewBox="0 0 24 24"><path d="M4 6h16v12H4z"/><path d="m4 7 8 6 8-6"/></svg></div><span>Почта</span></button><button class="app" data-id="messages" aria-label="Сообщения"><div class="icon green"><svg viewBox="0 0 24 24"><path d="M4 5h16v11H9l-5 4z"/></svg></div><span>Сообщения</span></button><button class="app" data-id="maps" aria-label="Карты"><div class="icon orange"><svg viewBox="0 0 24 24"><path d="M12 20s6-6 6-10a6 6 0 1 0-12 0c0 4 6 10 6 10Z"/><circle cx="12" cy="10" r="2"/></svg></div><span>Карты</span></button><button class="app" data-id="notes" aria-label="Заметки"><div class="icon orange"><svg viewBox="0 0 24 24"><path d="M6 4h12v16H6z"/><path d="M9 8h6M9 12h6M9 16h4"/></svg></div><span>Заметки</span></button><button class="app" data-id="settings" aria-label="Настройки"><div class="icon gray"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 0 0-.1-1.2l2-1.5-2-3.4-2.3.9a7 7 0 0 0-2-1.1L14.3 3h-4.6l-.4 2.7a7 7 0 0 0-2 1.1L5 5.9 3 9.3l2 1.5A7 7 0 0 0 5 12c0 .4 0 .8.1 1.2l-2 1.5 2 3.4 2.3-.9a7 7 0 0 0 2 1.1l.4 2.7h4.6l.4-2.7a7 7 0 0 0 2-1.1l2.3.9 2-3.4-2-1.5c.1-.4.1-.8.1-1.2Z"/></svg></div><span>Настройки</span></button></div><div class="app-row"><button class="app" data-id="files" aria-label="Файлы"><div class="icon blue"><svg viewBox="0 0 24 24"><path d="M4 7h6l2 2h8v9H4z"/><path d="M4 10h16"/></svg></div><span>Файлы</span></button><button class="app" data-id="telegram" aria-label="Telegram"><div class="icon cyan"><svg viewBox="0 0 24 24"><path class="solid" d="M20.8 4.4 3.2 11.2c-1 .4-1 1.1-.2 1.4l4.5 1.4 1.7 5.1c.2.6.1.9.8.9.5 0 .8-.2 1.1-.5l2.1-2 4.4 3.3c.8.4 1.4.2 1.6-.7l3.1-14.4c.3-1.2-.5-1.8-1.5-1.3Z"/></svg></div><span>Telegram</span></button><button class="app" data-id="games" aria-label="Игры"><div class="icon purple"><svg viewBox="0 0 24 24"><rect x="4" y="7" width="16" height="11" rx="3"/><path d="M8 12h4M10 10v4"/><circle cx="16" cy="11.5" r="1" fill="#fff" stroke="none"/><circle cx="18" cy="14.5" r="1" fill="#fff" stroke="none"/></svg></div><span>Игры</span></button><button class="app" data-id="calculator" aria-label="Калькулятор"><div class="icon dark"><svg viewBox="0 0 24 24"><rect x="5" y="3" width="14" height="18" rx="2"/><path d="M8 7h8M8 11h2M12 11h2M16 11h0M8 15h2M12 15h2M8 18h8"/></svg></div><span>Калькулятор</span></button></div></div><div class="app-page" data-page="1" hidden><div class="app-row"><button class="app" data-id="youtube" aria-label="YouTube"><div class="icon red"><svg viewBox="0 0 24 24"><path class="solid" d="M21 7.4a2.8 2.8 0 0 0-2-2C17.2 5 12 5 12 5s-5.2 0-7 .4a2.8 2.8 0 0 0-2 2A29 29 0 0 0 2.6 12 29 29 0 0 0 3 16.6a2.8 2.8 0 0 0 2 2c1.8.4 7 .4 7 .4s5.2 0 7-.4a2.8 2.8 0 0 0 2-2 29 29 0 0 0 .4-4.6A29 29 0 0 0 21 7.4Z"/><path d="m10 9 5 3-5 3z" fill="#e21c2a" stroke="none"/></svg></div><span>YouTube</span></button><button class="app" data-id="tiktok" aria-label="TikTok"><div class="icon dark"><svg viewBox="0 0 24 24"><path d="M14 5v9a4 4 0 1 1-3.2-3.9"/><path d="M14 5c1.2 2.2 2.8 3.4 5 3.6"/></svg></div><span>TikTok</span></button><button class="app" data-id="discord" aria-label="Discord"><div class="icon indigo"><svg viewBox="0 0 24 24"><path d="M7 7.8c2.9-1.1 7.1-1.1 10 0 1.5 1.3 2.3 4.6 1.9 7.6-1.9 1.3-3.7 2-5.5 2.4l-.8-1.1"/><path d="M7 7.8c-1.5 1.3-2.3 4.6-1.9 7.6 1.9 1.3 3.7 2 5.5 2.4l.8-1.1"/><circle cx="9.2" cy="12.5" r="1"/><circle cx="14.8" cy="12.5" r="1"/></svg></div><span>Discord</span></button><button class="app" data-id="google" aria-label="Google"><div class="icon dark"><svg viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.2-5.5"/><path d="M20 7v5h-5"/></svg></div><span>Google</span></button></div><div class="app-row"><button class="app" data-id="wikipedia" aria-label="Wikipedia"><div class="icon gray"><svg viewBox="0 0 24 24"><path d="M4 6h4l4 10 4-10h4"/><path d="M9 18h6"/></svg></div><span>Wikipedia</span></button><button class="app" data-id="reddit" aria-label="Reddit"><div class="icon orange"><svg viewBox="0 0 24 24"><circle cx="12" cy="13" r="6.5"/><circle cx="9.5" cy="12.5" r=".9" fill="#fff" stroke="none"/><circle cx="14.5" cy="12.5" r=".9" fill="#fff" stroke="none"/><path d="M9 15c1.7 1.2 4.3 1.2 6 0"/><path d="m14.5 6 1.8-2.2"/><circle cx="17.2" cy="3.5" r="1"/></svg></div><span>Reddit</span></button><button class="app" data-id="travel" aria-label="Путешествия"><div class="icon cyan"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><ellipse cx="12" cy="12" rx="4" ry="9"/><path d="M3 12h18"/></svg></div><span>Путешествия</span></button><button class="app" data-id="phone" aria-label="Телефон"><div class="icon green"><svg viewBox="0 0 24 24"><path d="M7 4c1.1 0 2 .9 2 2 0 1-.2 1.8-.6 2.6-.2.4-.1.8.2 1.1l2.1 2.1c.3.3.7.4 1.1.2.8-.4 1.6-.6 2.6-.6 1.1 0 2 .9 2 2v3c0 1.1-.9 2-2 2C9.8 18.4 5.6 14.2 4.6 9.1 4.4 8.1 5.2 7 6.3 6.7z"/></svg></div><span>Телефон</span></button></div></div><div class="pages" aria-label="Страницы"><button class="page-dot active" data-show-page="0" aria-label="Первая страница" aria-pressed="true"></button><button class="page-dot" data-show-page="1" aria-label="Вторая страница" aria-pressed="false"></button></div></section>
 <section class="view" id="people" hidden><div class="panel glass"><h1>Люди</h1><p>Выбери, где продолжить общение.</p><div class="tiles"><button class="tile" data-id="telegram"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8" r="3"/><path d="M3 20v-2a6 6 0 0 1 12 0v2M16 5a3 3 0 0 1 0 6M18 14a5 5 0 0 1 3 5"/></svg>Telegram<small>Открыть веб-приложение</small></button><button class="tile" data-id="discord"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8" r="3"/><path d="M3 20v-2a6 6 0 0 1 12 0v2M16 5a3 3 0 0 1 0 6M18 14a5 5 0 0 1 3 5"/></svg>Discord<small>Открыть веб-приложение</small></button><button class="tile" data-id="messages"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8" r="3"/><path d="M3 20v-2a6 6 0 0 1 12 0v2M16 5a3 3 0 0 1 0 6M18 14a5 5 0 0 1 3 5"/></svg>Сообщения<small>Локальный интерфейс HandAR</small></button></div></div></section>
 <section class="view" id="environments" hidden><div class="panel glass"><h1>Окружения</h1><p>Переключай пространство вокруг своих приложений.</p><div class="tiles"><button class="tile" data-system="environment-camera"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="2" y="6" width="20" height="14" rx="4"/><circle cx="12" cy="13" r="4"/><path d="m8 6 2-3h4l2 3"/></svg>Твоё пространство<small>Сквозное видео с камеры</small></button><button class="tile" data-system="environment-dark"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 15A9 9 0 0 1 9 3a9 9 0 1 0 11 12Z"/></svg>Тёмное пространство<small>Спокойный фон без камеры</small></button><button class="tile" data-id="cinema"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m2 19 7-12 5 8 3-5 5 9ZM7 10l2 2 2-2"/><circle cx="17" cy="5" r="2"/></svg>Кинотеатр<small>Объёмный зал HandAR</small></button></div></div></section>
 <div class="home-bottom"><div class="grab"></div><button class="control glass" id="control-toggle" aria-label="Пункт управления" aria-expanded="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5h14M5 12h14M5 19h14"/><circle cx="9" cy="5" r="2" fill="#aaa"/><circle cx="15" cy="12" r="2" fill="#aaa"/><circle cx="9" cy="19" r="2" fill="#aaa"/></svg></button></div>
@@ -3933,6 +4217,18 @@ button.handar-confirmed{outline:2px solid #ffffffb0;outline-offset:2px}
             .replacingOccurrences(of: "%SCRIPTS%", with: scripts)
             .replacingOccurrences(of: "%%", with: "%")
     }
+
+    private static let vrTravelHTML = htmlPage(
+        title: "Путешествия · 360°", icon: "🌐", accent: "#65cce3",
+        body: """
+<div class="hero"><div class="bigicon">🌐</div><div><h1>Оглянись вокруг</h1><p>Настоящие фотопанорамы. Сохранены в приложении и работают без интернета.</p></div></div>
+<div class="row"><button class="btn primary" onclick="post('panorama-burj')">Бурдж-Халифа · ночь · 360°</button></div>
+<p>Вид у Dubai Mall. Поворачивай голову, чтобы осмотреться. Кнопки «Места» и «Вперёд» находятся чуть ниже взгляда. Работают удержание, щипок и режим отдыха рук.</p>
+<p class="small">Фото: Levon Avagyan · CC BY-SA 3.0 · оригинал без изменений. Ночная съёмка со швами склейки. Обзор с одной точки, без перемещения по улице.</p>
+<p class="small"><a href="https://commons.wikimedia.org/wiki/File:Dubai_Mall_-_panoramio_(1).jpg">Источник фотографии</a> · <a href="https://creativecommons.org/licenses/by-sa/3.0/">Условия лицензии</a></p>
+<p><b>Бакинский бульвар</b> — пока недоступен: свободный оригинал полной панорамы 360° не найден.</p>
+"""
+    )
 
     private static let vrNotesHTML = htmlPage(
         title: "Заметки",
@@ -4104,6 +4400,7 @@ addEventListener('resize',()=>{if(current==='fruit')[fruitW,fruitH]=fitCanvas(fc
         accent: "#6b7280",
         body: """
 <div class="hero"><div class="bigicon">⚙</div><div><h1>VR Settings</h1><p>Быстрые действия для шлема. Подробная физическая калибровка остаётся в обычном меню HandAR.</p></div></div>
+<p id="aim-state">Управление</p><div class="row"><button class="btn primary" onclick="post('aim-head')">Отдых рук · головой</button><button class="btn" onclick="post('aim-hand')">Управлять рукой</button></div><p>Поверни голову к кнопке и задержись на секунду. Для повторного клика отведи прицел. В кинотеатре используй пульт.</p>
 <div class="row"><button class="btn primary" onclick="post('center')">Перецентрировать экран</button><button class="btn" onclick="post('calibrate')">Совместить изображения</button><button class="btn" onclick="post('controller-diagnostics')">Диагностика VR BOX</button><button class="btn" onclick="post('exit')">Выйти из VR</button></div>
 <div style="margin-top:24px"><p><b>О контроллере:</b> приложение пытается получать Game Controller и motion-профиль. Если iOS не отдаёт VR BOX как контроллер, этот режим не может изобрести его сигналы.</p><p class="small">Нативные сторонние iPhone-приложения нельзя встроить внутрь окна HandAR. Поэтому значки на VR Desktop открывают VR-версии на базе WKWebView. Системный iOS запуск возможен только как отдельный переход из приложения.</p></div>
 """
@@ -4120,6 +4417,7 @@ addEventListener('resize',()=>{if(current==='fruit')[fruitW,fruitH]=fitCanvas(fc
     }
 
     private func openVRDesktop() {
+        if panoramaActive { cancelHandInteraction(); panorama.stop(); resetBrowserAnchor() }
         if directVideoActive { hideDirectVideoStage() }
         isCinemaMode = false
         updatePanelSize(width: browserWorldWidth)
@@ -4130,6 +4428,7 @@ addEventListener('resize',()=>{if(current==='fruit')[fruitW,fruitH]=fitCanvas(fc
     }
 
     private func openVRApp(id: String) {
+        if panoramaActive { cancelHandInteraction(); panorama.stop(); resetBrowserAnchor() }
         if directVideoActive { hideDirectVideoStage(); startBrowserCapture() }
         isCinemaMode = false
         updatePanelSize(width: browserWorldWidth)
@@ -4152,6 +4451,10 @@ addEventListener('resize',()=>{if(current==='fruit')[fruitW,fruitH]=fitCanvas(fc
             openExternalPage(Self.spotifyURL)
         case "maps":
             openExternalPage(Self.mapsURL)
+        case "travel":
+            browser.loadHTMLString(Self.vrTravelHTML, baseURL: URL(string: "https://handar.vision/"))
+        case "panorama-burj":
+            startPanorama(id: "burj-khalifa-night")
         case "gmail":
             openExternalPage(Self.gmailURL)
         case "reddit":
@@ -4185,6 +4488,8 @@ addEventListener('resize',()=>{if(current==='fruit')[fruitW,fruitH]=fitCanvas(fc
 
     private func handleVRSystemAction(_ action: String) {
         switch action {
+        case "aim-head": setPointerControlMode(.head)
+        case "aim-hand": setPointerControlMode(.hand)
         case "home": openVRDesktop()
         case "environment-camera", "environment-dark":
             profile.passthrough = action == "environment-camera"
@@ -4291,9 +4596,11 @@ private extension MainViewController {
     func updateVRDesktopStatus() {
         let battery = UIDevice.current.batteryLevel
         let batteryText = battery >= 0 ? String(format: "%.0f%%", battery * 100) : "—"
+        let aimText = usesHeadAim ? "Отдых рук: наведение головой" : "Управление рукой"
         let controllerText = controllerConnected ? "VR BOX" : "VR BOX — нет"
         let script = """
 (function(){
+  var a=document.getElementById('aim-state'); if(a) a.textContent='\(aimText)';
   var b=document.getElementById('battery'); if(b) b.textContent='🔋 \(batteryText)';
   var c=document.getElementById('controllerState'); if(c) c.textContent='\(controllerText)';
 })();
@@ -4315,6 +4622,7 @@ extension MainViewController: WKNavigationDelegate, WKUIDelegate {
     }
 
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        guard !panoramaActive else { return }
         guard directVideoActive, webView === directVideoLeft else {
             if webView === browser { browser.reload() }
             return
@@ -4343,6 +4651,7 @@ extension MainViewController: WKNavigationDelegate, WKUIDelegate {
 
     func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
                  decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+        if panoramaActive { decisionHandler(.cancel); return }
         if webView === browser, navigationAction.targetFrame?.isMainFrame == true,
            let url = navigationAction.request.url,
            ["http", "https"].contains(url.scheme?.lowercased() ?? ""), url.host != "handar.vision" {
@@ -4373,6 +4682,7 @@ extension MainViewController: WKNavigationDelegate, WKUIDelegate {
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        guard !panoramaActive else { return }
         if directVideoActive, webView === directVideoLeft {
             liveLoadError = nil
             webView.evaluateJavaScript("window.__handarCinemaSurface = \(cinemaWebScreenActive ? "true" : "false"); window.__handarTuneDirectVideo ? window.__handarTuneDirectVideo() : null;", completionHandler: nil)
@@ -4921,6 +5231,7 @@ final class MainMenuView: UIView {
     private let passthroughSwitch = UISwitch()
     private let cameraSelector = UISegmentedControl(items:["0,5× · широкий","AR 1×"])
     private let cameraNote = UILabel()
+    private let aimSelector = UISegmentedControl(items:["Рукой", "Отдых рук · головой"])
     private let clickSelector = UISegmentedControl(items:["Удержание · 1 сек", "Щипок"])
     private let cinemaField = UITextField()
     private let cinemaButton = UIButton(type: .system)
@@ -5023,8 +5334,15 @@ final class MainMenuView: UIView {
             mode.save()
         },for:.valueChanged)
         stack.addArrangedSubview(clickSelector)
+        aimSelector.selectedSegmentIndex = PointerControlMode.load() == .head ? 1 : 0
+        aimSelector.addAction(UIAction { [weak self] _ in
+            guard let self else { return }
+            let mode: PointerControlMode = self.aimSelector.selectedSegmentIndex == 1 ? .head : .hand
+            mode.save()
+        }, for: .valueChanged)
+        stack.addArrangedSubview(aimSelector)
         let clickNote=UILabel()
-        clickNote.text="Удержание: наведи указательный палец на кнопку на 1 секунду. Для повтора отведи курсор. Щипок с движением — прокрутка, кулак — захват панели."
+        clickNote.text="Отдых рук: поворачивай голову к кнопке и задержись на секунду. Режим можно сменить в VR → Настройки. Удержание: наведи указательный палец на кнопку на 1 секунду. Для повтора отведи курсор. Щипок с движением — прокрутка, кулак — захват панели."
         clickNote.font = .systemFont(ofSize:12);clickNote.textColor=UIColor.white.withAlphaComponent(0.65);clickNote.numberOfLines=0
         stack.addArrangedSubview(clickNote)
 
@@ -5135,6 +5453,10 @@ final class MainMenuView: UIView {
             diagnosticsButton.heightAnchor.constraint(equalToConstant: 36),
             diagnosticsButton.bottomAnchor.constraint(equalTo: safeAreaLayoutGuide.bottomAnchor, constant: -10)
         ])
+    }
+
+    func updatePointerControlMode() {
+        aimSelector.selectedSegmentIndex = PointerControlMode.load() == .head ? 1 : 0
     }
 
     func setProfile(_ updated: VRProfile) {

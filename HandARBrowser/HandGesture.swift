@@ -8,6 +8,31 @@ enum HandClickMode: String {
     func save() { UserDefaults.standard.set(rawValue,forKey:"handar.click.mode.v1") }
 }
 
+// Independent of pinch/dwell preference, so switching back restores hand input.
+enum PointerControlMode: String {
+    case hand, head
+    static func load() -> Self {
+        UserDefaults.standard.string(forKey: "handar.pointer.mode.v1").flatMap(Self.init(rawValue:)) ?? .hand
+    }
+    func save() { UserDefaults.standard.set(rawValue, forKey: "handar.pointer.mode.v1") }
+}
+
+// Fresh camera poses only; a mode change or tracking interruption needs a short
+// settling period before starting a new one-second dwell.
+struct HeadAimSession {
+    private var since: Double?
+    private var last: Double?
+    mutating func reset() { self = Self() }
+    mutating func update(at time: Double, poseTime: Double, current: Bool) -> Bool {
+        guard current, time.isFinite, poseTime.isFinite,
+              time >= poseTime, time - poseTime <= 0.2 else { reset(); return false }
+        if let last, time < last || time - last > 0.2 { reset() }
+        if since == nil { since = time }
+        last = time
+        return time - (since ?? time) >= 0.35
+    }
+}
+
 // Pure, time-based gesture rules. No Vision, UIKit or device dependencies.
 enum TrackedHand: Int, Hashable { case left, right }
 

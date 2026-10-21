@@ -171,3 +171,29 @@ enum MonoViewGeometry {
         return (origin,SIMD2(max(0,end.x-origin.x),max(0,end.y-origin.y)))
     }
 }
+
+/// Clip a control's projected outline to one eye, preventing opposite-eye holes.
+enum CinemaControlMask {
+    static func clipped(_ polygon: [SIMD2<Double>], minX: Double, maxX: Double, maxY: Double) -> [SIMD2<Double>] {
+        guard polygon.count >= 3, polygon.allSatisfy({ $0.x.isFinite && $0.y.isFinite }),
+              minX.isFinite, maxX.isFinite, maxY.isFinite, maxX > minX, maxY > 0 else { return [] }
+        var result = polygon
+        let bounds: [(Int, Double, Bool)] = [(0, minX, true), (0, maxX, false), (1, 0, true), (1, maxY, false)]
+        for (axis, edge, lower) in bounds {
+            guard !result.isEmpty else { return [] }
+            let input = result
+            result = []
+            for i in input.indices {
+                let a = input[i], b = input[(i + 1) % input.count]
+                let insideA = lower ? a[axis] >= edge : a[axis] <= edge
+                let insideB = lower ? b[axis] >= edge : b[axis] <= edge
+                if insideA { result.append(a) }
+                if insideA != insideB {
+                    let t = (edge - a[axis]) / (b[axis] - a[axis])
+                    result.append(a + (b - a) * t)
+                }
+            }
+        }
+        return result.count >= 3 ? result : []
+    }
+}

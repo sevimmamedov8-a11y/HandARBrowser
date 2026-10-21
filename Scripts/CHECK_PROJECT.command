@@ -2,7 +2,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
-echo "== Hand AR Browser V87 project check =="
+echo "== Hand AR Browser V90 project check =="
 for f in "HandARBrowser.xcodeproj/project.pbxproj" "HandARBrowser/AppDelegate.swift" "HandARBrowser/MainViewController.swift" "HandARBrowser/HandGesture.swift" "HandARBrowser/CinemaHall.swift" "HandARBrowser/CinemaPlayback.swift" "HandARBrowser/Info.plist" "HandARBrowser/WebInput.js"; do
   [[ -f "$f" ]] && echo "[OK] $f" || { echo "[FAIL] missing $f"; exit 1; }
 done
@@ -11,6 +11,9 @@ grep -Fq "final class CinemaHall" "HandARBrowser/CinemaHall.swift"
 [[ -f "HandARBrowser/HandSilhouette.swift" ]]
 [[ -f "HandARBrowser/CameraCapture.swift" ]]
 [[ -f "HandARBrowser/CameraGeometry.swift" ]]
+[[ -f "HandARBrowser/OfflinePanorama.swift" ]]
+[[ -f "HandARBrowser/Panoramas/catalog.json" ]]
+[[ -f "HandARBrowser/Panoramas/burj-khalifa-night.jpg" ]]
 
 SRC="HandARBrowser/MainViewController.swift"
 
@@ -167,7 +170,7 @@ grep -Fq 'applySpatialSurface(home: true, transparent: true)' "$SRC"
 grep -Fq 'case "environment-camera", "environment-dark"' "$SRC"
 grep -Fq 'handar-hover' "$JS"
 
-echo "[OK] V87 static project checks"
+echo "[OK] V90 static project checks"
 
 if command -v swiftc >/dev/null 2>&1; then
   # Parser-only validation can fail on Linux because Apple SDK modules are unavailable;

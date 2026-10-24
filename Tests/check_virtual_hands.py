@@ -90,7 +90,14 @@ tests = r'''
   hands.update(hand: .right, pose: VirtualHandPose(points: points, camera: .zero), timestamp: 12.04, at: 12.04, visible: true)
   check(right.childNodes[7].isHidden && right.childNodes[8].isHidden, "missing DIP hides adjacent finger segments")
   check(!right.childNodes[9].isHidden, "other finger remains visible")
+  let palm = right.childNodes[0]
+  let expectedWidth = pose.width*1.22*0.78
+  check(abs(palm.simdScale.x-expectedWidth)<0.00001 && palm.simdPosition == pose.center,"glove is smaller around unchanged palm")
+  let hiddenScale = right.childNodes[7].simdScale
+  for _ in 0..<30 { hands.update(hand:.right,pose:VirtualHandPose(points:points,camera:.zero),timestamp:12.04,at:12.04,visible:true) }
+  check(right.childNodes[7].simdScale == hiddenScale,"hidden segments do not cumulatively shrink")
   for _ in 0..<100 { hands.update(hand: .right, pose: pose, timestamp: 13, at: 13, visible: true) }
+  check(abs(palm.simdScale.x-expectedWidth)<0.00001,"successive frames keep the same scale")
   check(root.childNodes.count == 4 && right.childNodes.count == 18, "fixed scene budget across updates")
   for glove in [left,right] {
    for node in glove.childNodes {

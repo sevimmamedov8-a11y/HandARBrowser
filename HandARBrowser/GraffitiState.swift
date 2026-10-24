@@ -36,41 +36,35 @@ struct GraffitiGrabGate {
     enum Event: Equatable { case none, began(Int), released(Int), cancelled(Int) }
     private(set) var held: Int?
     private(set) var suppressPainting = false
-    private var armed = false
     private var candidate: Int?
     private var since: Double?
     private var openSince: Double?
-    private var uncertainSince: Double?
     private var paintResetSince: Double?
     private var last: Double?
+    private(set) var releaseProgress = 0.0
 
     mutating func cancel() -> Event {
         let old = held
         if held != nil { suppressPainting = true }
         held = nil; candidate = nil; since = nil; openSince = nil
-        uncertainSince = nil; paintResetSince = nil; last = nil; armed = false
+        releaseProgress = 0; paintResetSince = nil; last = nil
         return old.map(Event.cancelled) ?? .none
     }
 
     mutating func update(target: Int?, fist: Bool, open: Bool, reliable: Bool, blocked: Bool, at time: Double) -> Event {
-        guard reliable, !blocked, time.isFinite else { return cancel() }
+        guard reliable, time.isFinite else { return cancel() }
         if let last, time < last || time-last > 0.2 { return cancel() }
         last = time
         if let held {
             if open && !fist {
-                uncertainSince = nil
                 if openSince == nil { openSince = time }
-                if time-(openSince ?? time) >= 0.08-0.000001 {
-                    self.held = nil; candidate = nil; since = nil; armed = true
+                releaseProgress = min(1, (time-(openSince ?? time))/2)
+                if time-(openSince ?? time) >= 2-0.000001 {
+                    self.held = nil; candidate = nil; since = nil; releaseProgress = 0
                     return .released(held)
                 }
             } else {
-                openSince = nil
-                if fist { uncertainSince = nil }
-                else {
-                    if uncertainSince == nil { uncertainSince = time }
-                    if time-(uncertainSince ?? time) > 0.18 { return cancel() }
-                }
+                openSince = nil; releaseProgress = 0
             }
             return .none
         }
@@ -82,19 +76,14 @@ struct GraffitiGrabGate {
         }
         if !fist {
             candidate = nil; since = nil
-            if open {
-                if openSince == nil { openSince = time }
-                if time-(openSince ?? time) >= 0.08-0.000001 { armed = true }
-            } else {
-                openSince = nil
-            }
+            openSince = nil
             return .none
         }
         openSince = nil
-        guard armed, let target else { candidate = nil; since = nil; return .none }
+        guard !blocked, let target else { candidate = nil; since = nil; return .none }
         if candidate != target { candidate = target; since = time }
         guard time-(since ?? time) >= 0.10-0.000001 else { return .none }
-        held = target; armed = false; suppressPainting = true
+        held = target; suppressPainting = true
         return .began(target)
     }
 }

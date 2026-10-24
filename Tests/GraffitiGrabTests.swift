@@ -9,47 +9,56 @@ import Foundation
                    reliable: Bool = true, blocked: Bool = false) -> GraffitiGrabGate.Event {
             gate.update(target: target, fist: fist, open: open, reliable: reliable, blocked: blocked, at: t)
         }
-        for i in 0..<8 { check(frame(Double(i)*0.04, fist: true) == .none, "appearing as a fist cannot take an object") }
-        check(gate.held == nil, "must first observe an open palm")
-        _ = frame(0.32, open: true);_ = frame(0.36, open: true);_ = frame(0.40, open: true)
-        _ = frame(0.44, fist: true)
-        check(frame(0.48, fist: false) == .none, "one flickering fist does not grab")
-        _ = frame(0.52, fist: true);_ = frame(0.56, fist: true);_ = frame(0.60, fist: true)
-        check(frame(0.64, fist: true) == .began(1), "stable aimed fist takes once")
-        for i in 17...24 { check(frame(Double(i)*0.04, target: 2, fist: true) == .none && gate.held == 1, "hold cannot jump to another target") }
-        check(gate.suppressPainting, "holding blocks automatic palm paint")
-        check(frame(1, open: true) == .none && gate.held == 1, "brief opening does not drop")
-        _ = frame(1.04, open: true)
-        check(frame(1.08, open: true) == .released(1) && gate.held == nil, "confirmed opening drops once")
-        for i in 28...34 { check(frame(Double(i)*0.04, open: true) == .none && gate.suppressPainting, "drop opening cannot become a paint stroke") }
-        _ = frame(1.40, target: nil, fist: true)
-        check(gate.suppressPainting, "one uncertain frame after dropping cannot unlock paint")
-        var reset = gate
-        _ = reset.update(target: nil, fist: false, open: true, reliable: true, blocked: false, at: 1.44)
-        check(reset.suppressPainting, "returning open palm remains a drop gesture")
-        for i in 0...3 { _ = reset.update(target: nil, fist: true, open: false, reliable: true, blocked: false, at: 1.48+Double(i)*0.04) }
-        check(!reset.suppressPainting, "stable closing away from props allows a later paint gesture")
-        _ = frame(1.44, fist: true);_ = frame(1.48, fist: true);_ = frame(1.52, fist: true)
-        check(frame(1.56, fist: true) == .began(1), "a new deliberate fist can grab after dropping")
-        check(frame(1.60, fist: true, reliable: false) == .cancelled(1), "hand loss cancels carry")
-        for i in 41...46 { check(frame(Double(i)*0.04, fist: true) == .none && gate.held == nil, "fist reacquisition cannot silently regrab") }
-        _ = frame(1.88, open: true);_ = frame(1.92, open: true);_ = frame(1.96, open: true)
-        _ = frame(2, fist: true);_ = frame(2.04, fist: true);_ = frame(2.08, fist: true)
-        check(frame(2.12, fist: true) == .began(1), "open then fist recovers after loss")
-        check(frame(2.16, fist: true, blocked: true) == .cancelled(1), "palette or mode switch ends carry")
-        _ = frame(2.20, open: true);_ = frame(2.24, open: true);_ = frame(2.28, open: true)
-        _ = frame(2.32, fist: true);_ = frame(2.36, target: 2, fist: true);_ = frame(2.40, fist: true)
-        check(frame(2.44, target: 2, fist: true) == .none && gate.held == nil, "jitter between props resets confirmation")
-        _ = frame(2.48, target: 2, fist: true);_ = frame(2.52, target: 2, fist: true)
-        check(frame(2.56, target: 2, fist: true) == .began(2), "settled new target can be taken")
-        check(frame(3, fist: true) == .cancelled(2), "delivery gap cannot bridge a grab")
-        check(frame(.nan, fist: true) == .none && gate.held == nil, "invalid clock never creates a held object")
-        gate = GraffitiGrabGate()
-        _ = frame(4, open: true);_ = frame(4.04, open: true);_ = frame(4.08, open: true)
-        _ = frame(4.12, fist: true);_ = frame(4.16, fist: true);_ = frame(4.20, fist: true);_ = frame(4.24, fist: true)
-        check(gate.held == 1, "grab before uncertainty test")
-        for i in 107...111 { _ = frame(Double(i)*0.04) }
-        check(frame(4.48) == .cancelled(1), "sustained ambiguous pose releases stale carry")
+        check(frame(0, fist: true) == .none, "one frame is not a grab")
+        check(frame(0.04) == .none, "fist flicker is cancelled")
+        for t in [0.08,0.12,0.16] { _ = frame(t,fist:true) }
+        check(frame(0.20,fist:true) == .began(1), "stable fist grabs without opening first")
+        for i in 6...100 {
+            check(frame(Double(i)*0.04,target:2,blocked:i%2==0) == .none && gate.held == 1,
+                  "neutral fingers and UI crossings never drop or switch a held object")
+        }
+        check(gate.suppressPainting,"holding blocks paint")
+        for i in 101...149 { _ = frame(Double(i)*0.04,open:true) }
+        check(gate.held == 1 && gate.releaseProgress > 0.9,"1.92 seconds is too short")
+        _ = frame(6.0,fist:true)
+        check(gate.releaseProgress == 0 && gate.held == 1,"closing resets the release countdown")
+        for i in 151...200 { _ = frame(Double(i)*0.04,open:true) }
+        check(gate.held == 1,"1.96 seconds still held")
+        check(frame(8.04,open:true) == .released(1),"continuous two second palm releases once")
+        for i in 202...210 { check(frame(Double(i)*0.04,open:true) == .none && gate.suppressPainting,"release cannot paint") }
+        for i in 211...214 { _ = frame(Double(i)*0.04,target:nil,fist:true) }
+        check(!gate.suppressPainting,"closing away from props restores later painting")
+        for i in 215...218 { _ = frame(Double(i)*0.04,fist:true) }
+        check(gate.held == 1,"fist can grab again")
+        check(frame(8.80,reliable:false) == .cancelled(1),"hand loss cancels instead of throwing")
+        for i in 221...224 { _ = frame(Double(i)*0.04,fist:true) }
+        check(gate.held == 1,"fresh fist can confirm again")
+        check(frame(10,fist:true) == .cancelled(1),"frame gap cancels")
+        check(frame(.nan,fist:true) == .none && gate.held == nil,"invalid clock cannot grab")
+        for i in 0..<20 { _ = frame(11+Double(i)*0.04,target:i%2,fist:true) }
+        check(gate.held == nil,"flickering between props never confirms")
+        for i in 0..<10 { _ = frame(12+Double(i)*0.04,fist:true,blocked:true) }
+        check(gate.held == nil,"UI prevents a new grab")
+        // Actual ballistic integrator: travel, containment, rest and tabletop.
+        let small = SIMD3<Float>(repeating:0.1)
+        var flight = GraffitiFlight(position:.zero,velocity:SIMD3(3,2,-1),angles:.zero,spin:SIMD3(0,0,4))
+        var impacts = 0, previous = flight.position
+        for _ in 0..<600 {
+            if flight.step(1.0/60,halfSize:small,obstacles:[]) > 0.6 { impacts += 1 }
+            let extent = GraffitiFlight.extent(half:small,angles:flight.angles)
+            check(flight.position.y-extent.y >= GraffitiRoomLayout.floorY+0.027,"flight stays above floor")
+            check(abs(flight.position.x)+extent.x <= 6.001 && abs(flight.position.z)+extent.z <= 6.001,"throws stay inside room")
+            previous = flight.position
+        }
+        check(flight.resting && impacts > 0 && flight.position.x > 0.5,"throw travels, bounces and rests")
+        var tableFlight = GraffitiFlight(position:SIMD3(0,1,0),velocity:SIMD3(0,-5,0),angles:.zero,spin:.zero)
+        let tabletop = GraffitiCollider(center:SIMD3(0,-0.5,0),half:SIMD3(1,0.05,1))
+        for _ in 0..<300 { _ = tableFlight.step(1.0/60,halfSize:small,obstacles:[tabletop]) }
+        check(tableFlight.resting && abs(tableFlight.position.y+0.35)<0.002,"falls onto thin tabletop without tunnelling")
+        let savedPosition = tableFlight.position
+        _ = tableFlight.step(.nan,halfSize:small,obstacles:[])
+        check(savedPosition == tableFlight.position,"invalid time has no motion")
+        _ = previous
         check(GraffitiPropGeometry.rayDistance(origin: .zero, direction: SIMD3(0,0,-1), center: SIMD3(0,0,-5), radius: 0.1) == 5, "remote fist can target across the room")
         check(GraffitiPropGeometry.rayDistance(origin: .zero, direction: SIMD3(0,0,-1), center: SIMD3(3,0,-5), radius: 0.1) == nil, "off-axis object cannot be taken")
         check(GraffitiPropGeometry.rayDistance(origin: .zero, direction: SIMD3(0,0,-1), center: SIMD3(0,0,1), radius: 0.1) == nil, "behind camera cannot be taken")

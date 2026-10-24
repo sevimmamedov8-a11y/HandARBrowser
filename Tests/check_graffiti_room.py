@@ -36,7 +36,8 @@ struct UIColor: Hashable {
  }
  func withAlphaComponent(_ value: CGFloat) -> UIColor { UIColor(red:red,green:green,blue:blue,alpha:value) }
 }
-enum Lighting { case constant }
+enum Lighting { case constant, lambert }
+final class SCNLight { enum Kind { case ambient, directional }; var type = Kind.ambient, intensity = 0, categoryBitMask = 0, color = UIColor.white, castsShadow = false }
 final class Property { var contents: Any? }
 final class SCNMaterial {
  var lightingModel = Lighting.constant, isDoubleSided = false, writesToDepthBuffer = true
@@ -47,6 +48,7 @@ class Geometry {
  var firstMaterial: SCNMaterial? { get { materials.first } set { materials = newValue.map { [$0] } ?? [] } }
  var halfSize = SCNVector3.zero
 }
+final class SCNSphere: Geometry { var segmentCount = 48; init(radius: CGFloat) { super.init(); halfSize = SIMD3(repeating:Float(radius)) } }
 final class SCNCone: Geometry {
  init(topRadius: CGFloat, bottomRadius: CGFloat, height: CGFloat) {
   super.init();halfSize = SCNVector3(Float(max(topRadius,bottomRadius)),Float(height*0.5),Float(max(topRadius,bottomRadius)))
@@ -72,6 +74,7 @@ struct SCNAction {
  static func repeatForever(_ action: Self) -> Self { action }
 }
 class SCNNode {
+ var light: SCNLight?
  var geometry: Geometry?, position = SCNVector3.zero, eulerAngles = SCNVector3.zero
  var scale = SCNVector3(repeating: 1), isHidden = false, isPaused = false
  var name: String?
@@ -94,7 +97,9 @@ final class CineText: SCNNode {
  func setText(_ value: String, color: UIColor) { text = value }
  func fitWidth(_ value: Float) { width = value }
 }
+final class CineButton { let node = SCNNode() }
 final class Harness {
+ let radioButton = CineButton(); var radioNode: SCNNode?
  let room = SCNNode(), sculptureMaterial = SCNMaterial(), floorGrid = SCNNode()
  var roomSculpture: SCNNode?, preferences = GraffitiPreferences()
  let props = GraffitiProps()
@@ -113,13 +118,13 @@ tests = r'''
   func visit(_ node: SCNNode) { nodes.append(node);node.childNodes.forEach(visit) }
   visit(h.room)
   let meshes = nodes.filter { $0.geometry != nil }
-  check(meshes.count > 300 && meshes.count < 450, "detail increases within a fixed mesh budget")
+  check(meshes.count > 480 && meshes.count < 650, "detail increases within a fixed mesh budget")
   check(nodes.filter { $0.animated }.count == 1, "only one slowly animated object")
   check(h.room.childNodes.contains { $0.flattened }, "static decor is merged once")
   let materials = Set(meshes.compactMap { $0.geometry?.firstMaterial }.map { ObjectIdentifier($0) })
   check(materials.count < 42, "detailed props still share a bounded material palette")
   for node in meshes {
-   var size = node.geometry!.halfSize
+   var size = node.geometry!.halfSize * node.scale
    if abs(node.eulerAngles.x) > 1 { size = SCNVector3(size.x, size.z, size.y) }
    let p = node.simdWorldPosition
    check(abs(p.x) + size.x <= GraffitiRoomLayout.span * 0.5 + 0.04 &&
@@ -158,7 +163,7 @@ tests = r'''
   // Execute the actual prop manager, not just its gesture latch.
   let props = GraffitiProps(), playground = SCNNode()
   var picked = 0, confirmed = 0
-  props.onPickColor = { picked += $0+1 }; props.onInteraction = { confirmed += 1 }
+  props.onPickColor = { picked += $0+1 }; props.onInteraction = { _ in confirmed += 1 }
   props.add(parts: [SCNNode()], name: "A", center: SCNVector3(0,0,-2), halfSize: SIMD3(0.1,0.1,0.1), color: 0, in: playground)
   props.add(parts: [SCNNode()], name: "B", center: SCNVector3(1,0,-2), halfSize: SIMD3(0.1,0.1,0.1), color: 1, in: playground)
   let a = playground.childNodes[0], b = playground.childNodes[1]
@@ -178,12 +183,19 @@ tests = r'''
   let holdA = a.simdWorldPosition
   feed(0.44,ray:rayB,fist:true)
   check(a.simdWorldPosition != holdA, "moving palm ray carries held prop")
-  for t in [0.48,0.52,0.56] { feed(t,ray:rayB,open:true);feed(t,hand:.right,ray:rayB,fist:true) }
-  check(confirmed == 3 && a.simdWorldPosition.y < -1, "opening drops onto floor once")
+  for i in 12...61 {
+   let t = Double(i)*0.04
+   feed(t,ray:rayB,open:true);feed(t,hand:.right,ray:rayB)
+  }
+  check(props.isHeld(a) && props.isHeld(b), "almost two seconds retains both objects")
+  feed(2.48,ray:rayB,open:true);feed(2.48,hand:.right,ray:rayB)
+  check(!props.isHeld(a) && props.isHeld(b), "only left releases after two seconds")
+  check(a.simdWorldPosition.y > -1, "release starts flight without teleport to floor")
   check(props.blocksPainting(.left), "drop gesture remains blocked from painting")
-  check(props.holdingAnything && b.simdWorldPosition.y > -1, "dropping left leaves right carrying")
-  feed(0.60,hand:.right,ray:rayB,fist:true,generation:2)
-  check(!props.holdingAnything && b.simdWorldPosition.y < -1, "new tracker identity cannot inherit held prop")
+  feed(2.52,hand:.right,ray:rayB,fist:true,generation:2)
+  check(!props.holdingAnything && b.simdWorldPosition.y < -1, "new identity cannot inherit held prop")
+  for i in 0..<300 { props.tick(at:2.52+Double(i)/60,ready:true) }
+  check(a.simdWorldPosition.y < -1 && confirmed >= 3, "released object falls and plays impact sound")
   props.reset()
   check(a.simdWorldPosition == SIMD3(0,0,-2) && b.simdWorldPosition == SIMD3(1,0,-2), "reset restores original shelf positions")
   for t in [1.0,1.04,1.08] { feed(t,open:true) }
@@ -195,7 +207,7 @@ tests = r'''
   for t in [2.0,2.04,2.08] { feed(t,open:true) }
   for t in [2.12,2.16,2.20,2.24] { feed(t,fist:true) }
   feed(2.28,fist:true,blocked:true)
-  check(!props.holdingAnything, "opening palette cancels actual carry")
+  check(props.holdingAnything, "crossing palette preserves actual carry")
   props.clear()
   check(playground.childNodes.isEmpty && !props.holdingAnything, "app exit removes movable nodes and ownership")
   let closeProps = GraffitiProps()
@@ -215,7 +227,7 @@ tests = r'''
 with tempfile.TemporaryDirectory(prefix='handar-room-') as directory:
     script = Path(directory)/'room.swift'
     script.write_text(shim.replace('final class Harness {', props_class + '\nfinal class Harness {') + '\n'.join(method(name) for name in ('material', 'box', 'buildRoomDecor', 'buildCan', 'updateRoomMood', 'paintColor', 'applyRoomSettings')) + tests, encoding='utf-8')
-    run_swift_sources([root/'HandARBrowser/HandGesture.swift', root/'HandARBrowser/GraffitiState.swift', script])
+    run_swift_sources([root/'HandARBrowser/HandGesture.swift', root/'HandARBrowser/GraffitiState.swift', root/'HandARBrowser/GraffitiAudio.swift', root/'HandARBrowser/GraffitiPhysics.swift', script])
 
 assert 'textureWidth: 2048' in source
 assert 'sculptureMaterial.diffuse.contents = colors[colorIndex].1' in source

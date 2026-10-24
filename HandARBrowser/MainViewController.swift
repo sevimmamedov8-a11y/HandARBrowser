@@ -38,6 +38,8 @@ struct HandSample {
     let hand: TrackedHand
     let timestamp: Double
     let generation: UInt64
+    /// Identity of this tracked hand, independent of pinch cancellation.
+    var trackingGeneration: UInt64 = 0
     let indexTip: CGPoint
     let middleTip: CGPoint
     let thumbTip: CGPoint
@@ -69,7 +71,7 @@ struct HandSample {
         HandRoutingState(hand:hand,generation:generation,down:clickPinch,openConfirmed:clickOpenConfirmed)
     }
     func routed(down: Bool, began: Bool) -> HandSample {
-        HandSample(hand:hand,timestamp:timestamp,generation:generation,indexTip:indexTip,
+        HandSample(hand:hand,timestamp:timestamp,generation:generation,trackingGeneration:trackingGeneration,indexTip:indexTip,
             middleTip:middleTip,thumbTip:thumbTip,joints:joints,maskJoints:maskJoints,imageSize:imageSize,clickPinch:down,
             clickBegan:began,clickOpenConfirmed:clickOpenConfirmed,grabPinch:grabPinch,isFist:isFist)
     }
@@ -759,6 +761,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     private let panorama = OfflinePanorama()
     private var panoramaActive: Bool { panorama.isRunning }
     private let graffiti = GraffitiStudio()
+    private var graffitiMusicPicker: GraffitiMusicPicker?
     private let virtualHands = VirtualHands()
     private var graffitiActive: Bool { graffiti.isRunning }
     private var graffitiCameraOverridden = false
@@ -2341,14 +2344,15 @@ final class MainViewController: UIViewController, MTKViewDelegate {
 
     private func startGraffiti() {
         guard inVR, !cinemaActive, !securityGameActive else { return }
+        activateMediaAudioSession()
         cancelHandInteraction(); endDrag(); endResize(); hands.reset(); handOwnership.reset(); menuSwipe.reset()
         queueHandForegroundMask(left: nil, right: nil)
         stopBrowserCapture(); browser.stopLoading(); pauseAndMute(browser); hideDirectVideoStage()
         browserPlaneNode.isHidden = true; toolbarNode.isHidden = true
         spatialHomeVisible = false
         hidePointer(); hidePointerDot(); controllerHandRoot.isHidden = true
+        graffiti.onImportMusic = { [weak self] in self?.importGraffitiMusic() }
         graffiti.onExit = { [weak self] in self?.exitGraffiti() }
-        graffiti.onInteraction = { [weak self] in self?.playUIConfirmation() }
         graffiti.onModeChanged = { [weak self] mode in self?.tracking.setWallDetectionEnabled(mode == .home) }
         graffiti.onAddAnchor = { [weak self] anchor in self?.tracking.add(anchor: anchor) }
         graffiti.onRemoveAnchor = { [weak self] anchor in self?.tracking.remove(anchor: anchor) }
@@ -2376,6 +2380,18 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         hidePointer(); hidePointerDot()
     }
 
+    private func importGraffitiMusic() {
+        guard graffitiActive, presentedViewController == nil else { return }
+        graffiti.cancelInput()
+        let picker = GraffitiMusicPicker { [weak self] urls in
+            guard let self else { return }
+            self.graffitiMusicPicker = nil
+            if self.graffitiActive, !urls.isEmpty { self.graffiti.importMusic(urls) }
+        }
+        graffitiMusicPicker = picker
+        picker.present(from: self)
+    }
+
     private func handleGraffitiHands(left: HandSample?, right: HandSample?, at time: Double) {
         let candidates = [right, left].compactMap { $0 }
         let sample = candidates.first { $0.hand == graffiti.handOwner } ?? candidates.first
@@ -2396,7 +2412,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
                 return CGPoint(x: (w.x+m.x)*0.5, y: (w.y+m.y)*0.5)
             }
             let propRay = ready ? center.flatMap { tracking.worldRay(visionPoint: $0) } : nil
-            graffiti.updateProp(hand: hand, generation: tracked?.generation, fist: tracked?.isFist == true,
+            graffiti.updateProp(hand: hand, generation: tracked?.trackingGeneration, fist: tracked?.isFist == true,
                 open: tracked?.openPalmCenter != nil, ray: propRay, distance: graffitiHandDistance(tracked),
                 orientation: headNode.simdWorldOrientation, blocked: blocked, trackingReady: ready, at: time)
         }
@@ -5218,6 +5234,7 @@ final class HandTracker {
     private var lastProcessedTime: CFTimeInterval = -.infinity
 
     private struct HandState {
+        var trackingGeneration: UInt64 = 0
         var joints: [VNHumanHandPoseObservation.JointName: CGPoint] = [:]
         var jointAges: [VNHumanHandPoseObservation.JointName: Int] = [:]
         var pinch = StablePinchGesture()
@@ -5228,6 +5245,7 @@ final class HandTracker {
         var previousPalm: Double?
 
         mutating func reset() {
+            trackingGeneration &+= 1
             joints.removeAll(keepingCapacity: true)
             jointAges.removeAll(keepingCapacity: true)
             pinch.cancel() // Keep the generation monotonic across loss/reacquisition.
@@ -5378,6 +5396,7 @@ final class HandTracker {
             let scale = palm / previousPalm
             discontinuity = scale < 0.55 || scale > 1.8 || HandPinchGeometry.distance(pixel(wrist),previousWrist) > palm*0.9
         }
+        if discontinuity { state.trackingGeneration &+= 1 }
         let transition = state.pinch.update(ratio:measurement?.ratio,confident:measurement != nil && !discontinuity,
                                             grabbing:fist || allowsFist,at:time)
         if transition == .cancelled { state.aim.reset() }
@@ -5396,7 +5415,7 @@ final class HandTracker {
         let maskJoints = points.reduce(into: [VNHumanHandPoseObservation.JointName: CGPoint]()) { result, entry in
             if entry.value.confidence >= 0.55 { result[entry.key] = entry.value.location }
         }
-        return HandSample(hand:side,timestamp:time,generation:state.pinch.generation,
+        return HandSample(hand:side,timestamp:time,generation:state.pinch.generation,trackingGeneration:state.trackingGeneration,
             indexTip:pointer,middleTip:middle.map {filtered[.middleTip] ?? $0} ?? pointer,
             thumbTip:thumb.map {filtered[.thumbTip] ?? $0} ?? pointer,joints:filtered,
             maskJoints:maskJoints,imageSize:size,

@@ -26,7 +26,27 @@ final class MaterialProperty { var contents: Any? }
 final class Material { let diffuse = MaterialProperty() }
 final class Geometry { var firstMaterial: Material? = Material() }
 final class Node { var isHidden = false; var geometry: Geometry? = Geometry() }
+final class Audio {
+ var enabled = true, volumeTitle = "55%"
+ var onPlay: (() -> Void)?
+ func play(_ sound: GraffitiSound) { if enabled { onPlay?() } }
+ func setSpraying(_ value: Bool) {}
+ func toggle() { enabled.toggle() }
+ func nextVolume() { volumeTitle = "85%" }
+ func resetSettings() { enabled = true;volumeTitle = "55%" }
+}
+final class Radio {
+ var isPlaying = false, volumeTitle = "40%", title = "Calm", nextCount = 0
+ func toggle() { isPlaying.toggle() }; func play() { isPlaying = true }
+ func next() { nextCount += 1 }; func nextVolume() { volumeTitle = "65%" }
+ func ownMusic() { title = "Own" }; func builtIn() { title = "Calm" }
+}
+final class Text {
+ var isHidden = false, title = ""
+ func setText(_ text: String) { title = text }; func fitWidth(_ width: Float) {}
+}
 final class Props {
+ func isHeld(_ node: Node?) -> Bool { false }
  var resets = 0, cancels = 0
  func cancel() { cancels += 1 }
  func reset() { resets += 1 }
@@ -53,13 +73,15 @@ final class Canvas {
 final class Harness {
     var isRunning = true, aligned = true, paletteOpen = false, uiBlocked = false
     var preferences = GraffitiPreferences(), settingsPage = false, roomSettingsApplied = 0
+    let audio = Audio(), radio = Radio(), radioStatus = Text(), radioButton = Button("radio-world")
+    var radioPage = false, radioNode: Node? = Node(), onImportMusic: (() -> Void)?
     let props = Props(), canMaterial = Material(), sculptureMaterial = Material(), mist = Node()
     var uiHand: TrackedHand?, uiGate = ReleaseClickGate<String>()
     var sprayGate = GraffitiSprayGate()
     let can = Node(), aim = Node(), room = Node(), home = Node(), panel = Node(), ring = Ring()
     let paletteButton = Button("palette")
     var buttons = [("color-1", Button("color-1")), ("room", Button("room")), ("home", Button("home")), ("rainbow", Button("rainbow")), ("mood", Button("mood"))]
-    let settingButtons = ["tab-paint", "tab-settings", "setting-paint", "setting-grab", "setting-flow", "setting-edge", "setting-light", "setting-grid", "setting-animation", "setting-props", "setting-reset", "setting-close"]
+    let settingButtons = ["tab-radio", "radio-toggle", "radio-next", "radio-volume", "radio-import", "radio-own", "radio-default", "radio-close", "tab-paint", "tab-settings", "setting-paint", "setting-grab", "setting-flow", "setting-edge", "setting-light", "setting-grid", "setting-animation", "setting-props", "setting-reset", "setting-close", "setting-sound", "setting-volume"]
     init() { for id in settingButtons { buttons.append((id,Button(id))) }; updateSelection() }
     var paintingHand: TrackedHand?, rainbow = false, mood = GraffitiRoomMood.neon, moodChanges = 0
     var roomCanvases: [Canvas] = [], homeCanvases: [Canvas] = [], undo: [(UUID, Int)] = []
@@ -79,7 +101,7 @@ tests = r'''
     func check(_ value: Bool, _ message: String) { precondition(value, message); count += 1 }
     let h = Harness()
     var time = 0.0, confirmations = 0
-    h.onInteraction = { confirmations += 1 }
+    h.audio.onPlay = { confirmations += 1 }
     @discardableResult func frame(_ target: String?, hand: TrackedHand? = .right, open: Bool = true, head: Bool = false) -> Bool {
         time += 0.04
         let blocked = h.updateUI(ray: target.map { WorldRay(target: $0) }, hand: head ? nil : hand, at: time)
@@ -142,7 +164,23 @@ tests = r'''
     _ = h.perform("setting-props");check(h.props.resets == 1, "reset restores props once")
     _ = h.perform("setting-reset");check(h.preferences == GraffitiPreferences(), "settings reset restores defaults")
     check(h.roomSettingsApplied >= 9, "settings applied to room immediately")
+    _ = h.perform("setting-sound");check(!h.audio.enabled, "sound switch reaches audio controller")
+    _ = h.perform("setting-volume");check(h.audio.volumeTitle == "85%", "volume button reaches audio controller")
+    _ = h.perform("setting-reset");check(h.audio.enabled && h.audio.volumeTitle == "55%", "settings reset includes sound")
     _ = h.perform("setting-close");check(!h.paletteOpen, "settings can close without leaving app")
+    h.setPalette(true);_ = h.perform("tab-radio")
+    check(h.radioPage && !h.settingsPage && !h.radioStatus.isHidden,"radio has its own tab")
+    check(h.buttons.first { $0.0 == "setting-flow" }!.1.node.isHidden,"radio cannot activate hidden settings")
+    for _ in 0..<60 { _ = frame("radio-toggle") }
+    check(h.radio.isPlaying,"radio dwell turns on once even during a long hover")
+    _ = h.perform("radio-next");check(h.radio.nextCount == 1,"next track routes to radio")
+    _ = h.perform("radio-volume");check(h.radio.volumeTitle == "65%","separate music volume")
+    var imports = 0;h.onImportMusic = { imports += 1 }
+    _ = h.perform("radio-import");check(imports == 1,"import opens the native picker callback")
+    _ = h.perform("radio-close");h.mode = .room
+    for _ in 0..<60 { _ = frame("radio-world") }
+    check(!h.radio.isPlaying,"physical radio button pauses exactly once")
+    _ = frame(nil);_ = frame(nil);check(frame(nil),"drawing resumes while radio remains available")
     print("PASS: \(count) production graffiti automatic palm, hand visibility, palette, style and watchdog checks")
  }
 }
@@ -150,8 +188,8 @@ tests = r'''
 with tempfile.TemporaryDirectory(prefix='handar-graffiti-ui-') as directory:
     script = Path(directory)/'ui.swift'
     script.write_text(shim + '\n'.join(method(name) for name in (
-        'stopSpraying', 'cancelInput', 'tick', 'updateUI', 'setPalette', 'perform', 'showsVirtualHand', 'updateSelection')) + tests, encoding='utf-8')
-    run_swift_sources([root/'HandARBrowser/HandGesture.swift', root/'HandARBrowser/GraffitiState.swift', script])
+        'stopSpraying', 'cancelInput', 'tick', 'updateUI', 'setPalette', 'perform', 'showsVirtualHand', 'updateSelection', 'updateRadioControls')) + tests, encoding='utf-8')
+    run_swift_sources([root/'HandARBrowser/HandGesture.swift', root/'HandARBrowser/GraffitiState.swift', root/'HandARBrowser/GraffitiAudio.swift', script])
 
 project = (root/'HandARBrowser.xcodeproj/project.pbxproj').read_text(encoding='utf-8')
 for name in ('GraffitiState', 'GraffitiStudio'):

@@ -118,6 +118,12 @@ final class VirtualHands {
                     node.simdScale = SIMD3(radius*2, (length+radius*2)*0.5, radius*2)
                 }
             }
+            // Shrink the glove around its palm center without moving the
+            // pointer or changing the gesture/tracking coordinates.
+            for node in [palm, cuff, thumbPad] + fingers where !node.isHidden {
+                node.simdPosition = pose.center + (node.simdPosition-pose.center)*0.78
+                node.simdScale *= 0.78
+            }
         }
     }
     private let root = SCNNode(), key = SCNNode()

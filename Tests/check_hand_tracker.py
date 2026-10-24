@@ -71,7 +71,17 @@ extension HandTracker {
   set(.indexPIP,0.43,0.66)
   frames(6,index:CGPoint(x:0.44,y:0.37),thumb:CGPoint(x:0.44,y:0.38))
   precondition(output?.isFist == true && output?.clickPinch == false)
+  let identity = output!.trackingGeneration
+  var grab = GraffitiGrabGate(), grabs = 0
+  for _ in 0..<30 {
+   frames(1,index:CGPoint(x:0.44,y:0.37),thumb:CGPoint(x:0.44,y:0.38))
+   precondition(output!.trackingGeneration == identity,"fist frames keep tracking identity despite cancelled pinches")
+   let event = grab.update(target:1,fist:output!.isFist,open:output!.openPalmCenter != nil,reliable:true,blocked:false,at:time)
+   if event == .began(1) { grabs += 1 }
+  }
+  precondition(grab.held == 1 && grabs == 1,"production tracker fists acquire and retain the prop once")
   state.reset()
+  precondition(state.trackingGeneration != identity,"lost hand resets tracking identity")
   frames(6,index:CGPoint(x:0.36,y:0.6),thumb:CGPoint(x:0.36,y:0.6))
   precondition(output?.clickPinch == false,"closed reacquisition cannot click")
   frames(6,index:CGPoint(x:0.43,y:0.85),thumb:CGPoint(x:0.28,y:0.56))
@@ -135,4 +145,4 @@ extension HandTracker {
 with tempfile.TemporaryDirectory(prefix='handar-tracker-') as directory:
     script=Path(directory)/'tracker.swift'
     script.write_text(stubs+hand_sample+'\nfinal class HandTracker {\n'+state+sample+'\n}\n'+helpers+tests,encoding='utf-8')
-    run_swift_sources([root/'HandARBrowser/HandGesture.swift',script])
+    run_swift_sources([root/'HandARBrowser/HandGesture.swift',root/'HandARBrowser/GraffitiState.swift',script])

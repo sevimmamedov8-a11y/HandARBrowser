@@ -10,6 +10,24 @@ struct HandSilhouette {
     let palm: [SIMD2<Double>]
     let segments: [Segment]
 
+    /// Removal needs a wider envelope than a foreground cutout. This is a local
+    /// approximation, not image segmentation; never expand the ordinary mask.
+    func removalEnvelope() -> HandSilhouette {
+        let center = palm.reduce(SIMD2<Double>.zero, +) / Double(palm.count)
+        let length = HandPinchGeometry.distance((palm[0]+palm[5])*0.5, palm[2])
+        let margin = length*0.14
+        let expanded = palm.map { p -> SIMD2<Double> in
+            let delta = p-center, distance = HandPinchGeometry.distance(p, center)
+            return distance > 0.5 ? p+delta/distance*margin : p
+        }
+        let wider = segments.map { s in
+            Segment(start: s.start, end: s.end,
+                    startRadius: max(s.startRadius*1.65, length*0.085),
+                    endRadius: max(s.endRadius*1.65, length*0.065))
+        }
+        return HandSilhouette(palm: expanded, segments: wider)
+    }
+
     // Fingers are thumb, index, middle, ring, little; each runs base to tip.
     static func make(wrist: SIMD2<Double>?, fingers: [[SIMD2<Double>?]]) -> HandSilhouette? {
         guard fingers.count == 5, fingers.allSatisfy({ $0.count == 4 }),

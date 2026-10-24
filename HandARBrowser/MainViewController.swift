@@ -244,6 +244,7 @@ private struct VRUniforms {
     var passthrough: Float = 1
     var handMaskEnabled: Float = 0
     var overscan: Float = 1
+    var handRemovalEnabled: Float = 0
 }
 
 /// Финальный проход. Берёт офскрин-текстуру глаз (левый глаз слева, правый справа),
@@ -281,6 +282,7 @@ final class VRCompositor {
         float passthrough;
         float handMaskEnabled;
         float overscan;
+        float handRemovalEnabled;
     };
 
     vertex VOut vr_vertex(uint vid [[vertex_id]]) {
@@ -297,6 +299,36 @@ final class VRCompositor {
         return float3(y + 1.402 * cr,
                       y - 0.344136 * cb - 0.714136 * cr,
                       y + 1.772 * cb);
+    }
+
+    // Approximate concealed wall color using nearby unmasked camera pixels.
+    // Bounded cost, no frame history that would trail behind a moving camera.
+    // Only used in Graffiti home mode, before compositing paint and gloves.
+    inline float3 concealedHandBackground(float2 uv, texture2d<float> camY,
+                                         texture2d<float> camCbCr, texture2d<float> mask) {
+        constexpr sampler smp(filter::linear, address::clamp_to_edge);
+        const float2 directions[8] = {float2(1,0),float2(-1,0),float2(0,1),float2(0,-1),
+            float2(0.707,0.707),float2(-0.707,0.707),float2(0.707,-0.707),float2(-0.707,-0.707)};
+        float aspect = float(camY.get_height()) / float(camY.get_width());
+        float3 sum = float3(0.0);
+        float weights = 0.0;
+        for (int d = 0; d < 8; d++) {
+            for (int step = 1; step <= 8; step++) {
+                float radius = 0.018 * float(step * step);
+                float2 candidate = uv + directions[d] * float2(aspect,1.0) * radius;
+                if (any(candidate < 0.0) || any(candidate > 1.0)) { break; }
+                if (mask.sample(smp,candidate).r < 0.02) {
+                    float weight = 1.0 / radius;
+                    float y = camY.sample(smp,candidate).r;
+                    float2 cc = camCbCr.sample(smp,candidate).rg;
+                    sum += clamp(ycbcr_to_rgb(y,cc),0.0,1.0) * weight;
+                    weights += weight;
+                    break;
+                }
+            }
+        }
+        // No reliable surrounding pixels: use a neutral patch, not the hand.
+        return weights > 0.0 ? sum / weights : float3(0.18);
     }
 
     fragment float4 vr_fragment(VOut in [[stage_in]],
@@ -359,6 +391,13 @@ final class VRCompositor {
             }
         }
 
+        if (u.handRemovalEnabled > 0.5 && u.passthrough > 0.5 && validCamUV && alpha < 0.999) {
+            float removalAlpha = handMask.sample(smp, camUV).r;
+            if (removalAlpha > 0.01) {
+                float3 fill = concealedHandBackground(camUV, camY, camCbCr, handMask);
+                background = mix(background, fill, removalAlpha);
+            }
+        }
         float3 color = mix(background, overlay, clamp(alpha, 0.0, 1.0));
 
         // Реальный передний план руки: маска задаётся Vision, цвет берётся
@@ -720,6 +759,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     private let panorama = OfflinePanorama()
     private var panoramaActive: Bool { panorama.isRunning }
     private let graffiti = GraffitiStudio()
+    private let virtualHands = VirtualHands()
     private var graffitiActive: Bool { graffiti.isRunning }
     private var graffitiCameraOverridden = false
     private var graffitiTrackingReady: Bool {
@@ -2314,6 +2354,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         graffiti.onRemoveAnchor = { [weak self] anchor in self?.tracking.remove(anchor: anchor) }
         graffiti.wallHit = { [weak self] ray in self?.tracking.detectedWallHit(ray: ray) }
         graffiti.start(in: worldScene, head: headNode)
+        virtualHands.start(in: worldScene)
         graffitiCameraOverridden = (tracking.latestFrameCopy?.mode ?? CameraMode.load(ultraWideAvailable: UltraWideCapture.isAvailable)) != .worldTracking
         if graffitiCameraOverridden {
             tracking.start(mode: .worldTracking)
@@ -2323,7 +2364,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     private func stopGraffiti(restoreCamera: Bool) {
         guard graffitiActive else { return }
         queueHandForegroundMask(left: nil, right: nil)
-        graffiti.stop(); tracking.setWallDetectionEnabled(false)
+        graffiti.stop(); virtualHands.stop(); tracking.setWallDetectionEnabled(false)
         if restoreCamera, graffitiCameraOverridden { tracking.start() }
         graffitiCameraOverridden = false
         cancelHandInteraction(); hands.reset(); handOwnership.reset()
@@ -2345,21 +2386,57 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         }
         let ray = ready ? palm.flatMap { tracking.worldRay(visionPoint: $0) } : nil
         let blocked = usesHeadAim ? false : graffiti.updateUI(ray: ray, hand: sample?.hand, at: time)
-        var distance: Float = 0.5
-        if let sample, let wrist = sample.maskJoints[.wrist], let base = sample.maskJoints[.middleMCP],
-           let frame = tracking.latestFrameCopy, let projection = tracking.projection(for: frame) {
-            let dx = Double(wrist.x - base.x), dy = Double(wrist.y - base.y)
-            distance = GraffitiGeometry.canDistance(palmFraction: sqrt(dx * dx + dy * dy),
-                                                     verticalTangent: Double(frame.camera.imageResolution.height) / (2 * projection.fy))
-        }
+        let distance = graffitiHandDistance(sample)
+        let head = headNode.simdWorldTransform
+        let rightAxis = SIMD3(head.columns.0.x, head.columns.0.y, head.columns.0.z)
+        let upAxis = SIMD3(head.columns.1.x, head.columns.1.y, head.columns.1.z)
+        let offset = VirtualHandPose.canOffset(distance: distance, left: sample?.hand == .left, right: rightAxis, up: upAxis)
         graffiti.updateHand(hand: sample?.hand, open: sample?.openPalmCenter != nil,
-                            ray: ray, distance: distance, blocked: blocked, trackingReady: ready, at: time)
+                            ray: ray, distance: distance, toolOffset: offset, blocked: blocked, trackingReady: ready, at: time)
+        for hand in [TrackedHand.left, .right] {
+            let tracked = hand == .left ? left : right
+            let visible = ready && graffitiActive && graffiti.showsVirtualHand(hand)
+            let pose = visible ? tracked.flatMap { virtualHandPose($0, distance: graffitiHandDistance($0)) } : nil
+            virtualHands.update(hand: hand, pose: pose, timestamp: tracked?.timestamp ?? -.infinity, at: time, visible: visible)
+        }
         if !usesHeadAim {
             if let ray { showPointerDot(at: ray.point(at: 0.9), transform: headNode.simdWorldTransform, active: false) }
             else { hidePointerDot() }
             rayNode.isHidden = true
         }
         controllerHandRoot.isHidden = true
+    }
+
+    private func graffitiHandDistance(_ sample: HandSample?) -> Float {
+        if let sample, let wrist = sample.maskJoints[.wrist], let base = sample.maskJoints[.middleMCP],
+           let frame = tracking.latestFrameCopy, let projection = tracking.projection(for: frame) {
+            let aspect = Double(frame.camera.imageResolution.width) / Double(frame.camera.imageResolution.height)
+            let dx = Double(wrist.x - base.x)*aspect, dy = Double(wrist.y - base.y)
+            return GraffitiGeometry.canDistance(palmFraction: sqrt(dx * dx + dy * dy),
+                verticalTangent: Double(frame.camera.imageResolution.height) / (2 * projection.fy))
+        }
+        return 0.5
+    }
+
+    private func virtualHandPose(_ sample: HandSample, distance: Float) -> VirtualHandPose? {
+        guard let wrist = sample.maskJoints[.wrist], let base = sample.maskJoints[.middleMCP] else { return nil }
+        let center = CGPoint(x: (wrist.x+base.x)*0.5, y: (wrist.y+base.y)*0.5)
+        guard let palmRay = tracking.worldRay(visionPoint: center) else { return nil }
+        let names: [VNHumanHandPoseObservation.JointName] = [
+            .wrist, .thumbCMC, .thumbMP, .thumbIP, .thumbTip,
+            .indexMCP, .indexPIP, .indexDIP, .indexTip,
+            .middleMCP, .middlePIP, .middleDIP, .middleTip,
+            .ringMCP, .ringPIP, .ringDIP, .ringTip,
+            .littleMCP, .littlePIP, .littleDIP, .littleTip]
+        let points = names.map { name -> SIMD3<Float>? in
+            guard let point = sample.maskJoints[name], point.x.isFinite, point.y.isFinite,
+                  (0...1).contains(point.x), (0...1).contains(point.y),
+                  let ray = tracking.worldRay(visionPoint: point) else { return nil }
+            let alignment = simd_dot(ray.direction, palmRay.direction)
+            guard alignment > 0.5 else { return nil }
+            return ray.point(at: distance/alignment)
+        }
+        return VirtualHandPose(points: points, camera: palmRay.origin)
     }
 
     // MARK: Offline 360° travel
@@ -3333,8 +3410,9 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         if freshLeft != nil || freshRight != nil { lastHandSeenTime = now }
         if graffitiActive {
             handleGraffitiHands(left: freshLeft, right: freshRight, at: now)
-            queueHandForegroundMask(left: graffiti.showsRealHand(.left) ? freshLeft : nil,
-                                    right: graffiti.showsRealHand(.right) ? freshRight : nil)
+            let removeRealHands = graffitiActive && graffiti.mode == .home && graffitiTrackingReady
+            queueHandForegroundMask(left: removeRealHands ? freshLeft : nil,
+                                    right: removeRealHands ? freshRight : nil, removing: removeRealHands)
             return
         }
         if lensCalibrationView == nil && !directVideoActive && !cinemaActive && !panoramaActive { queueHandForegroundMask(left:freshLeft,right:freshRight) }
@@ -3618,11 +3696,11 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     }
 
     /// Создаёт маску кисти в координатах сырого кадра камеры. В ней нет
-    /// графики скелета — она только определяет, какие настоящие пиксели камеры
-    /// нужно показать поверх виртуальной сцены.
-    private func queueHandForegroundMask(left: HandSample?, right: HandSample?) {
+    /// графики скелета. Обычная маска показывает руку поверх сцены; расширенная
+    /// маска в домашних стенах Граффити используется для замены руки фоном.
+    private func queueHandForegroundMask(left: HandSample?, right: HandSample?, removing: Bool = false) {
         let now = CACurrentMediaTime()
-        let activeSamples = [left, right].compactMap { $0 }.filter { now-$0.timestamp <= 0.12 }
+        let activeSamples = [left, right].compactMap { $0 }.filter { VirtualHandPose.fresh($0.timestamp, at: now) }
         if activeSamples.isEmpty {
             handMaskLock.lock()
             let alreadyClear = !pendingHandMaskActive
@@ -3659,7 +3737,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         context.setLineJoin(.round)
 
         var active = false
-        for sample in activeSamples { if drawHandMask(sample, in: context) { active = true } }
+        for sample in activeSamples { if drawHandMask(sample, in: context, removing: removing) { active = true } }
 
         handMaskLock.lock()
         pendingHandMaskBytes = bytes
@@ -3669,7 +3747,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         handMaskLock.unlock()
     }
 
-    private func drawHandMask(_ sample: HandSample, in context: CGContext) -> Bool {
+    private func drawHandMask(_ sample: HandSample, in context: CGContext, removing: Bool = false) -> Bool {
         let landscapeLeft = currentInterfaceOrientation() == .landscapeLeft
         // Build in real camera pixels: a square UV texture must not widen fingers
         // along the long side of a landscape camera frame.
@@ -3684,7 +3762,8 @@ final class MainViewController: UIViewController, MTKViewDelegate {
             [.middleMCP,.middlePIP,.middleDIP,.middleTip], [.ringMCP,.ringPIP,.ringDIP,.ringTip],
             [.littleMCP,.littlePIP,.littleDIP,.littleTip]
         ]
-        guard let shape = HandSilhouette.make(wrist:point(.wrist), fingers:chains.map { $0.map(point) }) else { return false }
+        guard let silhouette = HandSilhouette.make(wrist:point(.wrist), fingers:chains.map { $0.map(point) }) else { return false }
+        let shape = removing ? silhouette.removalEnvelope() : silhouette
         context.saveGState()
         defer { context.restoreGState() }
         context.scaleBy(x:CGFloat(Double(handMaskWidth)/sample.imageSize.x),
@@ -4019,7 +4098,10 @@ final class MainViewController: UIViewController, MTKViewDelegate {
 
         let drawableSize = view.drawableSize
         guard drawableSize.width > 1, drawableSize.height > 1 else { return }
-        if graffitiActive { graffiti.tick(at: CACurrentMediaTime(), trackingReady: graffitiTrackingReady) }
+        if graffitiActive {
+            graffiti.tick(at: CACurrentMediaTime(), trackingReady: graffitiTrackingReady)
+            virtualHands.tick(at: CACurrentMediaTime(), ready: graffitiTrackingReady, head: headNode)
+        }
         panorama.followPosition(head: headNode)
         updateHeadAim(at: CACurrentMediaTime())
         tickCinemaComfort(at: CACurrentMediaTime())
@@ -4056,13 +4138,15 @@ final class MainViewController: UIViewController, MTKViewDelegate {
 
         // Проход 3 — оптика линз плюс сквозное видео.
         let frame = tracking.latestFrameCopy
-        let handMaskActive = !panoramaActive && (graffitiActive ? graffiti.mode == .room : cameraPassthroughRequested) && syncHandMaskTexture()
+        let handMaskActive = !panoramaActive && !graffitiActive && cameraPassthroughRequested && syncHandMaskTexture()
+        let handRemovalActive = graffitiActive && graffiti.mode == .home && graffitiTrackingReady && syncHandMaskTexture()
         let cameraTextures = makeCameraTextures(from: frame, includeHands: handMaskActive)
         let uniforms = makeUniforms(
             drawableSize: drawableSize,
             frame: frame,
             hasCamera: cameraTextures != nil,
-            handMaskActive: handMaskActive
+            handMaskActive: handMaskActive,
+            handRemovalActive: handRemovalActive
         )
 
         let handMaskTexture = handMaskTexture ?? eyeTexture
@@ -4093,7 +4177,8 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         drawableSize: CGSize,
         frame: CameraFrame?,
         hasCamera: Bool,
-        handMaskActive: Bool = false
+        handMaskActive: Bool = false,
+        handRemovalActive: Bool = false
     ) -> VRUniforms {
         var uniforms = VRUniforms()
         uniforms.lensCenterL = VRLensMath.lensCenterUV(eye: 0, profile: profile)
@@ -4114,7 +4199,8 @@ final class MainViewController: UIViewController, MTKViewDelegate {
             return uniforms
         }
 
-        uniforms.handMaskEnabled = handMaskActive ? 1 : 0
+        uniforms.handRemovalEnabled = (handRemovalActive && graffitiActive && graffiti.mode == .home && uniforms.passthrough > 0.5) ? 1 : 0
+        uniforms.handMaskEnabled = (handMaskActive && !graffitiActive && uniforms.handRemovalEnabled == 0) ? 1 : 0
 
         let flip = currentInterfaceOrientation() == .landscapeLeft
 

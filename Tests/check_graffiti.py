@@ -76,12 +76,12 @@ tests = r'''
         return painted
     }
     check(!frame(nil) && !frame(nil) && frame(nil), "open palm starts automatically after short confirmation")
-    check(h.paintingHand == .right && !h.showsRealHand(.right) && h.showsRealHand(.left), "only drawing hand is hidden")
-    check(!frame(nil, open: false) && h.showsRealHand(.right), "closing palm restores real hand immediately")
+    check(h.paintingHand == .right && !h.showsVirtualHand(.right) && h.showsVirtualHand(.left), "only drawing hand is hidden")
+    check(!frame(nil, open: false) && h.showsVirtualHand(.right), "closing palm restores virtual hand immediately")
     _ = frame(nil);_ = frame(nil);check(frame(nil), "no start button needed to resume")
     for _ in 0..<60 { check(!frame("palette"), "palette hover and open panel never paint") }
     check(h.paletteOpen && confirmations == 1, "one long dwell opens palette only once")
-    check(h.showsRealHand(.right) && h.showsRealHand(.left), "both hands visible in palette")
+    check(h.showsVirtualHand(.right) && h.showsVirtualHand(.left), "both hands visible in palette")
     for _ in 0..<60 { check(!frame("rainbow"), "style selection cannot leave marks") }
     check(h.rainbow && confirmations == 2, "one dwell enables rainbow")
     for _ in 0..<60 { _ = frame("mood") }
@@ -95,12 +95,12 @@ tests = r'''
     check(!h.paletteOpen, "palette closes by dwell")
     check(!frame(nil) && !frame(nil) && frame(nil), "leaving palette resumes automatic palm spray after settling")
     _ = frame(nil, hand: nil)
-    check(h.showsRealHand(.right) && !h.sprayGate.canVisible, "loss clears drawing state")
+    check(h.showsVirtualHand(.right) && !h.sprayGate.canVisible, "loss clears drawing state")
     check(!frame(nil) && !frame(nil) && frame(nil), "reacquisition starts a separate confirmed stroke")
-    check(!frame(nil, hand: .left) && h.showsRealHand(.right), "hand change ends old stroke")
+    check(!frame(nil, hand: .left) && h.showsVirtualHand(.right), "hand change ends old stroke")
     _ = frame(nil, hand: .left);check(frame(nil, hand: .left), "left hand can start its own stroke")
-    check(!h.showsRealHand(.left) && h.showsRealHand(.right), "left painting hand is hidden independently")
-    h.endStroke();check(h.showsRealHand(.left), "no wall hit or completed stroke restores hand")
+    check(!h.showsVirtualHand(.left) && h.showsVirtualHand(.right), "left painting hand is hidden independently")
+    h.endStroke();check(h.showsVirtualHand(.left), "no wall hit or completed stroke restores hand")
     h.tick(at: time + 0.3, trackingReady: true)
     check(h.paintingHand == nil && !h.sprayGate.canVisible, "watchdog clears drawing state")
     h.cancelInput()
@@ -112,7 +112,7 @@ tests = r'''
     check(!frame(nil, head: true) && !frame(nil, head: true) && frame(nil, head: true), "palm can paint with head controls")
     h.tick(at: time, trackingReady: false)
     check(h.paintingHand == nil && h.can.isHidden && h.aim.isHidden, "camera loss clears tool and drawing state")
-    h.mode = .home;check(!h.showsRealHand(.left) && !h.showsRealHand(.right), "home uses its existing camera background, not cutouts")
+    h.mode = .home;check(h.showsVirtualHand(.left) && h.showsVirtualHand(.right), "home also shows virtual gloves when not painting")
     print("PASS: \(count) production graffiti automatic palm, hand visibility, palette, style and watchdog checks")
  }
 }
@@ -120,7 +120,7 @@ tests = r'''
 with tempfile.TemporaryDirectory(prefix='handar-graffiti-ui-') as directory:
     script = Path(directory)/'ui.swift'
     script.write_text(shim + '\n'.join(method(name) for name in (
-        'stopSpraying', 'cancelInput', 'tick', 'updateUI', 'setPalette', 'perform', 'showsRealHand')) + tests, encoding='utf-8')
+        'stopSpraying', 'cancelInput', 'tick', 'updateUI', 'setPalette', 'perform', 'showsVirtualHand')) + tests, encoding='utf-8')
     run_swift_sources([root/'HandARBrowser/HandGesture.swift', root/'HandARBrowser/GraffitiState.swift', script])
 
 project = (root/'HandARBrowser.xcodeproj/project.pbxproj').read_text(encoding='utf-8')

@@ -117,7 +117,7 @@ final class GraffitiStudio {
     private(set) var mode: GraffitiMode = .room
     private(set) var paintingHand: TrackedHand?
     var handOwner: TrackedHand? { sprayGate.owner }
-    func showsRealHand(_ hand: TrackedHand) -> Bool { mode == .room && paintingHand != hand }
+    func showsVirtualHand(_ hand: TrackedHand) -> Bool { paintingHand != hand }
     var onExit: (() -> Void)?
     var onModeChanged: ((GraffitiMode) -> Void)?
     var onInteraction: (() -> Void)?
@@ -457,7 +457,7 @@ final class GraffitiStudio {
         return uiBlocked
     }
 
-    func updateHand(hand: TrackedHand?, open: Bool, ray: WorldRay?, distance: Float,
+    func updateHand(hand: TrackedHand?, open: Bool, ray: WorldRay?, distance: Float, toolOffset: SIMD3<Float>,
                     blocked: Bool, trackingReady: Bool, at time: Double) {
         guard isRunning, aligned else { return }
         let spraying = sprayGate.update(hand: hand, open: open, reliable: trackingReady && ray != nil,
@@ -469,7 +469,7 @@ final class GraffitiStudio {
         }
         lastHandAt = time
         can.isHidden = !sprayGate.canVisible
-        can.simdWorldPosition = ray.point(at: distance)
+        can.simdWorldPosition = ray.point(at: distance) + toolOffset
         can.look(at: SCNVector3(ray.point(at: distance + 1)), up: SCNVector3(0, 1, 0), localFront: SCNVector3(0, 0, -1))
         guard spraying else {
             endStroke(); aim.isHidden = true
@@ -487,6 +487,7 @@ final class GraffitiStudio {
         aim.simdWorldTransform = hit.canvas.node.simdWorldTransform
         let marker = hit.canvas.node.convertPosition(SCNVector3(Float(hit.point.x), Float(hit.point.y), 0.008), to: root)
         aim.simdPosition = SIMD3(marker.x, marker.y, marker.z)
+        can.look(at: marker, up: SCNVector3(0, 1, 0), localFront: SCNVector3(0, 0, -1))
         // The small ring geometry lies in XZ; rotate its own mesh into the wall's XY.
         aim.simdWorldOrientation = hit.canvas.node.simdWorldOrientation * simd_quatf(angle: .pi / 2, axis: SIMD3(1, 0, 0))
         if activeCanvas != hit.canvas.id {

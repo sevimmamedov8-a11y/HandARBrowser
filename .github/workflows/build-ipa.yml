@@ -1,4 +1,4 @@
-name: Build HandAR Vision IPA — V95
+name: Build HandAR Vision IPA — V96
 
 on:
   push:
@@ -49,6 +49,7 @@ jobs:
           python3 Tests/check_graffiti.py
           python3 Tests/check_graffiti_room.py
           python3 Tests/check_hand_foreground.py
+          python3 Tests/check_virtual_hands.py
           python3 Tests/check_panorama.py
           python3 Tests/check_cinema_mask.py
           python3 Tests/check_cinema_audio.py
@@ -72,7 +73,7 @@ jobs:
           /usr/bin/unzip -p build/HandARBrowser-unsigned.ipa Payload/HandARBrowser.app/Info.plist > build/packaged-Info.plist
           /usr/bin/plutil -lint build/packaged-Info.plist
           test "$(/usr/bin/plutil -extract CFBundleDisplayName raw -o - build/packaged-Info.plist)" = "HandAR Vision"
-          test "$(/usr/bin/plutil -extract CFBundleVersion raw -o - build/packaged-Info.plist)" = "95"
+          test "$(/usr/bin/plutil -extract CFBundleVersion raw -o - build/packaged-Info.plist)" = "96"
           /usr/bin/plutil -extract UILaunchScreen json -o - build/packaged-Info.plist >/dev/null
           /usr/bin/unzip -p build/HandARBrowser-unsigned.ipa Payload/HandARBrowser.app/Panoramas/catalog.json > build/packaged-panoramas.json
           python3 -c 'import json; assert json.load(open("build/packaged-panoramas.json"))[0]["id"] == "burj-khalifa-night"'

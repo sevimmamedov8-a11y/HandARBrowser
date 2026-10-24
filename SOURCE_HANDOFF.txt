@@ -1,0 +1,19 @@
+SOURCE HANDOFF
+This archive contains the current local source tree, not a compiled IPA.
+App build number: 102
+Git HEAD: 8e5dfe289091b6a4aa74cad5120217d1e334c02c
+Working tree at packaging: clean
+The relationship to any separately uploaded IPA has not been verified.
+
+Task: add a separate time-motion VR shooter using the accompanying user prompt.
+Keep the existing SecurityVRGame and other applications. It is a different game,
+not a partial implementation of the requested shooter. Reuse suitable shared
+components after inspecting their source instead of replacing that game.
+
+Source root: HandARBrowser/
+Xcode project: HandARBrowser.xcodeproj/project.pbxproj
+CI: .github/workflows/build-ipa.yml
+Tests: Tests/
+Include Xcode registration for any new sources/resources.
+Return new/modified files with paths; do not claim to change the user's computer.
+Git history, local caches and build artifacts are intentionally omitted.

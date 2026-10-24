@@ -61,6 +61,8 @@ jobs:
           python3 Tests/check_cinema_audio.py
           python3 Tests/check_cinema_recovery.py
           python3 Tests/check_security_vr.py
+          python3 Tests/check_time_motion.py
+          python3 Tests/check_time_motion_integration.py
           node --check HandARBrowser/WebInput.js
           node Tests/web-input.cjs
           node Tests/hand-input.cjs

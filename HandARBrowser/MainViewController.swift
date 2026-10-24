@@ -756,6 +756,10 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     private var menuSwipe = OpenPalmSwipeGesture()
     private var cinemaNeedsAlignment = false
     private let securityGame = SecurityVRGame()
+    private var timeMotionActive = false
+    private var timeMotionLeft: HandSample?
+    private var timeMotionRight: HandSample?
+    private let timeMotion = TimeMotionVRGame()
     private var cinemaActive = false
     private let cinemaHall = CinemaHall()
     private let panorama = OfflinePanorama()
@@ -2340,6 +2344,84 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         hidePointerDot()
     }
 
+    // MARK: Time Motion
+
+    private func startTimeMotionVR() {
+        guard inVR else { return }
+        guard !usesHeadAim else {
+            showAlert("Time Motion работает с управлением рукой. Переключите управление на «рука» в настройках.")
+            return
+        }
+        cancelHandInteraction()
+        handOwnership.suppressUntilOpen()
+        securityGameActive = true
+        timeMotionActive = true
+        timeMotionLeft = nil
+        timeMotionRight = nil
+
+        stopBrowserCapture()
+        hideDirectVideoStage()
+        browserPlaneNode.isHidden = true
+        toolbarNode.isHidden = true
+        hidePointer()
+        hidePointerDot()
+        releasePointer()
+
+        let headForward = headNode.simdWorldTransform.columns.2
+        let forward = simd_normalize(SIMD3<Float>(-headForward.x, 0, -headForward.z))
+        virtualHands.start(in: worldScene)
+        timeMotion.onExitRequested = { [weak self] in self?.exitTimeMotionVR() }
+        timeMotion.start(in: worldScene, headPosition: headNode.simdWorldPosition, forward: forward)
+        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+    }
+
+    private func exitTimeMotionVR() {
+        guard timeMotionActive else { return }
+        timeMotion.stop()
+        virtualHands.stop()
+        timeMotionActive = false
+        securityGameActive = false
+        timeMotionLeft = nil
+        timeMotionRight = nil
+        toolbarNode.isHidden = false
+        browserPlaneNode.isHidden = false
+        openVRDesktop()
+        startBrowserCapture()
+        hidePointer()
+        hidePointerDot()
+    }
+
+    private func timeMotionInput(_ sample: HandSample?, now: Double) -> TimeMotionHandInput? {
+        guard let sample, VirtualHandPose.fresh(sample.timestamp, at: now) else { return nil }
+        let pose = virtualHandPose(sample, distance: graffitiHandDistance(sample))
+        var aim: WorldRay?
+        if let wrist = sample.maskJoints[.wrist], let base = sample.maskJoints[.middleMCP] {
+            let palm = CGPoint(x: (wrist.x + base.x) * 0.5, y: (wrist.y + base.y) * 0.5)
+            aim = tracking.worldRay(visionPoint: palm)
+        }
+        return TimeMotionHandInput(hand: sample.hand, timestamp: sample.timestamp, pose: pose,
+                                   aimRay: aim, trackingGeneration: sample.trackingGeneration,
+                                   fist: sample.isFist, open: sample.openPalmCenter != nil,
+                                   pinch: sample.clickPinch)
+    }
+
+    /// Runs once per rendered frame, so the game clock does not depend on hand delivery.
+    private func tickTimeMotion(at now: Double) {
+        guard timeMotionActive, inVR else { return }
+        let ready = graffitiTrackingReady
+        let left = timeMotionInput(timeMotionLeft, now: now)
+        let right = timeMotionInput(timeMotionRight, now: now)
+        timeMotion.update(now: now, left: left, right: right, headTransform: headNode.simdWorldTransform,
+                          trackingReady: ready, dwell: usesDwell)
+        guard timeMotionActive else { return }
+        controllerHandRoot.isHidden = true
+        virtualHands.tick(at: now, ready: ready, head: headNode)
+        virtualHands.update(hand: .left, pose: left?.pose, timestamp: left?.timestamp ?? -.infinity,
+                            at: now, visible: left?.pose != nil)
+        virtualHands.update(hand: .right, pose: right?.pose, timestamp: right?.timestamp ?? -.infinity,
+                            at: now, visible: right?.pose != nil)
+    }
+
     // MARK: Graffiti
 
     private func startGraffiti() {
@@ -3001,6 +3083,14 @@ final class MainViewController: UIViewController, MTKViewDelegate {
             securityGameActive = false
         }
 
+        if timeMotionActive {
+            timeMotion.stop()
+            virtualHands.stop()
+            timeMotionActive = false
+            timeMotionLeft = nil
+            timeMotionRight = nil
+        }
+
         if cinemaActive {
             cinemaHall.stop()
             cinemaActive = false
@@ -3424,6 +3514,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         directLeftInput.release(webView: directVideoLeft)
         cinemaHall.cancelInput()
         securityGame.cancelInput()
+        timeMotion.cancelInput()
         panorama.cancelInput()
         graffiti.cancelInput()
         toolbarClickGate.cancel()
@@ -3485,6 +3576,12 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         func route(_ sample: HandSample?) -> HandRoutingState? {
             guard let sample else { return nil }
             return usesDwell ? HandRoutingState(hand:sample.hand,generation:0,down:sample.clickPinch,openConfirmed:!sample.clickPinch) : sample.routing
+        }
+        if timeMotionActive {
+            timeMotionLeft = freshLeft
+            timeMotionRight = freshRight
+            controllerHandRoot.isHidden = true
+            return
         }
         let decision = handOwnership.select(left:route(inputLeft),right:route(inputRight))
         if decision.cancel { cancelHandInteraction() }
@@ -4135,6 +4232,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         }
         panorama.followPosition(head: headNode)
         updateHeadAim(at: CACurrentMediaTime())
+        tickTimeMotion(at: CACurrentMediaTime())
         tickCinemaComfort(at: CACurrentMediaTime())
         if directVideoActive { updateCinemaWebScreen() }
         updateCinemaControlOcclusion()
@@ -4638,6 +4736,7 @@ body{background:#05060b}
       <div class="gamecard" onclick="startFruit()"><div><div class="gameemoji">🍉🍓</div><h3>Fruit Slice VR</h3><p>Твоя версия игры с нарезкой фруктов. Двигай рукой и режь летящие фрукты, избегая бомб.</p><span class="tag">Рука + pinch</span></div><div>▶ Играть</div></div>
       <div class="gamecard" onclick="startNeon()"><div><div class="gameemoji">☄️✨</div><h3>Neon Dodge</h3><p>Держи указатель подальше от метеоров и продержись 30 секунд, собирая очки.</p><span class="tag">Рука + движение</span></div><div>▶ Играть</div></div>
       <div class="gamecard" onclick="startStack()"><div><div class="gameemoji">🧱🏗️</div><h3>Stack Rush</h3><p>Точно ставь движущиеся блоки друг на друга и строй башню как можно выше.</p><span class="tag">Рука + pinch</span></div><div>▶ Играть</div></div>
+      <div class=\"gamecard\" onclick=\"post('time-motion-game')\"><div><div class=\"gameemoji\">🔫⏱️</div><h3>Time Motion</h3><p>Замедление времени: почти неподвижный мир, движение ускоряет его. Возьми пистолет кулаком — он стреляет сам, укрывайся за ящиками и уворачивайся головой от красных врагов. Три волны, очки и локальный рекорд.</p><span class=\"tag\">Рука · Пистолет · Замедление · Рекорд</span></div><div>▶ Играть</div></div>
       <div class="gamecard" onclick="post('security-game')"><div><div class="gameemoji">🔦🪪</div><h3>Security VR</h3><p>Охрана клуба: сканер и алкотестер работают наведением. Каждые 5 решений меняются правила смены. Собирай серии правильных решений, улучшай точность и личный рекорд. Есть пауза, захват гостей и предметов.</p><span class="tag">Смены · Серии · Рекорд · Управление наведением</span></div><div>▶ Играть</div></div>
     </div>
   </section>
@@ -4770,6 +4869,8 @@ addEventListener('resize',()=>{if(current==='fruit')[fruitW,fruitH]=fitCanvas(fc
             browser.loadHTMLString(Self.vrGamesHTML, baseURL: URL(string: "https://handar.vision/"))
         case "security-game":
             startSecurityVR()
+        case "time-motion-game":
+            startTimeMotionVR()
         case "cinema":
             enterCinema(url: nil)
         case "settings":

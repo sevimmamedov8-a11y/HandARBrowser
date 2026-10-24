@@ -25,8 +25,19 @@ grep -Fq "final class CinemaHall" "HandARBrowser/CinemaHall.swift"
 [[ -f "HandARBrowser/VirtualHands.swift" ]]
 [[ -f "HandARBrowser/Panoramas/catalog.json" ]]
 [[ -f "HandARBrowser/Panoramas/burj-khalifa-night.jpg" ]]
+[[ -f "HandARBrowser/TimeMotionLogic.swift" ]]
+[[ -f "HandARBrowser/TimeMotionGame.swift" ]]
+[[ -f "HandARBrowser/TimeMotionSounds/tm_shot.wav" ]]
 
 SRC="HandARBrowser/MainViewController.swift"
+
+# --- Time Motion integration (separate game, SecurityVRGame untouched) ---
+grep -Fq "final class TimeMotionVRGame" "HandARBrowser/TimeMotionGame.swift"
+grep -Fq "startTimeMotionVR()" "$SRC"
+grep -Fq "case \"time-motion-game\":" "$SRC"
+grep -Fq "tickTimeMotion(at: CACurrentMediaTime())" "$SRC"
+grep -Fq "timeMotion.cancelInput()" "$SRC"
+grep -Fq "final class SecurityVRGame" "HandARBrowser/SecurityVRGame.swift"
 
 # --- frameworks the stereo pipeline needs ---
 grep -Fq "import ARKit" "$SRC"

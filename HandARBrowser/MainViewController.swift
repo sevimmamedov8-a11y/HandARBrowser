@@ -3332,9 +3332,9 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         lastHandDeliveryTime = max(freshLeft?.timestamp ?? -.infinity, freshRight?.timestamp ?? -.infinity)
         if freshLeft != nil || freshRight != nil { lastHandSeenTime = now }
         if graffitiActive {
-            let showHands = graffiti.mode == .room
-            queueHandForegroundMask(left: showHands ? freshLeft : nil, right: showHands ? freshRight : nil)
             handleGraffitiHands(left: freshLeft, right: freshRight, at: now)
+            queueHandForegroundMask(left: graffiti.showsRealHand(.left) ? freshLeft : nil,
+                                    right: graffiti.showsRealHand(.right) ? freshRight : nil)
             return
         }
         if lensCalibrationView == nil && !directVideoActive && !cinemaActive && !panoramaActive { queueHandForegroundMask(left:freshLeft,right:freshRight) }

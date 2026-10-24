@@ -45,14 +45,16 @@ final class Harness {
     var uiHand: TrackedHand?, uiGate = ReleaseClickGate<String>()
     var sprayGate = GraffitiSprayGate()
     let can = Node(), aim = Node(), room = Node(), home = Node(), panel = Node(), ring = Ring()
-    let paletteButton = Button("palette"), sprayButton = Button("paint")
-    var buttons = [("color-1", Button("color-1")), ("room", Button("room")), ("home", Button("home"))]
+    let paletteButton = Button("palette")
+    var buttons = [("color-1", Button("color-1")), ("room", Button("room")), ("home", Button("home")), ("rainbow", Button("rainbow")), ("mood", Button("mood"))]
+    var paintingHand: TrackedHand?, rainbow = false, mood = GraffitiRoomMood.neon, moodChanges = 0
     var roomCanvases: [Canvas] = [], homeCanvases: [Canvas] = [], undo: [(UUID, Int)] = []
     var mode = GraffitiMode.room, colors = Array(0..<8), radii = [0.01, 0.02, 0.03], colorIndex = 0, sizeIndex = 0
     var lastHandAt = -Double.infinity, lastUpload = -Double.infinity, hint = "", strokesEnded = 0
     var onInteraction: (() -> Void)?, onModeChanged: ((GraffitiMode) -> Void)?, onExit: (() -> Void)?
-    func endStroke() { strokesEnded += 1 }
+    func endStroke() { strokesEnded += 1; paintingHand = nil }
     func updateSelection() {}
+    func updateRoomMood() { moodChanges += 1 }
     func setHint(_ text: String) { hint = text }
 '''
 tests = r'''
@@ -68,53 +70,57 @@ tests = r'''
         time += 0.04
         let blocked = h.updateUI(ray: target.map { WorldRay(target: $0) }, hand: head ? nil : hand, at: time)
         let painted = h.sprayGate.update(hand: hand, open: open, reliable: true, blocked: blocked, at: time)
+        h.paintingHand = painted ? hand : nil
         if hand != nil { h.lastHandAt = time }
         h.tick(at: time, trackingReady: true)
         return painted
     }
-    for _ in 0..<60 { check(!frame("paint"), "holding enable cannot spray through UI") }
-    check(h.sprayGate.isEnabled && h.sprayButton.title == "Стоп", "one dwell enables paint and changes button")
-    check(confirmations == 1, "long dwell confirms exactly once")
-    check(frame(nil), "paint begins only after leaving enable control")
-    for _ in 0..<60 { check(!frame("paint"), "stop hover suppresses paint immediately") }
-    check(!h.sprayGate.isEnabled && h.sprayButton.title == "Рисовать", "stop remains off during long hover")
-    check(confirmations == 2 && !frame(nil), "no repeated toggle while held")
-    for _ in 0..<30 { _ = frame("paint") }
-    check(frame(nil), "new dwell can restart")
-    for _ in 0..<30 { check(!frame("palette"), "palette hover pauses paint") }
-    check(h.paletteOpen && !h.sprayGate.isEnabled && h.sprayButton.node.isHidden, "opening palette disables and hides enable control")
-    for _ in 0..<30 { _ = frame("paint") }
-    check(!h.sprayGate.isEnabled && confirmations == 4, "hidden paint button cannot be activated behind palette")
+    check(!frame(nil) && !frame(nil) && frame(nil), "open palm starts automatically after short confirmation")
+    check(h.paintingHand == .right && !h.showsRealHand(.right) && h.showsRealHand(.left), "only drawing hand is hidden")
+    check(!frame(nil, open: false) && h.showsRealHand(.right), "closing palm restores real hand immediately")
+    _ = frame(nil);_ = frame(nil);check(frame(nil), "no start button needed to resume")
+    for _ in 0..<60 { check(!frame("palette"), "palette hover and open panel never paint") }
+    check(h.paletteOpen && confirmations == 1, "one long dwell opens palette only once")
+    check(h.showsRealHand(.right) && h.showsRealHand(.left), "both hands visible in palette")
+    for _ in 0..<60 { check(!frame("rainbow"), "style selection cannot leave marks") }
+    check(h.rainbow && confirmations == 2, "one dwell enables rainbow")
+    for _ in 0..<60 { _ = frame("mood") }
+    check(h.mood == .sunset && h.moodChanges == 1, "long hover changes mood just once")
+    _ = frame(nil)
+    for _ in 0..<30 { _ = frame("mood") }
+    check(h.mood == .mint, "leaving and returning allows next mood")
+    for _ in 0..<30 { _ = frame("color-1") }
+    check(h.colorIndex == 1 && !h.rainbow, "choosing a solid swatch exits rainbow mode")
     for _ in 0..<30 { _ = frame("palette") }
-    check(!h.paletteOpen && !h.sprayButton.node.isHidden && !frame(nil), "closing palette leaves spray disabled")
-    for _ in 0..<30 { _ = frame("paint") }
-    check(frame(nil), "explicit restart after palette")
+    check(!h.paletteOpen, "palette closes by dwell")
+    check(!frame(nil) && !frame(nil) && frame(nil), "leaving palette resumes automatic palm spray after settling")
     _ = frame(nil, hand: nil)
-    check(!frame(nil) && !h.sprayGate.isEnabled, "returning palm after loss cannot resume")
-    for _ in 0..<20 { _ = frame("paint") }
-    for _ in 0..<10 { _ = frame("paint", hand: .left) }
-    check(!h.sprayGate.isEnabled, "different hands cannot complete each other's dwell")
-    for _ in 0..<25 { _ = frame("paint", hand: .left) }
-    check(h.sprayGate.isEnabled && frame(nil, hand: .left), "new hand needs a full separate dwell")
+    check(h.showsRealHand(.right) && !h.sprayGate.canVisible, "loss clears drawing state")
+    check(!frame(nil) && !frame(nil) && frame(nil), "reacquisition starts a separate confirmed stroke")
+    check(!frame(nil, hand: .left) && h.showsRealHand(.right), "hand change ends old stroke")
+    _ = frame(nil, hand: .left);check(frame(nil, hand: .left), "left hand can start its own stroke")
+    check(!h.showsRealHand(.left) && h.showsRealHand(.right), "left painting hand is hidden independently")
+    h.endStroke();check(h.showsRealHand(.left), "no wall hit or completed stroke restores hand")
     h.tick(at: time + 0.3, trackingReady: true)
-    check(!h.sprayGate.isEnabled && h.sprayButton.title == "Рисовать", "render watchdog turns off stalled hand input")
+    check(h.paintingHand == nil && !h.sprayGate.canVisible, "watchdog clears drawing state")
     h.cancelInput()
-    let previousConfirmations = confirmations
-    for _ in 0..<35 { _ = frame("paint", hand: nil, head: true) }
-    check(!h.sprayGate.isEnabled && confirmations == previousConfirmations, "head dwell without palm does not give false success sound")
+    for _ in 0..<35 { check(!frame("palette", hand: nil, head: true), "head-only UI cannot paint") }
+    check(h.paletteOpen, "head dwell still opens palette with no hands")
     _ = frame(nil, head: true)
-    for _ in 0..<35 { _ = frame("paint", head: true) }
-    check(h.sprayGate.isEnabled && confirmations == previousConfirmations + 1, "head dwell can enable a visible palm")
+    for _ in 0..<35 { _ = frame("palette", head: true) }
+    check(!h.paletteOpen, "head dwell closes palette")
+    check(!frame(nil, head: true) && !frame(nil, head: true) && frame(nil, head: true), "palm can paint with head controls")
     h.tick(at: time, trackingReady: false)
-    check(!h.sprayGate.isEnabled && h.can.isHidden && h.aim.isHidden, "tracking loss cancels and hides paint immediately")
-    print("PASS: \(count) production graffiti UI dwell, toggle, palette, head-input and watchdog checks")
+    check(h.paintingHand == nil && h.can.isHidden && h.aim.isHidden, "camera loss clears tool and drawing state")
+    h.mode = .home;check(!h.showsRealHand(.left) && !h.showsRealHand(.right), "home uses its existing camera background, not cutouts")
+    print("PASS: \(count) production graffiti automatic palm, hand visibility, palette, style and watchdog checks")
  }
 }
 '''
 with tempfile.TemporaryDirectory(prefix='handar-graffiti-ui-') as directory:
     script = Path(directory)/'ui.swift'
     script.write_text(shim + '\n'.join(method(name) for name in (
-        'stopSpraying', 'cancelInput', 'tick', 'updateUI', 'setPalette', 'perform')) + tests, encoding='utf-8')
+        'stopSpraying', 'cancelInput', 'tick', 'updateUI', 'setPalette', 'perform', 'showsRealHand')) + tests, encoding='utf-8')
     run_swift_sources([root/'HandARBrowser/HandGesture.swift', root/'HandARBrowser/GraffitiState.swift', script])
 
 project = (root/'HandARBrowser.xcodeproj/project.pbxproj').read_text(encoding='utf-8')

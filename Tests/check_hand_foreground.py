@@ -149,5 +149,6 @@ with tempfile.TemporaryDirectory(prefix='handar-foreground-') as directory:
 
 assert 'cameraPassthroughRequested || includeHands' in method('makeCameraTextures')
 hands = method('handleHands')
-assert hands.index('queueHandForegroundMask(left: showHands') < hands.index('handleGraffitiHands(left:')
-print('PASS: graffiti mask delivery precedes input routing; camera textures support foreground-only use')
+assert hands.index('handleGraffitiHands(left:') < hands.index('queueHandForegroundMask(left: graffiti.showsRealHand')
+assert 'right: graffiti.showsRealHand(.right) ? freshRight : nil' in hands
+print('PASS: current paint state filters each hand before mask delivery; camera textures support foreground-only use')

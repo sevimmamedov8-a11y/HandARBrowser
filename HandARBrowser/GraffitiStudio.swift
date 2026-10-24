@@ -85,9 +85,11 @@ final class GraffitiStudio {
     private let can = SCNNode(), mist = SCNNode(), aim = SCNNode()
     private let canMaterial = SCNMaterial()
     private let sculptureMaterial = SCNMaterial()
+    private var roomAccents: [(SCNMaterial, Bool)] = []
+    private var mood = GraffitiRoomMood.neon
+    private var rainbow = false
     private let status = CineText()
     private let paletteButton = CineButton(title: "Цвет", color: .darkGray, width: 0.24, height: 0.16)
-    private let sprayButton = CineButton(title: "Рисовать", color: .systemTeal, width: 0.34, height: 0.16)
     private var buttons: [(String, CineButton)] = []
     private var uiGate = ReleaseClickGate<String>()
     private var uiHand: TrackedHand?
@@ -113,7 +115,9 @@ final class GraffitiStudio {
         ("Голубой", .systemCyan), ("Фиолет", .systemPurple), ("Белый", .white), ("Чёрный", .black)]
     private(set) var isRunning = false
     private(set) var mode: GraffitiMode = .room
+    private(set) var paintingHand: TrackedHand?
     var handOwner: TrackedHand? { sprayGate.owner }
+    func showsRealHand(_ hand: TrackedHand) -> Bool { mode == .room && paintingHand != hand }
     var onExit: (() -> Void)?
     var onModeChanged: ((GraffitiMode) -> Void)?
     var onInteraction: (() -> Void)?
@@ -125,10 +129,8 @@ final class GraffitiStudio {
         root.addChildNode(room); root.addChildNode(home); root.addChildNode(ui)
         root.addChildNode(can); root.addChildNode(aim)
         ui.addChildNode(panel); ui.addChildNode(paletteButton.node); ui.addChildNode(status)
-        ui.addChildNode(sprayButton.node)
         paletteButton.node.position = SCNVector3(0.59, -0.30, -1.15)
-        sprayButton.node.position = SCNVector3(0.59, -0.06, -1.15)
-        status.position = SCNVector3(0, -0.68, -1.5)
+        status.position = SCNVector3(0, -0.86, -1.5)
         buildPalette(); buildCan()
         let target = SCNTorus(ringRadius: 0.018, pipeRadius: 0.002)
         target.firstMaterial = material(.white)
@@ -149,6 +151,7 @@ final class GraffitiStudio {
     }
 
     private func buildCan() {
+        can.scale = SCNVector3(0.62, 0.62, 0.62)
         let body = SCNCylinder(radius: 0.035, height: 0.15)
         canMaterial.lightingModel = .constant; body.firstMaterial = canMaterial
         can.addChildNode(SCNNode(geometry: body))
@@ -168,7 +171,7 @@ final class GraffitiStudio {
     }
 
     private func buildPalette() {
-        box(SCNVector3(1.12, 0.98, 0.035), at: SCNVector3(0, -0.02, -1.36),
+        box(SCNVector3(1.12, 1.20, 0.035), at: SCNVector3(0, -0.11, -1.36),
             color: UIColor(red: 0.06, green: 0.08, blue: 0.12, alpha: 0.97), parent: panel)
         func button(_ id: String, _ title: String, _ x: Float, _ y: Float, _ color: UIColor = .darkGray, width: Float = 0.25) {
             let b = CineButton(title: title, color: color, width: width, height: 0.14)
@@ -185,8 +188,10 @@ final class GraffitiStudio {
         }
         button("room", "Комната", -0.27, -0.20, width: 0.49)
         button("home", "Мои стены", 0.27, -0.20, width: 0.49)
-        button("undo", "Отменить", -0.27, -0.38, width: 0.49)
-        button("exit", "В меню", 0.27, -0.38, width: 0.49)
+        button("rainbow", "Радуга: выкл", -0.27, -0.38, width: 0.49)
+        button("mood", "Свет: Неон", 0.27, -0.38, width: 0.49)
+        button("undo", "Отменить", -0.27, -0.56, width: 0.49)
+        button("exit", "В меню", 0.27, -0.56, width: 0.49)
         panel.isHidden = true
     }
 
@@ -235,6 +240,14 @@ final class GraffitiStudio {
         for x: Float in [-2.75, -0.55] { for z: Float in [2.99, 3.51] {
             box(SCNVector3(0.07, 0.82, 0.07), at: SCNVector3(x, floor + 0.41, z), color: metal, parent: decor)
         } }
+        for index in 0..<5 {
+            box(SCNVector3(0.47, 0.025, 0.61), at: SCNVector3(-2.63 + Float(index) * 0.49, floor + 0.905, 3.25),
+                color: UIColor(red: 0.34, green: 0.25, blue: 0.18, alpha: 1), parent: decor)
+        }
+        for x: Float in [-2.24, -1.06] {
+            box(SCNVector3(1.08, 0.24, 0.07), at: SCNVector3(x, floor + 0.66, 2.96), color: charcoal, parent: decor)
+            box(SCNVector3(0.26, 0.035, 0.035), at: SCNVector3(x, floor + 0.68, 2.91), color: metal, parent: decor)
+        }
         func cylinder(_ radius: CGFloat, _ height: CGFloat, _ position: SCNVector3, _ color: UIColor, forward: Bool = false) {
             let shape = SCNCylinder(radius: radius, height: height)
             shape.radialSegmentCount = 16; shape.heightSegmentCount = 1
@@ -248,17 +261,61 @@ final class GraffitiStudio {
             let z: Float = index < 4 ? 3.12 : 3.40
             cylinder(0.055, 0.24, SCNVector3(x, floor + 1.015, z), color.1)
             cylinder(0.039, 0.035, SCNVector3(x, floor + 1.15, z), charcoal)
+            cylinder(0.056, 0.055, SCNVector3(x, floor + 1.015, z), UIColor(white: 0.87, alpha: 1))
+            cylinder(0.056, 0.012, SCNVector3(x, floor + 0.91, z), metal)
+            cylinder(0.056, 0.012, SCNVector3(x, floor + 1.13, z), metal)
+            cylinder(0.012, 0.018, SCNVector3(x, floor + 1.174, z), .white)
+            for stripe in 0..<3 {
+                box(SCNVector3(0.032, 0.005, 0.004), at: SCNVector3(x, floor + 1.028 - Float(stripe) * 0.011, z - 0.056),
+                    color: charcoal, parent: decor)
+            }
         }
         // A small decorative radio, with two visible speaker cones.
         box(SCNVector3(0.60, 0.30, 0.20), at: SCNVector3(-0.93, floor + 1.04, 3.20), color: charcoal, parent: decor)
         for x: Float in [-1.11, -0.75] {
             cylinder(0.092, 0.025, SCNVector3(x, floor + 1.04, 3.09), metal, forward: true)
             cylinder(0.058, 0.03, SCNVector3(x, floor + 1.04, 3.07), .black, forward: true)
+            for row in -2...2 {
+                box(SCNVector3(0.13, 0.006, 0.008), at: SCNVector3(x, floor + 1.04 + Float(row) * 0.027, 3.049), color: charcoal, parent: decor)
+            }
         }
         box(SCNVector3(0.09, 0.035, 0.01), at: SCNVector3(-0.93, floor + 1.12, 3.09), color: cyan, parent: decor)
+        for x: Float in [-0.98, -0.88] {
+            cylinder(0.021, 0.025, SCNVector3(x, floor + 0.96, 3.087), metal, forward: true)
+            box(SCNVector3(0.006, 0.020, 0.006), at: SCNVector3(x, floor + 0.965, 3.071), color: .white, parent: decor)
+        }
+        cylinder(0.006, 0.36, SCNVector3(-0.69, floor + 1.36, 3.23), metal)
+        for x: Float in [-1.06, -0.80] {
+            box(SCNVector3(0.025, 0.10, 0.035), at: SCNVector3(x, floor + 1.24, 3.20), color: metal, parent: decor)
+        }
+        box(SCNVector3(0.285, 0.025, 0.035), at: SCNVector3(-0.93, floor + 1.29, 3.20), color: metal, parent: decor)
         for (x, z): (Float, Float) in [(0.60, 3.35), (1.30, 3.50)] {
             box(SCNVector3(0.55, 0.48, 0.55), at: SCNVector3(x, floor + 0.24, z), color: metal, parent: decor)
             box(SCNVector3(0.57, 0.035, 0.57), at: SCNVector3(x, floor + 0.50, z), color: charcoal, parent: decor)
+            for offset: Float in [-0.21, 0.21] {
+                box(SCNVector3(0.035, 0.48, 0.025), at: SCNVector3(x + offset, floor + 0.24, z - 0.28), color: charcoal, parent: decor)
+            }
+            for row in 1...4 {
+                box(SCNVector3(0.48, 0.008, 0.008), at: SCNVector3(x, floor + Float(row) * 0.10, z - 0.279), color: charcoal, parent: decor)
+            }
+            box(SCNVector3(0.17, 0.045, 0.015), at: SCNVector3(x, floor + 0.40, z - 0.29), color: .black, parent: decor)
+        }
+        // Perforated tool board and brushes above the workbench.
+        box(SCNVector3(2.25, 0.66, 0.035), at: SCNVector3(-1.65, 0.57, 3.92), color: metal, parent: decor)
+        for column in 0..<9 { for row in 0..<4 {
+            cylinder(0.012, 0.008, SCNVector3(-2.65 + Float(column) * 0.25, 0.33 + Float(row) * 0.15, 3.898), charcoal, forward: true)
+        } }
+        for (index, x) in [Float(-2.35), -1.98, -1.61].enumerated() {
+            cylinder(0.016, 0.24, SCNVector3(x, 0.46, 3.855), colors[index].1)
+            box(SCNVector3(0.045, 0.065, 0.03), at: SCNVector3(x, 0.60, 3.855), color: metal, parent: decor)
+            box(SCNVector3(0.045, 0.08, 0.03), at: SCNVector3(x, 0.67, 3.855), color: UIColor(white: 0.76, alpha: 1), parent: decor)
+        }
+        // A skateboard resting in the rear corner, clear of the painting wall.
+        box(SCNVector3(0.23, 0.81, 0.045), at: SCNVector3(1.93, floor + 0.47, 3.62), color: violet, parent: decor)
+        box(SCNVector3(0.045, 0.65, 0.008), at: SCNVector3(1.93, floor + 0.47, 3.591), color: .white, parent: decor)
+        for y in [floor + 0.19, floor + 0.75] {
+            box(SCNVector3(0.31, 0.035, 0.035), at: SCNVector3(1.93, y, 3.58), color: metal, parent: decor)
+            for x: Float in [1.79, 2.07] { cylinder(0.047, 0.04, SCNVector3(x, y, 3.55), charcoal, forward: true) }
         }
         let sign = CineText()
         sign.constraints = []; sign.setText("HANDAR  /  SPRAY LAB", color: cyan); sign.fitWidth(2.6)
@@ -276,7 +333,19 @@ final class GraffitiStudio {
             if let shared = sharedMaterials[color] { node.geometry?.firstMaterial = shared }
             else { sharedMaterials[color] = surface }
         }
-        room.addChildNode(decor.flattenedClone())
+        let merged = decor.flattenedClone()
+        room.addChildNode(merged)
+        roomAccents.removeAll()
+        var pending = [merged], seen = Set<ObjectIdentifier>()
+        while let node = pending.popLast() {
+            pending.append(contentsOf: node.childNodes)
+            for surface in node.geometry?.materials ?? [] {
+                guard let color = surface.diffuse.contents as? UIColor,
+                      color == cyan || color == violet, seen.insert(ObjectIdentifier(surface)).inserted else { continue }
+                roomAccents.append((surface, color == cyan))
+            }
+        }
+        updateRoomMood()
 
         let cube = SCNBox(width: 0.32, height: 0.32, length: 0.32, chamferRadius: 0.035)
         sculptureMaterial.lightingModel = .constant
@@ -291,6 +360,7 @@ final class GraffitiStudio {
         stop()
         isRunning = true; aligned = false; mode = .room
         sprayGate = GraffitiSprayGate(); colorIndex = 0; sizeIndex = 1
+        rainbow = false; mood = .neon
         root.simdTransform = matrix_identity_float4x4
         scene.rootNode.addChildNode(root)
         room.isHidden = false; home.isHidden = true; ui.isHidden = false
@@ -316,7 +386,7 @@ final class GraffitiStudio {
         }
         buildRoomDecor()
         recenterControls(head: head)
-        setHint("Покажи ладонь · удержи «Рисовать»")
+        setHint("Открой ладонь — рисовать · «Цвет» — палитра")
     }
 
     func recenterControls(head: SCNNode) {
@@ -333,6 +403,7 @@ final class GraffitiStudio {
         for anchor in paintAnchors { onRemoveAnchor?(anchor) }
         paintAnchors.removeAll()
         canvasAnchors.removeAll(); homeCanvases.removeAll(); roomCanvases.removeAll(); undo.removeAll()
+        roomAccents.removeAll()
         for child in room.childNodes { child.removeFromParentNode() }
         for child in home.childNodes { child.removeFromParentNode() }
         root.removeFromParentNode(); isRunning = false; aligned = false
@@ -347,11 +418,10 @@ final class GraffitiStudio {
         status.setText(value); status.fitWidth(1.35)
     }
 
-    private func endStroke() { activeCanvas = nil; sampler.reset(); mist.isHidden = true }
+    private func endStroke() { activeCanvas = nil; sampler.reset(); mist.isHidden = true; paintingHand = nil }
 
     private func stopSpraying() {
         sprayGate.cancel(); endStroke(); can.isHidden = true; aim.isHidden = true
-        sprayButton.setTitle("Рисовать")
     }
 
     func cancelInput() {
@@ -362,7 +432,7 @@ final class GraffitiStudio {
     func tick(at time: Double, trackingReady: Bool) {
         guard isRunning else { return }
         if !trackingReady || time - lastHandAt > 0.2 {
-            if sprayGate.isEnabled { setHint("Рука потеряна · включи «Рисовать» заново") }
+            if paintingHand != nil { setHint("Покажи открытую ладонь, чтобы продолжить") }
             stopSpraying()
         }
         if !trackingReady { uiGate.cancel(); ring.isHidden = true; setHint("Ожидаю устойчивое отслеживание камеры…") }
@@ -372,17 +442,18 @@ final class GraffitiStudio {
         }
     }
 
-    /// UI always uses dwell; paint starts only after a deliberate toggle.
+    /// Controls consume the palm ray before it can paint through the panel.
     func updateUI(ray: WorldRay?, hand: TrackedHand? = nil, at time: Double) -> Bool {
         guard isRunning, aligned else { return false }
         if uiHand != hand { uiGate.cancel(); uiHand = hand }
-        let available = [("palette", paletteButton)] + (paletteOpen ? buttons : [("paint", sprayButton)])
+        let available = [("palette", paletteButton)] + (paletteOpen ? buttons : [])
         let target = ray.flatMap { ray in available.first { $0.1.hitTest(ray: ray) } }
         for (_, button) in available { button.setHighlight(button === target?.1) }
         let action = uiGate.update(target: target?.0, down: false, allowBegin: false, dwell: true, at: time)
         ring.show(on: target?.1.node, progress: uiGate.dwellProgress)
-        if let action, perform(action, at: time) { onInteraction?() }
+        if let action, perform(action) { onInteraction?() }
         uiBlocked = target != nil || paletteOpen
+        if uiBlocked { endStroke(); can.isHidden = true; aim.isHidden = true }
         return uiBlocked
     }
 
@@ -391,10 +462,9 @@ final class GraffitiStudio {
         guard isRunning, aligned else { return }
         let spraying = sprayGate.update(hand: hand, open: open, reliable: trackingReady && ray != nil,
                                         blocked: blocked || uiBlocked || paletteOpen, at: time)
-        sprayButton.setTitle(sprayGate.isEnabled ? "Стоп" : "Рисовать")
         guard let ray, trackingReady, hand != nil else {
             endStroke(); can.isHidden = true; aim.isHidden = true
-            if trackingReady, !paletteOpen { setHint("Покажи ладонь · удержи «Рисовать»") }
+            if trackingReady, !paletteOpen { setHint("Открой ладонь — рисовать · «Цвет» — палитра") }
             return
         }
         lastHandAt = time
@@ -404,8 +474,7 @@ final class GraffitiStudio {
         guard spraying else {
             endStroke(); aim.isHidden = true
             if !paletteOpen {
-                setHint(sprayGate.isEnabled ? (open ? "Уведи указатель с кнопок, чтобы рисовать" : "Раскрой ладонь — распыление на паузе")
-                                           : "Покажи ладонь · удержи «Рисовать»")
+                setHint(open ? "Уведи ладонь от кнопок к стене" : "Открой ладонь — рисовать · «Цвет» — палитра")
             }
             return
         }
@@ -427,9 +496,14 @@ final class GraffitiStudio {
             undo.append((hit.canvas.id, image)); if undo.count > 6 { undo.removeFirst() }
         }
         let points = sampler.points(to: hit.point, radius: radii[sizeIndex], at: time)
-        hit.canvas.spray(points: points, radius: radii[sizeIndex], color: colors[colorIndex].1, clip: hit.clip)
+        paintingHand = hand
+        let color = paintColor(at: time)
+        canMaterial.diffuse.contents = color
+        sculptureMaterial.diffuse.contents = color
+        mist.geometry?.firstMaterial?.diffuse.contents = color.withAlphaComponent(0.16)
+        hit.canvas.spray(points: points, radius: radii[sizeIndex], color: color, clip: hit.clip)
         mist.isHidden = false
-        setHint("\(colors[colorIndex].0) · «Стоп» — выключить распыление")
+        setHint("\(rainbow ? "Радуга" : colors[colorIndex].0) · убери или закрой ладонь — стоп")
     }
 
     private struct Hit { let canvas: GraffitiCanvas; let point: SIMD2<Double>; let clip: [SIMD2<Double>]? }
@@ -488,9 +562,8 @@ final class GraffitiStudio {
 
     private func setPalette(_ open: Bool) {
         paletteOpen = open; panel.isHidden = !open
-        sprayButton.node.isHidden = open
         paletteButton.setTitle(open ? "Готово" : "Цвет")
-        setHint(open ? "Рисунки этого сеанса удалятся при выходе в меню" : "Покажи ладонь · удержи «Рисовать»")
+        setHint(open ? "Рисунки этого сеанса удалятся при выходе в меню" : "Открой ладонь — рисовать · «Цвет» — палитра")
         stopSpraying()
         // Keep the dwell latch until the pointer leaves the toggle button.
     }
@@ -504,27 +577,42 @@ final class GraffitiStudio {
             if id.hasPrefix("size-"), let n = Int(id.dropFirst(5)) { button.setTitle((n == sizeIndex ? "✓ " : "") + ["Тонко", "Средне", "Широко"][n]) }
             if id == "room" { button.setTitle(mode == .room ? "✓ Комната" : "Комната") }
             if id == "home" { button.setTitle(mode == .home ? "✓ Мои стены" : "Мои стены") }
+            if id == "rainbow" { button.setTitle(rainbow ? "Радуга: вкл" : "Радуга: выкл") }
+            if id == "mood" { button.setTitle("Свет: \(mood.title)") }
         }
     }
 
-    private func perform(_ action: String, at time: Double) -> Bool {
-        if action == "palette" { setPalette(!paletteOpen); return true }
-        if action == "paint" {
-            guard !paletteOpen, sprayGate.toggle(at: time) else {
-                setHint("Покажи открытую ладонь и снова удержи «Рисовать»"); return false
-            }
-            endStroke(); can.isHidden = true; aim.isHidden = true
-            sprayButton.setTitle(sprayGate.isEnabled ? "Стоп" : "Рисовать")
-            return true
+    private func paintColor(at time: Double) -> UIColor {
+        guard rainbow, time.isFinite else { return colors[colorIndex].1 }
+        let hue = (time * 0.12).truncatingRemainder(dividingBy: 1)
+        return UIColor(hue: CGFloat(hue < 0 ? hue + 1 : hue), saturation: 0.85, brightness: 1, alpha: 1)
+    }
+
+    private func updateRoomMood() {
+        let pair: (UIColor, UIColor)
+        switch mood {
+        case .neon:
+            pair = (UIColor(red: 0.18, green: 0.79, blue: 0.90, alpha: 1), UIColor(red: 0.69, green: 0.38, blue: 0.91, alpha: 1))
+        case .sunset:
+            pair = (UIColor(red: 1, green: 0.58, blue: 0.22, alpha: 1), UIColor(red: 0.96, green: 0.26, blue: 0.44, alpha: 1))
+        case .mint:
+            pair = (UIColor(red: 0.24, green: 0.92, blue: 0.65, alpha: 1), UIColor(red: 0.24, green: 0.61, blue: 0.98, alpha: 1))
         }
+        for (surface, left) in roomAccents { surface.diffuse.contents = left ? pair.0 : pair.1 }
+    }
+
+    private func perform(_ action: String) -> Bool {
+        if action == "palette" { setPalette(!paletteOpen); return true }
         stopSpraying()
-        if action.hasPrefix("color-"), let n = Int(action.dropFirst(6)), colors.indices.contains(n) { colorIndex = n }
+        if action.hasPrefix("color-"), let n = Int(action.dropFirst(6)), colors.indices.contains(n) { colorIndex = n; rainbow = false }
+        if action == "rainbow" { rainbow.toggle() }
+        if action == "mood" { mood = mood.next; updateRoomMood() }
         if action.hasPrefix("size-"), let n = Int(action.dropFirst(5)), radii.indices.contains(n) { sizeIndex = n }
         if action == "room" || action == "home" {
             mode = action == "room" ? .room : .home
             room.isHidden = mode != .room; home.isHidden = mode != .home
             onModeChanged?(mode)
-            setHint(mode == .home ? "Осмотри стену камерой · закрой палитру" : "Закрой палитру и включи «Рисовать»")
+            setHint(mode == .home ? "Осмотри стену камерой · закрой палитру" : "Закрой палитру и покажи ладонь")
         }
         let visibleCanvases = mode == .room ? roomCanvases : homeCanvases
         if action == "undo", let index = undo.lastIndex(where: { entry in visibleCanvases.contains { $0.id == entry.0 } }) {

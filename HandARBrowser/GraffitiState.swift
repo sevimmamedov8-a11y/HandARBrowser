@@ -11,26 +11,22 @@ enum GraffitiRoomLayout {
     static let maximumPaintDistance: Float = 13
 }
 
-/// A deliberate UI toggle enables painting with a fresh, owned open palm.
-/// Loss, hand changes and menus disable it until another explicit toggle.
+enum GraffitiRoomMood: Int, CaseIterable {
+    case neon, sunset, mint
+    var title: String { ["Неон", "Закат", "Мята"][rawValue] }
+    var next: Self { Self(rawValue: (rawValue + 1) % Self.allCases.count)! }
+}
+
+/// A briefly stable open palm paints automatically. Every interruption starts
+/// a new stroke; neither another hand nor a missing frame can bridge it.
 struct GraffitiSprayGate {
     private(set) var owner: TrackedHand?
     private(set) var canVisible = false
-    private(set) var isEnabled = false
     private var last: Double?
-    private var open = false
+    private var openSince: Double?
 
     mutating func cancel() {
-        canVisible = false; isEnabled = false; open = false; last = nil
-    }
-
-    /// Enabling needs a currently visible open palm, including in head-aim mode.
-    @discardableResult mutating func toggle(at time: Double) -> Bool {
-        if isEnabled { cancel(); return true }
-        guard time.isFinite, let last, time >= last, time - last <= 0.2,
-              owner != nil, open else { return false }
-        isEnabled = true
-        return true
+        canVisible = false; openSince = nil; last = nil
     }
 
     mutating func update(hand: TrackedHand?, open: Bool,
@@ -38,9 +34,10 @@ struct GraffitiSprayGate {
         guard reliable, let hand, time.isFinite else { cancel(); return false }
         if let last, time < last || time - last > 0.2 { cancel() }
         if let owner, owner != hand { cancel() }
-        owner = hand; last = time; self.open = open
-        // Hovering a control pauses the stroke without undoing its enable action.
-        canVisible = isEnabled && open && !blocked
+        owner = hand; last = time
+        guard open, !blocked else { canVisible = false; openSince = nil; return false }
+        if openSince == nil { openSince = time }
+        canVisible = time - (openSince ?? time) + 0.000001 >= 0.08
         return canVisible
     }
 }

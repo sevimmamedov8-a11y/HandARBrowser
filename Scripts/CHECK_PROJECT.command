@@ -2,7 +2,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
-echo "== Hand AR Browser V96 project check =="
+echo "== Hand AR Browser V97 project check =="
 for f in "HandARBrowser.xcodeproj/project.pbxproj" "HandARBrowser/AppDelegate.swift" "HandARBrowser/MainViewController.swift" "HandARBrowser/HandGesture.swift" "HandARBrowser/CinemaHall.swift" "HandARBrowser/CinemaPlayback.swift" "HandARBrowser/Info.plist" "HandARBrowser/WebInput.js"; do
   [[ -f "$f" ]] && echo "[OK] $f" || { echo "[FAIL] missing $f"; exit 1; }
 done
@@ -14,6 +14,7 @@ grep -Fq "final class CinemaHall" "HandARBrowser/CinemaHall.swift"
 [[ -f "HandARBrowser/OfflinePanorama.swift" ]]
 [[ -f "HandARBrowser/GraffitiStudio.swift" ]]
 [[ -f "HandARBrowser/GraffitiState.swift" ]]
+[[ -f "HandARBrowser/GraffitiProps.swift" ]]
 [[ -f "HandARBrowser/VirtualHands.swift" ]]
 [[ -f "HandARBrowser/Panoramas/catalog.json" ]]
 [[ -f "HandARBrowser/Panoramas/burj-khalifa-night.jpg" ]]

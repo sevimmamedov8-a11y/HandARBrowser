@@ -49,7 +49,7 @@ private final class GraffitiCanvas {
         dirty = true
     }
 
-    func spray(points: [SIMD2<Double>], radius: Double, color: UIColor, clip: [SIMD2<Double>]?) {
+    func spray(points: [SIMD2<Double>], radius: Double, color: UIColor, clip: [SIMD2<Double>]?, flow: Double, hardEdge: Bool) {
         guard let context = bitmap(), !points.isEmpty else { return }
         let scale = Double(width) / size.x
         func pixel(_ p: SIMD2<Double>) -> CGPoint {
@@ -61,9 +61,9 @@ private final class GraffitiCanvas {
             for point in clip.dropFirst() { context.addLine(to: pixel(point)) }
             context.closePath(); context.clip()
         }
-        let colors = [color.withAlphaComponent(0.28).cgColor, color.withAlphaComponent(0.10).cgColor,
+        let colors = [color.withAlphaComponent(CGFloat(0.28*flow)).cgColor, color.withAlphaComponent(CGFloat((hardEdge ? 0.25 : 0.10)*flow)).cgColor,
                       color.withAlphaComponent(0).cgColor] as CFArray
-        if let gradient = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(), colors: colors, locations: [0, 0.55, 1]) {
+        if let gradient = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(), colors: colors, locations: [0, hardEdge ? 0.88 : 0.55, 1]) {
             for point in points {
                 let center = pixel(point)
                 context.drawRadialGradient(gradient, startCenter: center, startRadius: 0,
@@ -85,6 +85,10 @@ final class GraffitiStudio {
     private let can = SCNNode(), mist = SCNNode(), aim = SCNNode()
     private let canMaterial = SCNMaterial()
     private let sculptureMaterial = SCNMaterial()
+    private let props = GraffitiProps(), floorGrid = SCNNode()
+    private var roomSculpture: SCNNode?
+    private var preferences = GraffitiPreferences.load()
+    private var settingsPage = false
     private var roomAccents: [(SCNMaterial, Bool)] = []
     private var mood = GraffitiRoomMood.neon
     private var rainbow = false
@@ -132,6 +136,12 @@ final class GraffitiStudio {
         paletteButton.node.position = SCNVector3(0.59, -0.30, -1.15)
         status.position = SCNVector3(0, -0.86, -1.5)
         buildPalette(); buildCan()
+        props.onPickColor = { [weak self] color in
+            guard let self else { return }
+            self.colorIndex = color; self.rainbow = false; self.updateSelection()
+        }
+        props.onHint = { [weak self] text in self?.setHint(text) }
+        props.onInteraction = { [weak self] in self?.onInteraction?() }
         let target = SCNTorus(ringRadius: 0.018, pipeRadius: 0.002)
         target.firstMaterial = material(.white)
         aim.geometry = target; aim.eulerAngles.x = .pi / 2
@@ -171,12 +181,14 @@ final class GraffitiStudio {
     }
 
     private func buildPalette() {
-        box(SCNVector3(1.12, 1.20, 0.035), at: SCNVector3(0, -0.11, -1.36),
+        box(SCNVector3(1.12, 1.38, 0.035), at: SCNVector3(0, -0.04, -1.36),
             color: UIColor(red: 0.06, green: 0.08, blue: 0.12, alpha: 0.97), parent: panel)
         func button(_ id: String, _ title: String, _ x: Float, _ y: Float, _ color: UIColor = .darkGray, width: Float = 0.25) {
             let b = CineButton(title: title, color: color, width: width, height: 0.14)
             b.node.position = SCNVector3(x, y, -1.32); panel.addChildNode(b.node); buttons.append((id, b))
         }
+        button("tab-paint", "Краска", -0.27, 0.53, width: 0.49)
+        button("tab-settings", "Настройки", 0.27, 0.53, width: 0.49)
         for (index, entry) in colors.enumerated() {
             var red: CGFloat = 0, green: CGFloat = 0, blue: CGFloat = 0, alpha: CGFloat = 1
             entry.1.getRed(&red, green: &green, blue: &blue, alpha: &alpha)
@@ -192,26 +204,40 @@ final class GraffitiStudio {
         button("mood", "Свет: Неон", 0.27, -0.38, width: 0.49)
         button("undo", "Отменить", -0.27, -0.56, width: 0.49)
         button("exit", "В меню", 0.27, -0.56, width: 0.49)
+        for (index, entry) in [
+            ("setting-paint", "Краска: вкл"), ("setting-grab", "Захват: вкл"),
+            ("setting-flow", "Слой: обычный"), ("setting-edge", "Край: мягкий"),
+            ("setting-light", "Яркость: средняя"), ("setting-grid", "Сетка: вкл"),
+            ("setting-animation", "Куб: вращается"), ("setting-props", "Вернуть вещи"),
+            ("setting-reset", "Сброс настроек"), ("setting-close", "Закрыть")].enumerated() {
+            button(entry.0, entry.1, index % 2 == 0 ? -0.27 : 0.27, 0.32-Float(index/2)*0.19, width: 0.49)
+        }
         panel.isHidden = true
     }
 
     private func buildRoomDecor() {
-        // Static props are merged once. Paint canvases and the animated sculpture
-        // stay separate so changing a color never rebuilds the room.
+        // Architecture is merged once; pickable objects keep independent roots.
         let decor = SCNNode()
+        props.clear()
+        for child in floorGrid.childNodes { child.removeFromParentNode() }
+        let grid = SCNNode()
         let span = GraffitiRoomLayout.span, half = span * 0.5
         let floor = GraffitiRoomLayout.floorY, ceiling = GraffitiRoomLayout.ceilingY
+        let rear = half - 4
         let charcoal = UIColor(red: 0.10, green: 0.12, blue: 0.16, alpha: 1)
         let metal = UIColor(red: 0.26, green: 0.30, blue: 0.36, alpha: 1)
         let cyan = UIColor(red: 0.18, green: 0.79, blue: 0.90, alpha: 1)
         let violet = UIColor(red: 0.69, green: 0.38, blue: 0.91, alpha: 1)
         box(SCNVector3(span + 0.05, 0.05, span + 0.05), at: SCNVector3(0, floor, 0), color: charcoal, parent: decor)
         box(SCNVector3(span + 0.05, 0.05, span + 0.05), at: SCNVector3(0, ceiling, 0), color: UIColor(white: 0.09, alpha: 1), parent: decor)
-        for offset in -3...3 {
+        for offset in -5...5 {
             let line = UIColor(white: 0.19, alpha: 1)
-            box(SCNVector3(0.012, 0.004, span), at: SCNVector3(Float(offset), floor + 0.027, 0), color: line, parent: decor)
-            box(SCNVector3(span, 0.004, 0.012), at: SCNVector3(0, floor + 0.027, Float(offset)), color: line, parent: decor)
+            box(SCNVector3(0.012, 0.004, span), at: SCNVector3(Float(offset), floor + 0.027, 0), color: line, parent: grid)
+            box(SCNVector3(span, 0.004, 0.012), at: SCNVector3(0, floor + 0.027, Float(offset)), color: line, parent: grid)
         }
+        let gridMaterial = material(UIColor(white: 0.19, alpha: 1))
+        for node in grid.childNodes { node.geometry?.firstMaterial = gridMaterial }
+        floorGrid.addChildNode(grid.flattenedClone()); room.addChildNode(floorGrid)
         for side: Float in [-1, 1] {
             let edge = side * (half - 0.04)
             let accent = side < 0 ? cyan : violet
@@ -235,18 +261,18 @@ final class GraffitiStudio {
         marker.position.y = floor + 0.04; decor.addChildNode(marker)
 
         // Rear workbench leaves the front and side painting areas clear.
-        box(SCNVector3(2.5, 0.09, 0.65), at: SCNVector3(-1.65, floor + 0.85, 3.25), color: metal, parent: decor)
-        box(SCNVector3(2.3, 0.06, 0.55), at: SCNVector3(-1.65, floor + 0.27, 3.25), color: charcoal, parent: decor)
-        for x: Float in [-2.75, -0.55] { for z: Float in [2.99, 3.51] {
+        box(SCNVector3(2.5, 0.09, 0.65), at: SCNVector3(-1.65, floor + 0.85, (rear + 3.25)), color: metal, parent: decor)
+        box(SCNVector3(2.3, 0.06, 0.55), at: SCNVector3(-1.65, floor + 0.27, (rear + 3.25)), color: charcoal, parent: decor)
+        for x: Float in [-2.75, -0.55] { for z: Float in [(rear + 2.99), (rear + 3.51)] {
             box(SCNVector3(0.07, 0.82, 0.07), at: SCNVector3(x, floor + 0.41, z), color: metal, parent: decor)
         } }
         for index in 0..<5 {
-            box(SCNVector3(0.47, 0.025, 0.61), at: SCNVector3(-2.63 + Float(index) * 0.49, floor + 0.905, 3.25),
+            box(SCNVector3(0.47, 0.025, 0.61), at: SCNVector3(-2.63 + Float(index) * 0.49, floor + 0.905, (rear + 3.25)),
                 color: UIColor(red: 0.34, green: 0.25, blue: 0.18, alpha: 1), parent: decor)
         }
         for x: Float in [-2.24, -1.06] {
-            box(SCNVector3(1.08, 0.24, 0.07), at: SCNVector3(x, floor + 0.66, 2.96), color: charcoal, parent: decor)
-            box(SCNVector3(0.26, 0.035, 0.035), at: SCNVector3(x, floor + 0.68, 2.91), color: metal, parent: decor)
+            box(SCNVector3(1.08, 0.24, 0.07), at: SCNVector3(x, floor + 0.66, (rear + 2.96)), color: charcoal, parent: decor)
+            box(SCNVector3(0.26, 0.035, 0.035), at: SCNVector3(x, floor + 0.68, (rear + 2.91)), color: metal, parent: decor)
         }
         func cylinder(_ radius: CGFloat, _ height: CGFloat, _ position: SCNVector3, _ color: UIColor, forward: Bool = false) {
             let shape = SCNCylinder(radius: radius, height: height)
@@ -256,9 +282,13 @@ final class GraffitiStudio {
             if forward { node.eulerAngles.x = .pi / 2 }
             decor.addChildNode(node)
         }
+        func movable(_ start: Int, _ name: String, _ center: SCNVector3, _ halfSize: SIMD3<Float>, color: Int? = nil) {
+            props.add(parts: Array(decor.childNodes.dropFirst(start)), name: name, center: center, halfSize: halfSize, color: color, in: room)
+        }
         for (index, color) in colors.enumerated() {
+            let start = decor.childNodes.count
             let x = -2.65 + Float(index % 4) * 0.23
-            let z: Float = index < 4 ? 3.12 : 3.40
+            let z: Float = index < 4 ? (rear + 3.12) : (rear + 3.40)
             cylinder(0.055, 0.24, SCNVector3(x, floor + 1.015, z), color.1)
             cylinder(0.039, 0.035, SCNVector3(x, floor + 1.15, z), charcoal)
             cylinder(0.056, 0.055, SCNVector3(x, floor + 1.015, z), UIColor(white: 0.87, alpha: 1))
@@ -269,27 +299,31 @@ final class GraffitiStudio {
                 box(SCNVector3(0.032, 0.005, 0.004), at: SCNVector3(x, floor + 1.028 - Float(stripe) * 0.011, z - 0.056),
                     color: charcoal, parent: decor)
             }
+            movable(start, "Баллончик: \(color.0)", SCNVector3(x, floor + 1.045, z), SIMD3(0.058, 0.14, 0.06), color: index)
         }
-        // A small decorative radio, with two visible speaker cones.
-        box(SCNVector3(0.60, 0.30, 0.20), at: SCNVector3(-0.93, floor + 1.04, 3.20), color: charcoal, parent: decor)
+        // A radio with two speaker cones; it can be carried, but does not play audio.
+        let radioStart = decor.childNodes.count
+        box(SCNVector3(0.60, 0.30, 0.20), at: SCNVector3(-0.93, floor + 1.04, (rear + 3.20)), color: charcoal, parent: decor)
         for x: Float in [-1.11, -0.75] {
-            cylinder(0.092, 0.025, SCNVector3(x, floor + 1.04, 3.09), metal, forward: true)
-            cylinder(0.058, 0.03, SCNVector3(x, floor + 1.04, 3.07), .black, forward: true)
+            cylinder(0.092, 0.025, SCNVector3(x, floor + 1.04, (rear + 3.09)), metal, forward: true)
+            cylinder(0.058, 0.03, SCNVector3(x, floor + 1.04, (rear + 3.07)), .black, forward: true)
             for row in -2...2 {
-                box(SCNVector3(0.13, 0.006, 0.008), at: SCNVector3(x, floor + 1.04 + Float(row) * 0.027, 3.049), color: charcoal, parent: decor)
+                box(SCNVector3(0.13, 0.006, 0.008), at: SCNVector3(x, floor + 1.04 + Float(row) * 0.027, (rear + 3.049)), color: charcoal, parent: decor)
             }
         }
-        box(SCNVector3(0.09, 0.035, 0.01), at: SCNVector3(-0.93, floor + 1.12, 3.09), color: cyan, parent: decor)
+        box(SCNVector3(0.09, 0.035, 0.01), at: SCNVector3(-0.93, floor + 1.12, (rear + 3.09)), color: cyan, parent: decor)
         for x: Float in [-0.98, -0.88] {
-            cylinder(0.021, 0.025, SCNVector3(x, floor + 0.96, 3.087), metal, forward: true)
-            box(SCNVector3(0.006, 0.020, 0.006), at: SCNVector3(x, floor + 0.965, 3.071), color: .white, parent: decor)
+            cylinder(0.021, 0.025, SCNVector3(x, floor + 0.96, (rear + 3.087)), metal, forward: true)
+            box(SCNVector3(0.006, 0.020, 0.006), at: SCNVector3(x, floor + 0.965, (rear + 3.071)), color: .white, parent: decor)
         }
-        cylinder(0.006, 0.36, SCNVector3(-0.69, floor + 1.36, 3.23), metal)
+        cylinder(0.006, 0.36, SCNVector3(-0.69, floor + 1.36, (rear + 3.23)), metal)
         for x: Float in [-1.06, -0.80] {
-            box(SCNVector3(0.025, 0.10, 0.035), at: SCNVector3(x, floor + 1.24, 3.20), color: metal, parent: decor)
+            box(SCNVector3(0.025, 0.10, 0.035), at: SCNVector3(x, floor + 1.24, (rear + 3.20)), color: metal, parent: decor)
         }
-        box(SCNVector3(0.285, 0.025, 0.035), at: SCNVector3(-0.93, floor + 1.29, 3.20), color: metal, parent: decor)
-        for (x, z): (Float, Float) in [(0.60, 3.35), (1.30, 3.50)] {
+        box(SCNVector3(0.285, 0.025, 0.035), at: SCNVector3(-0.93, floor + 1.29, (rear + 3.20)), color: metal, parent: decor)
+        movable(radioStart, "Радио", SCNVector3(-0.93, floor + 1.21, rear + 3.20), SIMD3(0.31, 0.34, 0.15))
+        for (x, z): (Float, Float) in [(0.60, (rear + 3.35)), (1.30, (rear + 3.50))] {
+            let start = decor.childNodes.count
             box(SCNVector3(0.55, 0.48, 0.55), at: SCNVector3(x, floor + 0.24, z), color: metal, parent: decor)
             box(SCNVector3(0.57, 0.035, 0.57), at: SCNVector3(x, floor + 0.50, z), color: charcoal, parent: decor)
             for offset: Float in [-0.21, 0.21] {
@@ -299,34 +333,78 @@ final class GraffitiStudio {
                 box(SCNVector3(0.48, 0.008, 0.008), at: SCNVector3(x, floor + Float(row) * 0.10, z - 0.279), color: charcoal, parent: decor)
             }
             box(SCNVector3(0.17, 0.045, 0.015), at: SCNVector3(x, floor + 0.40, z - 0.29), color: .black, parent: decor)
+            movable(start, "Ящик", SCNVector3(x, floor + 0.26, z), SIMD3(0.285, 0.26, 0.30))
         }
         // Perforated tool board and brushes above the workbench.
-        box(SCNVector3(2.25, 0.66, 0.035), at: SCNVector3(-1.65, 0.57, 3.92), color: metal, parent: decor)
+        box(SCNVector3(2.25, 0.66, 0.035), at: SCNVector3(-1.65, 0.57, (rear + 3.92)), color: metal, parent: decor)
         for column in 0..<9 { for row in 0..<4 {
-            cylinder(0.012, 0.008, SCNVector3(-2.65 + Float(column) * 0.25, 0.33 + Float(row) * 0.15, 3.898), charcoal, forward: true)
+            cylinder(0.012, 0.008, SCNVector3(-2.65 + Float(column) * 0.25, 0.33 + Float(row) * 0.15, (rear + 3.898)), charcoal, forward: true)
         } }
         for (index, x) in [Float(-2.35), -1.98, -1.61].enumerated() {
-            cylinder(0.016, 0.24, SCNVector3(x, 0.46, 3.855), colors[index].1)
-            box(SCNVector3(0.045, 0.065, 0.03), at: SCNVector3(x, 0.60, 3.855), color: metal, parent: decor)
-            box(SCNVector3(0.045, 0.08, 0.03), at: SCNVector3(x, 0.67, 3.855), color: UIColor(white: 0.76, alpha: 1), parent: decor)
+            let start = decor.childNodes.count
+            cylinder(0.016, 0.24, SCNVector3(x, 0.46, (rear + 3.855)), colors[index].1)
+            box(SCNVector3(0.045, 0.065, 0.03), at: SCNVector3(x, 0.60, (rear + 3.855)), color: metal, parent: decor)
+            box(SCNVector3(0.045, 0.08, 0.03), at: SCNVector3(x, 0.67, (rear + 3.855)), color: UIColor(white: 0.76, alpha: 1), parent: decor)
+            movable(start, "Кисть", SCNVector3(x, 0.525, rear + 3.855), SIMD3(0.024, 0.19, 0.018))
         }
         // A skateboard resting in the rear corner, clear of the painting wall.
-        box(SCNVector3(0.23, 0.81, 0.045), at: SCNVector3(1.93, floor + 0.47, 3.62), color: violet, parent: decor)
-        box(SCNVector3(0.045, 0.65, 0.008), at: SCNVector3(1.93, floor + 0.47, 3.591), color: .white, parent: decor)
+        let skateStart = decor.childNodes.count
+        box(SCNVector3(0.23, 0.81, 0.045), at: SCNVector3(1.93, floor + 0.47, (rear + 3.62)), color: violet, parent: decor)
+        box(SCNVector3(0.045, 0.65, 0.008), at: SCNVector3(1.93, floor + 0.47, (rear + 3.591)), color: .white, parent: decor)
         for y in [floor + 0.19, floor + 0.75] {
-            box(SCNVector3(0.31, 0.035, 0.035), at: SCNVector3(1.93, y, 3.58), color: metal, parent: decor)
-            for x: Float in [1.79, 2.07] { cylinder(0.047, 0.04, SCNVector3(x, y, 3.55), charcoal, forward: true) }
+            box(SCNVector3(0.31, 0.035, 0.035), at: SCNVector3(1.93, y, (rear + 3.58)), color: metal, parent: decor)
+            for x: Float in [1.79, 2.07] { cylinder(0.047, 0.04, SCNVector3(x, y, (rear + 3.55)), charcoal, forward: true) }
         }
+        movable(skateStart, "Скейт", SCNVector3(1.93, floor + 0.47, rear + 3.59), SIMD3(0.18, 0.41, 0.07))
         let sign = CineText()
         sign.constraints = []; sign.setText("HANDAR  /  SPRAY LAB", color: cyan); sign.fitWidth(2.6)
         sign.position = SCNVector3(-1.65, 1.28, half - 0.05); sign.eulerAngles.y = .pi
         room.addChildNode(sign)
-        box(SCNVector3(0.8, 0.55, 0.8), at: SCNVector3(2.8, floor + 0.275, 2.95), color: charcoal, parent: decor)
+        box(SCNVector3(0.8, 0.55, 0.8), at: SCNVector3(2.8, floor + 0.275, (rear + 2.95)), color: charcoal, parent: decor)
         let halo = SCNTorus(ringRadius: 0.42, pipeRadius: 0.013)
         halo.ringSegmentCount = 48; halo.pipeSegmentCount = 6; halo.firstMaterial = material(violet)
         let haloNode = SCNNode(geometry: halo)
-        haloNode.position = SCNVector3(2.8, floor + 1.15, 2.95); haloNode.eulerAngles.x = .pi / 2
+        haloNode.position = SCNVector3(2.8, floor + 1.15, (rear + 2.95)); haloNode.eulerAngles.x = .pi / 2
         decor.addChildNode(haloNode)
+        // High roof beams and wall bays frame the studio without covering the
+        // central front canvas. All of this remains static, shared geometry.
+        for z: Float in [-3, 0, 3] {
+            box(SCNVector3(span-0.3, 0.12, 0.15), at: SCNVector3(0, ceiling-0.24, z), color: metal, parent: decor)
+            box(SCNVector3(3.8, 0.015, 0.06), at: SCNVector3(0, ceiling-0.31, z), color: cyan, parent: decor)
+        }
+        for side: Float in [-1, 1] {
+            for z: Float in [-2.6, 0, 2.6] {
+                box(SCNVector3(0.075, 2.7, 1.3), at: SCNVector3(side*(half-0.12), 0.65, z), color: charcoal, parent: decor)
+                for rib in 0..<6 {
+                    box(SCNVector3(0.025, 2.55, 0.025), at: SCNVector3(side*(half-0.17), 0.65, z-0.5+Float(rib)*0.2),
+                        color: metal, parent: decor)
+                }
+                box(SCNVector3(0.035, 0.035, 1.3), at: SCNVector3(side*(half-0.17), 2.04, z),
+                    color: side < 0 ? cyan : violet, parent: decor)
+            }
+        }
+        // A raised lounge with upholstered cushions beside the rear wall.
+        let fabric = UIColor(red: 0.19, green: 0.30, blue: 0.34, alpha: 1)
+        box(SCNVector3(1.5, 0.18, 2.5), at: SCNVector3(4.7, floor+0.09, 3.45), color: metal, parent: decor)
+        box(SCNVector3(0.18, 1.1, 2.15), at: SCNVector3(5.18, floor+0.73, 3.45), color: charcoal, parent: decor)
+        for z: Float in [2.75, 3.45, 4.15] {
+            box(SCNVector3(0.94, 0.24, 0.65), at: SCNVector3(4.68, floor+0.46, z), color: fabric, parent: decor)
+            box(SCNVector3(0.20, 0.59, 0.65), at: SCNVector3(5.05, floor+0.85, z), color: fabric, parent: decor)
+        }
+        // Planters: separate stems and angled leaf blades, with no animation.
+        for x: Float in [-4.8, 4.8] {
+            cylinder(0.24, 0.43, SCNVector3(x, floor+0.245, 5.15), metal)
+            cylinder(0.215, 0.025, SCNVector3(x, floor+0.465, 5.15), UIColor(white: 0.12, alpha: 1))
+            for leaf in 0..<7 {
+                let angle = Float(leaf)*0.90
+                let dx = cos(angle)*0.19, dz = sin(angle)*0.19
+                box(SCNVector3(0.018, 0.72, 0.018), at: SCNVector3(x+dx*0.4, floor+0.80, 5.15+dz*0.4),
+                    color: UIColor(red: 0.25, green: 0.36, blue: 0.22, alpha: 1), parent: decor)
+                box(SCNVector3(0.14, 0.40, 0.035), at: SCNVector3(x+dx, floor+1.12+Float(leaf%3)*0.09, 5.15+dz),
+                    color: UIColor(red: 0.23, green: 0.46, blue: 0.34, alpha: 1), parent: decor)
+                decor.childNodes.last?.eulerAngles = SCNVector3(0.30, angle, 0.35)
+            }
+        }
         var sharedMaterials: [UIColor: SCNMaterial] = [:]
         for node in decor.childNodes {
             guard let surface = node.geometry?.firstMaterial, let color = surface.diffuse.contents as? UIColor else { continue }
@@ -354,6 +432,8 @@ final class GraffitiStudio {
         sculpture.position = haloNode.position
         sculpture.runAction(.repeatForever(.rotateBy(x: 0.5, y: .pi * 2, z: 0.3, duration: 14)))
         room.addChildNode(sculpture)
+        roomSculpture = sculpture
+        applyRoomSettings()
     }
 
     func start(in scene: SCNScene, head: SCNNode) {
@@ -361,6 +441,7 @@ final class GraffitiStudio {
         isRunning = true; aligned = false; mode = .room
         sprayGate = GraffitiSprayGate(); colorIndex = 0; sizeIndex = 1
         rainbow = false; mood = .neon
+        preferences = GraffitiPreferences.load(); settingsPage = false
         root.simdTransform = matrix_identity_float4x4
         scene.rootNode.addChildNode(root)
         room.isHidden = false; home.isHidden = true; ui.isHidden = false
@@ -378,7 +459,7 @@ final class GraffitiStudio {
         let half = GraffitiRoomLayout.span * 0.5
         for index in 0..<4 {
             let size = SIMD2(Double(GraffitiRoomLayout.span), Double(GraffitiRoomLayout.wallHeight))
-            let canvas = GraffitiCanvas(size: size, base: UIColor(white: 0.80 - CGFloat(index) * 0.025, alpha: 1), textureWidth: 1536)
+            let canvas = GraffitiCanvas(size: size, base: UIColor(white: 0.80 - CGFloat(index) * 0.025, alpha: 1), textureWidth: 2048)
             let angle = Float(index) * .pi / 2
             canvas.node.position = SCNVector3(-sin(angle) * half, GraffitiRoomLayout.wallCenterY, -cos(angle) * half)
             canvas.node.eulerAngles.y = angle
@@ -404,6 +485,7 @@ final class GraffitiStudio {
         paintAnchors.removeAll()
         canvasAnchors.removeAll(); homeCanvases.removeAll(); roomCanvases.removeAll(); undo.removeAll()
         roomAccents.removeAll()
+        props.clear(); roomSculpture = nil
         for child in room.childNodes { child.removeFromParentNode() }
         for child in home.childNodes { child.removeFromParentNode() }
         root.removeFromParentNode(); isRunning = false; aligned = false
@@ -425,12 +507,14 @@ final class GraffitiStudio {
     }
 
     func cancelInput() {
+        props.cancel()
         stopSpraying(); uiGate.cancel(); ring.isHidden = true
         uiHand = nil; uiBlocked = false
     }
 
     func tick(at time: Double, trackingReady: Bool) {
         guard isRunning else { return }
+        props.tick(at: time, ready: trackingReady && mode == .room && preferences.grabbing)
         if !trackingReady || time - lastHandAt > 0.2 {
             if paintingHand != nil { setHint("Покажи открытую ладонь, чтобы продолжить") }
             stopSpraying()
@@ -446,7 +530,7 @@ final class GraffitiStudio {
     func updateUI(ray: WorldRay?, hand: TrackedHand? = nil, at time: Double) -> Bool {
         guard isRunning, aligned else { return false }
         if uiHand != hand { uiGate.cancel(); uiHand = hand }
-        let available = [("palette", paletteButton)] + (paletteOpen ? buttons : [])
+        let available = [("palette", paletteButton)] + (paletteOpen ? buttons.filter { !$0.1.node.isHidden } : [])
         let target = ray.flatMap { ray in available.first { $0.1.hitTest(ray: ray) } }
         for (_, button) in available { button.setHighlight(button === target?.1) }
         let action = uiGate.update(target: target?.0, down: false, allowBegin: false, dwell: true, at: time)
@@ -457,9 +541,25 @@ final class GraffitiStudio {
         return uiBlocked
     }
 
+    func updateProp(hand: TrackedHand, generation: UInt64?, fist: Bool, open: Bool, ray: WorldRay?,
+                    distance: Float, orientation: simd_quatf, blocked: Bool, trackingReady: Bool, at time: Double) {
+        guard isRunning, aligned else { return }
+        props.update(hand: hand, generation: generation, fist: fist, open: open, ray: ray, distance: distance,
+            orientation: orientation, blocked: blocked || uiBlocked || paletteOpen || !preferences.grabbing || mode != .room,
+            ready: trackingReady, at: time)
+    }
+
     func updateHand(hand: TrackedHand?, open: Bool, ray: WorldRay?, distance: Float, toolOffset: SIMD3<Float>,
                     blocked: Bool, trackingReady: Bool, at time: Double) {
         guard isRunning, aligned else { return }
+        if mode == .room && preferences.grabbing && props.blocksPainting(hand) {
+            stopSpraying(); return
+        }
+        if !preferences.paintEnabled {
+            stopSpraying()
+            if !paletteOpen { setHint("Краска выключена · «Цвет» → «Настройки»") }
+            return
+        }
         let spraying = sprayGate.update(hand: hand, open: open, reliable: trackingReady && ray != nil,
                                         blocked: blocked || uiBlocked || paletteOpen, at: time)
         guard let ray, trackingReady, hand != nil else {
@@ -502,7 +602,8 @@ final class GraffitiStudio {
         canMaterial.diffuse.contents = color
         sculptureMaterial.diffuse.contents = color
         mist.geometry?.firstMaterial?.diffuse.contents = color.withAlphaComponent(0.16)
-        hit.canvas.spray(points: points, radius: radii[sizeIndex], color: color, clip: hit.clip)
+        hit.canvas.spray(points: points, radius: radii[sizeIndex], color: color, clip: hit.clip,
+                         flow: preferences.flow, hardEdge: preferences.hardEdge)
         mist.isHidden = false
         setHint("\(rainbow ? "Радуга" : colors[colorIndex].0) · убери или закрой ладонь — стоп")
     }
@@ -563,6 +664,7 @@ final class GraffitiStudio {
 
     private func setPalette(_ open: Bool) {
         paletteOpen = open; panel.isHidden = !open
+        if open { props.cancel() }
         paletteButton.setTitle(open ? "Готово" : "Цвет")
         setHint(open ? "Рисунки этого сеанса удалятся при выходе в меню" : "Открой ладонь — рисовать · «Цвет» — палитра")
         stopSpraying()
@@ -574,12 +676,35 @@ final class GraffitiStudio {
         sculptureMaterial.diffuse.contents = colors[colorIndex].1
         mist.geometry?.firstMaterial?.diffuse.contents = colors[colorIndex].1.withAlphaComponent(0.16)
         for (id, button) in buttons {
+            let tab = id.hasPrefix("tab-")
+            button.node.isHidden = !tab && (id.hasPrefix("setting-") != settingsPage)
+            if id == "tab-paint" { button.setTitle(settingsPage ? "Краска" : "✓ Краска") }
+            if id == "tab-settings" { button.setTitle(settingsPage ? "✓ Настройки" : "Настройки") }
             if id.hasPrefix("color-"), let n = Int(id.dropFirst(6)) { button.setTitle((n == colorIndex ? "✓ " : "") + colors[n].0) }
             if id.hasPrefix("size-"), let n = Int(id.dropFirst(5)) { button.setTitle((n == sizeIndex ? "✓ " : "") + ["Тонко", "Средне", "Широко"][n]) }
             if id == "room" { button.setTitle(mode == .room ? "✓ Комната" : "Комната") }
             if id == "home" { button.setTitle(mode == .home ? "✓ Мои стены" : "Мои стены") }
             if id == "rainbow" { button.setTitle(rainbow ? "Радуга: вкл" : "Радуга: выкл") }
             if id == "mood" { button.setTitle("Свет: \(mood.title)") }
+            if id == "setting-paint" { button.setTitle(preferences.paintEnabled ? "Краска: вкл" : "Краска: выкл") }
+            if id == "setting-grab" { button.setTitle(preferences.grabbing ? "Захват: вкл" : "Захват: выкл") }
+            if id == "setting-flow" { button.setTitle("Слой: \(["лёгкий", "обычный", "плотный"][preferences.density])") }
+            if id == "setting-edge" { button.setTitle(preferences.hardEdge ? "Край: чёткий" : "Край: мягкий") }
+            if id == "setting-light" { button.setTitle("Яркость: \(["низкая", "средняя", "высокая"][preferences.brightness])") }
+            if id == "setting-grid" { button.setTitle(preferences.grid ? "Сетка: вкл" : "Сетка: выкл") }
+            if id == "setting-animation" { button.setTitle(preferences.animation ? "Куб: вращается" : "Куб: стоит") }
+        }
+    }
+
+    private func applyRoomSettings() {
+        floorGrid.isHidden = !preferences.grid
+        roomSculpture?.isPaused = !preferences.animation
+        var pending = [room]
+        while let node = pending.popLast() {
+            pending.append(contentsOf: node.childNodes)
+            for surface in node.geometry?.materials ?? [] {
+                surface.multiply.contents = UIColor(white: preferences.light, alpha: 1)
+            }
         }
     }
 
@@ -605,11 +730,24 @@ final class GraffitiStudio {
     private func perform(_ action: String) -> Bool {
         if action == "palette" { setPalette(!paletteOpen); return true }
         stopSpraying()
+        if action == "tab-paint" || action == "tab-settings" { settingsPage = action == "tab-settings" }
+        if action == "setting-paint" { preferences.paintEnabled.toggle() }
+        if action == "setting-grab" { preferences.grabbing.toggle(); props.cancel() }
+        if action == "setting-flow" { preferences.density = (preferences.density+1)%3 }
+        if action == "setting-edge" { preferences.hardEdge.toggle() }
+        if action == "setting-light" { preferences.brightness = (preferences.brightness+1)%3 }
+        if action == "setting-grid" { preferences.grid.toggle() }
+        if action == "setting-animation" { preferences.animation.toggle() }
+        if action == "setting-props" { props.reset() }
+        if action == "setting-reset" { preferences = GraffitiPreferences() }
+        if action == "setting-close" { setPalette(false) }
+        if action.hasPrefix("setting-") { preferences.save(); applyRoomSettings() }
         if action.hasPrefix("color-"), let n = Int(action.dropFirst(6)), colors.indices.contains(n) { colorIndex = n; rainbow = false }
         if action == "rainbow" { rainbow.toggle() }
         if action == "mood" { mood = mood.next; updateRoomMood() }
         if action.hasPrefix("size-"), let n = Int(action.dropFirst(5)), radii.indices.contains(n) { sizeIndex = n }
         if action == "room" || action == "home" {
+            props.cancel()
             mode = action == "room" ? .room : .home
             room.isHidden = mode != .room; home.isHidden = mode != .home
             onModeChanged?(mode)

@@ -21,7 +21,17 @@ def method(name):
 shim = r'''
 import Foundation
 struct WorldRay { let target: String }
-final class Node { var isHidden = false }
+struct Color { func withAlphaComponent(_ value: Double) -> Color { self } }
+final class MaterialProperty { var contents: Any? }
+final class Material { let diffuse = MaterialProperty() }
+final class Geometry { var firstMaterial: Material? = Material() }
+final class Node { var isHidden = false; var geometry: Geometry? = Geometry() }
+final class Props {
+ var resets = 0, cancels = 0
+ func cancel() { cancels += 1 }
+ func reset() { resets += 1 }
+ func tick(at time: Double, ready: Bool) {}
+}
 final class Button {
     let id: String, node = Node()
     var title = "", highlighted = false
@@ -42,18 +52,22 @@ final class Canvas {
 }
 final class Harness {
     var isRunning = true, aligned = true, paletteOpen = false, uiBlocked = false
+    var preferences = GraffitiPreferences(), settingsPage = false, roomSettingsApplied = 0
+    let props = Props(), canMaterial = Material(), sculptureMaterial = Material(), mist = Node()
     var uiHand: TrackedHand?, uiGate = ReleaseClickGate<String>()
     var sprayGate = GraffitiSprayGate()
     let can = Node(), aim = Node(), room = Node(), home = Node(), panel = Node(), ring = Ring()
     let paletteButton = Button("palette")
     var buttons = [("color-1", Button("color-1")), ("room", Button("room")), ("home", Button("home")), ("rainbow", Button("rainbow")), ("mood", Button("mood"))]
+    let settingButtons = ["tab-paint", "tab-settings", "setting-paint", "setting-grab", "setting-flow", "setting-edge", "setting-light", "setting-grid", "setting-animation", "setting-props", "setting-reset", "setting-close"]
+    init() { for id in settingButtons { buttons.append((id,Button(id))) }; updateSelection() }
     var paintingHand: TrackedHand?, rainbow = false, mood = GraffitiRoomMood.neon, moodChanges = 0
     var roomCanvases: [Canvas] = [], homeCanvases: [Canvas] = [], undo: [(UUID, Int)] = []
-    var mode = GraffitiMode.room, colors = Array(0..<8), radii = [0.01, 0.02, 0.03], colorIndex = 0, sizeIndex = 0
+    var mode = GraffitiMode.room, colors = (0..<8).map { (String($0),Color()) }, radii = [0.01, 0.02, 0.03], colorIndex = 0, sizeIndex = 0
     var lastHandAt = -Double.infinity, lastUpload = -Double.infinity, hint = "", strokesEnded = 0
     var onInteraction: (() -> Void)?, onModeChanged: ((GraffitiMode) -> Void)?, onExit: (() -> Void)?
     func endStroke() { strokesEnded += 1; paintingHand = nil }
-    func updateSelection() {}
+    func applyRoomSettings() { roomSettingsApplied += 1 }
     func updateRoomMood() { moodChanges += 1 }
     func setHint(_ text: String) { hint = text }
 '''
@@ -113,6 +127,22 @@ tests = r'''
     h.tick(at: time, trackingReady: false)
     check(h.paintingHand == nil && h.can.isHidden && h.aim.isHidden, "camera loss clears tool and drawing state")
     h.mode = .home;check(h.showsVirtualHand(.left) && h.showsVirtualHand(.right), "home also shows virtual gloves when not painting")
+    h.setPalette(true)
+    check(h.buttons.first { $0.0 == "setting-flow" }!.1.node.isHidden, "settings page hidden while paint tab active")
+    _ = h.perform("tab-settings")
+    check(h.settingsPage && !h.buttons.first { $0.0 == "setting-flow" }!.1.node.isHidden, "settings tab exposes actual settings buttons")
+    check(h.buttons.first { $0.0 == "color-1" }!.1.node.isHidden, "hidden paint controls cannot receive a dwell")
+    _ = h.perform("setting-paint");check(!h.preferences.paintEnabled, "can disable paint to handle objects")
+    _ = h.perform("setting-grab");check(!h.preferences.grabbing && h.props.cancels > 0, "disabling grabs cancels carry")
+    _ = h.perform("setting-flow");check(h.preferences.density == 2, "density setting changes paint flow")
+    _ = h.perform("setting-edge");check(h.preferences.hardEdge, "edge setting reaches paint preferences")
+    _ = h.perform("setting-grid");check(!h.preferences.grid, "grid can be hidden")
+    _ = h.perform("setting-animation");check(!h.preferences.animation, "sculpture can be paused")
+    _ = h.perform("setting-light");check(h.preferences.brightness == 2, "brightness cycles")
+    _ = h.perform("setting-props");check(h.props.resets == 1, "reset restores props once")
+    _ = h.perform("setting-reset");check(h.preferences == GraffitiPreferences(), "settings reset restores defaults")
+    check(h.roomSettingsApplied >= 9, "settings applied to room immediately")
+    _ = h.perform("setting-close");check(!h.paletteOpen, "settings can close without leaving app")
     print("PASS: \(count) production graffiti automatic palm, hand visibility, palette, style and watchdog checks")
  }
 }
@@ -120,7 +150,7 @@ tests = r'''
 with tempfile.TemporaryDirectory(prefix='handar-graffiti-ui-') as directory:
     script = Path(directory)/'ui.swift'
     script.write_text(shim + '\n'.join(method(name) for name in (
-        'stopSpraying', 'cancelInput', 'tick', 'updateUI', 'setPalette', 'perform', 'showsVirtualHand')) + tests, encoding='utf-8')
+        'stopSpraying', 'cancelInput', 'tick', 'updateUI', 'setPalette', 'perform', 'showsVirtualHand', 'updateSelection')) + tests, encoding='utf-8')
     run_swift_sources([root/'HandARBrowser/HandGesture.swift', root/'HandARBrowser/GraffitiState.swift', script])
 
 project = (root/'HandARBrowser.xcodeproj/project.pbxproj').read_text(encoding='utf-8')

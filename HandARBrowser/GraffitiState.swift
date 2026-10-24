@@ -3,12 +3,120 @@ import Foundation
 enum GraffitiMode { case room, home }
 
 enum GraffitiRoomLayout {
-    static let span: Float = 8
+    static let span: Float = 12
     static let floorY: Float = -1.52
-    static let ceilingY: Float = 2.68
+    static let ceilingY: Float = 3.68
     static var wallHeight: Float { ceilingY - floorY }
     static var wallCenterY: Float { (ceilingY + floorY) * 0.5 }
-    static let maximumPaintDistance: Float = 13
+    static let maximumPaintDistance: Float = 19
+    static var benchZ: Float { span * 0.5 - 0.75 }
+}
+
+struct GraffitiPreferences: Codable, Equatable {
+    var paintEnabled = true
+    var grabbing = true
+    var density = 1
+    var hardEdge = false
+    var brightness = 1
+    var grid = true
+    var animation = true
+    var flow: Double { [0.55, 1, 1.6][max(0, min(2, density))] }
+    var light: CGFloat { [0.55, 0.80, 1][max(0, min(2, brightness))] }
+    static func load() -> Self {
+        guard let data = UserDefaults.standard.data(forKey: "graffiti.preferences.v97"),
+              let value = try? JSONDecoder().decode(Self.self, from: data),
+              (0...2).contains(value.density), (0...2).contains(value.brightness) else { return Self() }
+        return value
+    }
+    func save() { if let data = try? JSONEncoder().encode(self) { UserDefaults.standard.set(data, forKey: "graffiti.preferences.v97") } }
+}
+
+/// Each hand owns its own latch. Loss cannot become a release/regrab gesture.
+struct GraffitiGrabGate {
+    enum Event: Equatable { case none, began(Int), released(Int), cancelled(Int) }
+    private(set) var held: Int?
+    private(set) var suppressPainting = false
+    private var armed = false
+    private var candidate: Int?
+    private var since: Double?
+    private var openSince: Double?
+    private var uncertainSince: Double?
+    private var paintResetSince: Double?
+    private var last: Double?
+
+    mutating func cancel() -> Event {
+        let old = held
+        if held != nil { suppressPainting = true }
+        held = nil; candidate = nil; since = nil; openSince = nil
+        uncertainSince = nil; paintResetSince = nil; last = nil; armed = false
+        return old.map(Event.cancelled) ?? .none
+    }
+
+    mutating func update(target: Int?, fist: Bool, open: Bool, reliable: Bool, blocked: Bool, at time: Double) -> Event {
+        guard reliable, !blocked, time.isFinite else { return cancel() }
+        if let last, time < last || time-last > 0.2 { return cancel() }
+        last = time
+        if let held {
+            if open && !fist {
+                uncertainSince = nil
+                if openSince == nil { openSince = time }
+                if time-(openSince ?? time) >= 0.08-0.000001 {
+                    self.held = nil; candidate = nil; since = nil; armed = true
+                    return .released(held)
+                }
+            } else {
+                openSince = nil
+                if fist { uncertainSince = nil }
+                else {
+                    if uncertainSince == nil { uncertainSince = time }
+                    if time-(uncertainSince ?? time) > 0.18 { return cancel() }
+                }
+            }
+            return .none
+        }
+        if suppressPainting {
+            if target == nil && !open {
+                if paintResetSince == nil { paintResetSince = time }
+                if time-(paintResetSince ?? time) >= 0.10-0.000001 { suppressPainting = false }
+            } else { paintResetSince = nil }
+        }
+        if !fist {
+            candidate = nil; since = nil
+            if open {
+                if openSince == nil { openSince = time }
+                if time-(openSince ?? time) >= 0.08-0.000001 { armed = true }
+            } else {
+                openSince = nil
+            }
+            return .none
+        }
+        openSince = nil
+        guard armed, let target else { candidate = nil; since = nil; return .none }
+        if candidate != target { candidate = target; since = time }
+        guard time-(since ?? time) >= 0.10-0.000001 else { return .none }
+        held = target; armed = false; suppressPainting = true
+        return .began(target)
+    }
+}
+
+enum GraffitiPropGeometry {
+    static func rayDistance(origin: SIMD3<Float>, direction: SIMD3<Float>, center: SIMD3<Float>, radius: Float) -> Float? {
+        let delta = center-origin
+        let t = delta.x*direction.x + delta.y*direction.y + delta.z*direction.z
+        guard t.isFinite, t > 0.12, t < GraffitiRoomLayout.maximumPaintDistance else { return nil }
+        let offset = delta-direction*t
+        let allowance = radius + min(0.18, t*0.035)
+        return offset.x*offset.x+offset.y*offset.y+offset.z*offset.z <= allowance*allowance ? t : nil
+    }
+    static func restingPosition(_ position: SIMD3<Float>, halfSize: SIMD3<Float>) -> SIMD3<Float> {
+        let half = GraffitiRoomLayout.span*0.5
+        let x = min(half-halfSize.x-0.08, max(-half+halfSize.x+0.08, position.x))
+        let z = min(half-halfSize.z-0.08, max(-half+halfSize.z+0.08, position.z))
+        let onBench = x-halfSize.x >= -2.90 && x+halfSize.x <= -0.40 &&
+            abs(z-GraffitiRoomLayout.benchZ)+halfSize.z <= 0.325 && position.y >= GraffitiRoomLayout.floorY+0.9
+        let support = GraffitiRoomLayout.floorY + (onBench ? 0.93 : 0.028)
+        return SIMD3(x, support+halfSize.y, z)
+    }
 }
 
 enum GraffitiRoomMood: Int, CaseIterable {

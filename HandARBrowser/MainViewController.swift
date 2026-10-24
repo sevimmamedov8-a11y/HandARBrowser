@@ -2386,6 +2386,20 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         }
         let ray = ready ? palm.flatMap { tracking.worldRay(visionPoint: $0) } : nil
         let blocked = usesHeadAim ? false : graffiti.updateUI(ray: ray, hand: sample?.hand, at: time)
+        // Feed both hands before painting: selecting/holding a prop consumes
+        // that hand, and an opening used to drop it must not spray the wall.
+        for hand in [TrackedHand.left, .right] {
+            let candidate = hand == .left ? left : right
+            let tracked = candidate.flatMap { VirtualHandPose.fresh($0.timestamp, at: time) ? $0 : nil }
+            let center = tracked.flatMap { tracked -> CGPoint? in
+                guard let w = tracked.maskJoints[.wrist], let m = tracked.maskJoints[.middleMCP] else { return nil }
+                return CGPoint(x: (w.x+m.x)*0.5, y: (w.y+m.y)*0.5)
+            }
+            let propRay = ready ? center.flatMap { tracking.worldRay(visionPoint: $0) } : nil
+            graffiti.updateProp(hand: hand, generation: tracked?.generation, fist: tracked?.isFist == true,
+                open: tracked?.openPalmCenter != nil, ray: propRay, distance: graffitiHandDistance(tracked),
+                orientation: headNode.simdWorldOrientation, blocked: blocked, trackingReady: ready, at: time)
+        }
         let distance = graffitiHandDistance(sample)
         let head = headNode.simdWorldTransform
         let rightAxis = SIMD3(head.columns.0.x, head.columns.0.y, head.columns.0.z)

@@ -24,7 +24,7 @@ private enum TMLayout {
     static let gunRadius: Float = 0.12
     static let cubeRadius: Float = 0.1
     static let enemyHitRadius: Float = 0.38
-    static let headRadius: Float = 0.18
+    static let headRadius: Float = TimeMotionTuning.playerHeadRadius
     static let enemyPoolSize = 8
     static let bulletPoolSize = 32
     static let shardPoolSize = 32

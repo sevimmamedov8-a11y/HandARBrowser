@@ -30,6 +30,8 @@ enum TimeMotionTuning {
     static let spawnGapSeconds: Double = 0.6
     static let breatherSeconds: Double = 2.5
     static let playerHits = 3
+    /// Radius of the player's head for enemy bullets, metres.
+    static let playerHeadRadius: Float = 0.18
 }
 
 /// One reading per camera frame. Only `.motion` changes game speed.

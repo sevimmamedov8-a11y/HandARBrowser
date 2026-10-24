@@ -16,6 +16,7 @@ final class GraffitiProps {
         let brushRadius: Double?
         let marker: SCNNode
         var flight: GraffitiFlight?
+        var footContact = GraffitiFootContact()
         var lastImpact = -Double.infinity
         var radius: Float { ball ? halfSize.x : simd_length(halfSize) }
     }
@@ -86,6 +87,7 @@ final class GraffitiProps {
     func restore(_ states: [GraffitiPropSave]) {
         cancel()
         for (index,item) in items.enumerated() {
+            items[index].footContact.reset()
             guard let state = states.first(where: { $0.id == "\(item.name)#\(index)" }), state.valid else { continue }
             item.node.simdPosition = state.position
             item.node.eulerAngles = SCNVector3(state.angles.x,state.angles.y,state.angles.z)
@@ -123,7 +125,7 @@ final class GraffitiProps {
     func reset() {
         cancel(); left = Slot(); right = Slot()
         for item in items { item.node.simdPosition = item.home; item.node.eulerAngles = SCNVector3Zero }
-        for index in items.indices { items[index].flight = nil }
+        for index in items.indices { items[index].flight = nil; items[index].footContact.reset() }
     }
     func clear() {
         cancel()
@@ -202,6 +204,24 @@ final class GraffitiProps {
             slot.velocity = slot.velocity*0.4 + measured*0.6
         } else { slot.velocity = .zero }
         slot.previousPosition = position
+    }
+
+    func updateFeet(_ feet: [GraffitiFootPose], continuous: Bool, at time: Double) {
+        for index in items.indices where items[index].ball {
+            let held = left.gate.held == index || right.gate.held == index
+            let node = items[index].node
+            let velocity = items[index].flight?.velocity ?? .zero
+            guard let hit = items[index].footContact.hit(feet:feet,ball:node.simdPosition,velocity:velocity,
+                radius:items[index].halfSize.x,enabled:continuous && !held) else { continue }
+            let e = node.eulerAngles
+            items[index].flight = GraffitiFlight(position:hit.position,velocity:hit.velocity,
+                angles:SIMD3(e.x,e.y,e.z),spin:SIMD3(hit.velocity.z*4,0,-hit.velocity.x*4))
+            node.simdPosition = hit.position
+            if time-items[index].lastImpact > 0.12 {
+                items[index].lastImpact = time
+                onInteraction?(.rubber,min(1,0.2+GraffitiFlight.length(hit.velocity)*0.14))
+            }
+        }
     }
 
     func tick(at time: Double, ready: Bool) {

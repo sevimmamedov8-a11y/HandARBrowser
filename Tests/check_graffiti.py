@@ -73,6 +73,7 @@ final class Canvas {
     func restore(_ image: Int) { dirty = true }
 }
 final class Harness {
+    var legMotion = GraffitiLegMotion()
     var lastSaveAt = -Double.infinity, brushSoundAt = -Double.infinity
     func saveRoom(force: Bool = false) {}
     func cancelBrushes() {}
@@ -199,7 +200,7 @@ with tempfile.TemporaryDirectory(prefix='handar-graffiti-ui-') as directory:
     script = Path(directory)/'ui.swift'
     script.write_text(shim + '\n'.join(method(name) for name in (
         'stopSpraying', 'cancelInput', 'tick', 'updateUI', 'setPalette', 'perform', 'showsVirtualHand', 'updateSelection', 'updateRadioControls')) + tests, encoding='utf-8')
-    run_swift_sources([root/'HandARBrowser/HandGesture.swift', root/'HandARBrowser/GraffitiState.swift', root/'HandARBrowser/GraffitiAudio.swift', script])
+    run_swift_sources([root/'HandARBrowser/HandGesture.swift', root/'HandARBrowser/GraffitiState.swift', root/'HandARBrowser/GraffitiAudio.swift', root/'HandARBrowser/GraffitiPhysics.swift', script])
 
 project = (root/'HandARBrowser.xcodeproj/project.pbxproj').read_text(encoding='utf-8')
 for name in ('GraffitiState', 'GraffitiStudio'):

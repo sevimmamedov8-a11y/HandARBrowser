@@ -4129,6 +4129,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         let drawableSize = view.drawableSize
         guard drawableSize.width > 1, drawableSize.height > 1 else { return }
         if graffitiActive {
+            graffiti.updateFeet(head: headNode, at: CACurrentMediaTime(), ready: graffitiTrackingReady)
             graffiti.tick(at: CACurrentMediaTime(), trackingReady: graffitiTrackingReady)
             virtualHands.tick(at: CACurrentMediaTime(), ready: graffitiTrackingReady, head: headNode)
         }

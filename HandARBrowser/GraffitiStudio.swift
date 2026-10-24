@@ -109,6 +109,8 @@ final class GraffitiStudio {
     private let canMaterial = SCNMaterial()
     private let sculptureMaterial = SCNMaterial()
     private let props = GraffitiProps(), floorGrid = SCNNode()
+    private var legMotion = GraffitiLegMotion()
+    private var legNodes: [SCNNode] = []
     private let audio = GraffitiAudio()
     private let roomStore = GraffitiRoomStore()
     private let saveQueue = DispatchQueue(label:"HandAR.graffiti.save",qos:.utility)
@@ -607,6 +609,7 @@ final class GraffitiStudio {
             room.addChildNode(canvas.node); roomCanvases.append(canvas)
         }
         buildRoomDecor()
+        buildLegs()
         restoreRoom()
         updateSelection()
         recenterControls(head: head)
@@ -631,6 +634,7 @@ final class GraffitiStudio {
         canvasAnchors.removeAll(); homeCanvases.removeAll(); roomCanvases.removeAll(); undo.removeAll()
         roomAccents.removeAll()
         props.clear(); roomSculpture = nil; radioNode = nil
+        legMotion.reset(); legNodes.removeAll()
         for child in room.childNodes { child.removeFromParentNode() }
         for child in home.childNodes { child.removeFromParentNode() }
         root.removeFromParentNode(); isRunning = false; aligned = false
@@ -754,10 +758,56 @@ final class GraffitiStudio {
     }
 
     func cancelInput() {
+        legMotion.reset()
         cancelBrushes()
         props.cancel()
         stopSpraying(); uiGate.cancel(); ring.isHidden = true
         uiHand = nil; uiBlocked = false
+    }
+
+    private func buildLegs() {
+        legMotion.reset(); legNodes.removeAll()
+        let trousers = material(UIColor(white:0.13,alpha:1))
+        let shoe = material(UIColor(white:0.23,alpha:1))
+        let sole = material(UIColor(white:0.78,alpha:1))
+        for side in ["left","right"] {
+            let leg = SCNNode(); leg.name = "virtual-leg-" + side; leg.isHidden = true
+            let shin = SCNCylinder(radius:0.065,height:0.57)
+            shin.radialSegmentCount = 10; shin.firstMaterial = trousers
+            let shinNode = SCNNode(geometry:shin); shinNode.position = SCNVector3(0,0.32,0.055)
+            leg.addChildNode(shinNode)
+            let upper = SCNCylinder(radius:0.085,height:0.30)
+            upper.radialSegmentCount = 10; upper.firstMaterial = trousers
+            let upperNode = SCNNode(geometry:upper); upperNode.position = SCNVector3(0,0.72,0.065)
+            leg.addChildNode(upperNode)
+            let shoeShape = SCNBox(width:0.17,height:0.09,length:0.32,chamferRadius:0.035)
+            shoeShape.firstMaterial = shoe
+            leg.addChildNode(SCNNode(geometry:shoeShape))
+            let soleShape = SCNBox(width:0.175,height:0.025,length:0.325,chamferRadius:0.012)
+            soleShape.firstMaterial = sole
+            let soleNode = SCNNode(geometry:soleShape); soleNode.position.y = -0.035
+            leg.addChildNode(soleNode)
+            // One draw group per leg; no per-frame geometry allocations or shadows.
+            let merged = leg.flattenedClone(); room.addChildNode(merged); legNodes.append(merged)
+        }
+        applyRoomSettings()
+    }
+
+    func updateFeet(head: SCNNode, at time: Double, ready: Bool) {
+        let active = isRunning && aligned && mode == .room && ready
+        let t = head.simdWorldTransform
+        let worldForward = SIMD3(-t.columns.2.x,-t.columns.2.y,-t.columns.2.z)
+        let point = room.simdConvertPosition(head.simdWorldPosition,from:nil)
+        let forward = room.simdConvertVector(worldForward,from:nil)
+        let feet = legMotion.update(head:point,forward:forward,time:time,ready:active)
+        for (index,node) in legNodes.enumerated() {
+            node.isHidden = !active || feet.count != 2
+            if !node.isHidden {
+                node.simdPosition = feet[index].center
+                node.eulerAngles.y = atan2(-feet[index].forward.x,-feet[index].forward.z)
+            }
+        }
+        props.updateFeet(feet,continuous:active && legMotion.continuous,at:time)
     }
 
     func tick(at time: Double, trackingReady: Bool) {
@@ -765,7 +815,7 @@ final class GraffitiStudio {
         if time-lastSaveAt >= 2 { saveRoom(); lastSaveAt = time }
         if !trackingReady { cancelBrushes() }
         audio.setBrushing(trackingReady && time-brushSoundAt < 0.12)
-        props.tick(at: time, ready: trackingReady && mode == .room && preferences.grabbing)
+        props.tick(at: time, ready: trackingReady && mode == .room)
         if !trackingReady || time - lastHandAt > 0.2 {
             if paintingHand != nil { setHint("Покажи открытую ладонь, чтобы продолжить") }
             stopSpraying()

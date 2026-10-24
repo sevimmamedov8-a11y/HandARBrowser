@@ -1,5 +1,105 @@
 import Foundation
 
+/// An inferred avatar, not camera-based foot tracking. All coordinates are room-local.
+struct GraffitiFootPose {
+    let center: SIMD3<Float>
+    let forward: SIMD3<Float>
+    let previous: SIMD3<Float>
+    let velocity: SIMD3<Float>
+    var toe: SIMD3<Float> { center + forward * 0.075 }
+    var heel: SIMD3<Float> { center - forward * 0.075 }
+}
+
+struct GraffitiLegMotion {
+    private var lastHead: SIMD3<Float>?
+    private var lastTime: Double?
+    private var heading = SIMD3<Float>(0,0,-1)
+    private var phase: Float = 0
+    private var stride: Float = 0
+    private var previous: [SIMD3<Float>] = []
+    private(set) var continuous = false
+    mutating func reset() { self = Self() }
+    mutating func update(head: SIMD3<Float>, forward: SIMD3<Float>, time: Double, ready: Bool) -> [GraffitiFootPose] {
+        guard ready, time.isFinite, [head.x,head.y,head.z,forward.x,forward.y,forward.z].allSatisfy({ $0.isFinite }) else {
+            reset(); return []
+        }
+        let dt = time - (lastTime ?? time)
+        let delta = head - (lastHead ?? head)
+        continuous = lastHead != nil && dt > 0 && dt <= 0.2 && GraffitiFlight.length(delta) < 0.45
+        let flat = SIMD3(forward.x,0,forward.z), length = GraffitiFlight.length(flat)
+        if !continuous { previous = []; stride = 0; phase = 0 }
+        // Looking down must not spin the legs around the camera's near-vertical axis.
+        if length > 0.25 {
+            let direction = flat/length
+            let mixed = continuous ? heading + (direction-heading)*min(1,Float(dt)*5) : direction
+            if GraffitiFlight.length(mixed) > 0.01 { heading = mixed/GraffitiFlight.length(mixed) }
+        }
+        if continuous {
+            let travel = sqrt(delta.x*delta.x+delta.z*delta.z)
+            let speed = min(2,travel/Float(dt))
+            phase += travel * 10
+            stride += (min(1,speed/0.6)-stride)*min(1,Float(dt)*8)
+        }
+        let right = SIMD3(-heading.z,0,heading.x)
+        let base = SIMD3(head.x,GraffitiRoomLayout.floorY+0.075,head.z)
+        var feet: [GraffitiFootPose] = []
+        for index in 0..<2 {
+            let side: Float = index == 0 ? -1 : 1
+            let swing = sin(phase + (index == 0 ? 0 : .pi)) * stride
+            var center = base + right*(side*0.145) + heading*(0.08+swing*0.16)
+            center.y += max(0,swing)*0.055
+            let old = previous.count == 2 ? previous[index] : center
+            let velocity = continuous ? GraffitiFlight.capped((center-old)/Float(dt),at:3) : .zero
+            feet.append(GraffitiFootPose(center:center,forward:heading,previous:old,velocity:velocity))
+        }
+        previous = feet.map(\.center); lastHead = head; lastTime = time
+        return feet
+    }
+}
+
+/// Contact must first be separated, including after relocalisation or a hand release.
+struct GraffitiFootContact {
+    private var armed = [false,false]
+    mutating func reset() { armed = [false,false] }
+    mutating func hit(feet: [GraffitiFootPose], ball: SIMD3<Float>, velocity: SIMD3<Float>, radius: Float,
+                      enabled: Bool) -> (position: SIMD3<Float>, velocity: SIMD3<Float>)? {
+        guard enabled, feet.count == 2 else { reset(); return nil }
+        let reach = radius + 0.085
+        for index in 0..<2 {
+            let foot = feet[index]
+            var nearest = foot.toe, currentEnd = foot.toe, distance = Float.infinity
+            // Sweep both capsule ends to avoid passing through the ball between frames.
+            for end in [foot.toe,foot.center,foot.heel] {
+                let start = end + foot.previous-foot.center, segment = end-start
+                let squared = segment.x*segment.x+segment.y*segment.y+segment.z*segment.z
+                let offset = ball-start
+                let dot = offset.x*segment.x+offset.y*segment.y+offset.z*segment.z
+                let t = squared > 0.000001 ? min(1,max(0,dot/squared)) : 1
+                let point = start+segment*t, d = GraffitiFlight.length(ball-point)
+                if d < distance { distance = d; nearest = point; currentEnd = end }
+            }
+            if distance > reach+0.035 { armed[index] = true }
+            guard armed[index], distance < reach else { continue }
+            // A ball between both shoes must escape instead of ping-ponging every frame.
+            armed = [false,false]
+            var normal = SIMD3(ball.x-nearest.x,0,ball.z-nearest.z)
+            let n = GraffitiFlight.length(normal)
+            normal = n > 0.005 ? normal/n : foot.forward
+            let relative = foot.velocity-velocity
+            let approach = max(0,relative.x*normal.x+relative.z*normal.z)
+            let power = min(4.8,1.1+approach*1.3)
+            let impulse = normal*power + SIMD3(0,min(1.5,0.45+approach*0.22),0)
+            var position = ball
+            // Clear the present shoe as well as the swept contact; physics clamps room bounds.
+            let separation = position-currentEnd
+            let projected = separation.x*normal.x+separation.z*normal.z
+            position += normal*max(0,reach+0.006-projected)
+            return (position,GraffitiFlight.capped(impulse,at:5))
+        }
+        return nil
+    }
+}
+
 struct GraffitiCollider {
     let center: SIMD3<Float>
     let half: SIMD3<Float>

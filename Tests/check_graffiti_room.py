@@ -107,6 +107,7 @@ final class CineText: SCNNode {
 }
 final class CineButton { let node = SCNNode() }
 final class Harness {
+ var legMotion = GraffitiLegMotion(), legNodes: [SCNNode] = []
  let radioButton = CineButton(); var radioNode: SCNNode?
  let room = SCNNode(), sculptureMaterial = SCNMaterial(), floorGrid = SCNNode()
  var roomSculpture: SCNNode?, preferences = GraffitiPreferences()
@@ -169,6 +170,10 @@ tests = r'''
   check(h.paintColor(at: 1) != h.paintColor(at: 2), "rainbow changes color over time")
   check(h.paintColor(at: .nan) == h.colors[0].1, "invalid hue time uses valid solid color")
   _ = h.paintColor(at: -1)
+
+  h.buildLegs()
+  check(h.legNodes.count == 2 && h.legNodes.allSatisfy { $0.parent === h.room && $0.isHidden },"legs are separate initially hidden children of the room")
+  check(h.legNodes.allSatisfy { $0.flattened && $0.childNodes.count == 4 },"legs merge four small meshes without a physics body")
 
   // Execute the actual prop manager, not just its gesture latch.
   let props = GraffitiProps(), playground = SCNNode()
@@ -243,6 +248,37 @@ tests = r'''
   check(!ballHits.isEmpty && ballHits.allSatisfy { $0>0 && $0<=1 },"actual ball produces scaled rubber impact sounds")
   check(abs(ballNode.simdPosition.y-(GraffitiRoomLayout.floorY+0.028+0.111))<0.002,"actual ball keeps spherical height after falling and rotating")
   check(ballNode.eulerAngles != .zero,"actual released object rotates even with a stationary hand")
+  let kickProps = GraffitiProps(), kickRoom = SCNNode()
+  let ballY = GraffitiRoomLayout.floorY+0.139
+  let kickBall = kickProps.add(parts:[SCNNode()],name:"ball",center:SIMD3(0,ballY,-0.4),halfSize:SIMD3(repeating:0.111),sound:.rubber,ball:true,in:kickRoom)
+  func kickFeet(_ z:Float, old:Float? = nil) -> [GraffitiFootPose] {
+   [GraffitiFootPose(center:SIMD3(0,GraffitiRoomLayout.floorY+0.075,z),forward:SIMD3(0,0,-1),previous:SIMD3(0,GraffitiRoomLayout.floorY+0.075,old ?? z),velocity:SIMD3(0,0,-1)),
+    GraffitiFootPose(center:SIMD3(3,ballY,0),forward:SIMD3(0,0,-1),previous:SIMD3(3,ballY,0),velocity:.zero)]
+  }
+  var kicks = 0
+  kickProps.onInteraction = { sound, gain in if sound == .rubber { kicks += 1; check(gain > 0 && gain <= 1,"foot sound gain bounded") } }
+  kickProps.updateFeet(kickFeet(0),continuous:true,at:20)
+  kickProps.updateFeet(kickFeet(-0.24,old:0),continuous:true,at:20.02)
+  check(kicks == 1 && kickProps.savedState()[0].moving,"actual contact activates saved prop physics and sound")
+  let kickedAt = kickBall.simdPosition
+  kickProps.tick(at:20.02,ready:true);kickProps.tick(at:20.06,ready:true)
+  check(kickBall.simdPosition.z < kickedAt.z && kickBall.eulerAngles != .zero,"actual kicked prop moves and rotates")
+  kickProps.reset()
+  kickProps.updateFeet(kickFeet(-0.24),continuous:true,at:21)
+  check(kicks == 1 && !kickProps.savedState()[0].moving,"reset under a foot does not create another kick")
+  kickProps.updateFeet(kickFeet(0),continuous:true,at:21.02)
+  let lowRay = WorldRay(origin:SIMD3(0,ballY,0),direction:SIMD3(0,0,-1))
+  for i in 0...6 { kickProps.update(hand:.left,generation:1,fist:true,open:false,ray:lowRay,distance:0.5,
+    orientation:simd_quatf(),blocked:false,ready:true,at:22+Double(i)*0.04) }
+  check(kickProps.isHeld(kickBall),"ball still grabbable after a kick")
+  let heldPosition = kickBall.simdPosition
+  kickProps.updateFeet(kickFeet(heldPosition.z+0.14),continuous:true,at:22.26)
+  check(kickBall.simdPosition == heldPosition && kicks == 1,"foot cannot knock a held ball out of hand")
+  kickProps.cancel()
+  kickProps.updateFeet(kickFeet(0),continuous:false,at:23)
+  kickProps.updateFeet(kickFeet(kickBall.simdPosition.z+0.14),continuous:true,at:23.02)
+  check(kicks == 1,"tracking recovery does not kick overlapping ball")
+
   let paintTools = GraffitiProps(), toolRoom = SCNNode()
   toolRoom.simdPosition = SIMD3(3,0,0)
   let toolNode = paintTools.add(parts:[SCNNode()],name:"brush",center:SCNVector3(-3,0,-2),halfSize:SIMD3(0.02,0.19,0.02),brushRadius:0.003,in:toolRoom)
@@ -271,7 +307,7 @@ tests = r'''
 '''
 with tempfile.TemporaryDirectory(prefix='handar-room-') as directory:
     script = Path(directory)/'room.swift'
-    script.write_text(shim.replace('final class Harness {', props_class + '\nfinal class Harness {') + '\n'.join(method(name) for name in ('material', 'box', 'buildRoomDecor', 'buildCan', 'updateRoomMood', 'paintColor', 'applyRoomSettings')) + tests, encoding='utf-8')
+    script.write_text(shim.replace('final class Harness {', props_class + '\nfinal class Harness {') + '\n'.join(method(name) for name in ('material', 'box', 'buildRoomDecor', 'buildLegs', 'buildCan', 'updateRoomMood', 'paintColor', 'applyRoomSettings')) + tests, encoding='utf-8')
     run_swift_sources([root/'HandARBrowser/HandGesture.swift', root/'HandARBrowser/GraffitiState.swift', root/'HandARBrowser/GraffitiAudio.swift', root/'HandARBrowser/GraffitiPhysics.swift', root/'HandARBrowser/GraffitiRoomSave.swift', script])
 
 assert 'textureWidth: 4096' in source

@@ -79,7 +79,7 @@ assert 'path = Panoramas; sourceTree = "<group>"' in project
 assert project.count('FA9000000000000000000003 /* Panoramas in Resources */') == 2
 assert project.count('FA9000000000000000000001 /* OfflinePanorama.swift in Sources */') == 2
 assert 'panoramaActive ? false' in main
-assert 'uniforms.handMaskEnabled = !panoramaActive &&' in main
+assert 'let handMaskActive = !panoramaActive &&' in main
 assert 'panorama.followPosition(head: headNode)' in main
 assert 'root.simdWorldPosition = head.simdWorldPosition' in source
 assert 'self.generation == token' in source

@@ -2,31 +2,46 @@ import Foundation
 
 enum GraffitiMode { case room, home }
 
-/// Only a fresh, owned fist may paint. Reacquisition, menus and tracking loss
-/// need a visible open palm before starting another stroke.
+enum GraffitiRoomLayout {
+    static let span: Float = 8
+    static let floorY: Float = -1.52
+    static let ceilingY: Float = 2.68
+    static var wallHeight: Float { ceilingY - floorY }
+    static var wallCenterY: Float { (ceilingY + floorY) * 0.5 }
+    static let maximumPaintDistance: Float = 13
+}
+
+/// A deliberate UI toggle enables painting with a fresh, owned open palm.
+/// Loss, hand changes and menus disable it until another explicit toggle.
 struct GraffitiSprayGate {
     private(set) var owner: TrackedHand?
     private(set) var canVisible = false
-    private(set) var armed = true
+    private(set) var isEnabled = false
     private var last: Double?
-    private var openSince: Double?
+    private var open = false
 
     mutating func cancel() {
-        canVisible = false; armed = false; openSince = nil; last = nil
+        canVisible = false; isEnabled = false; open = false; last = nil
     }
 
-    mutating func update(hand: TrackedHand?, fist: Bool, open: Bool,
+    /// Enabling needs a currently visible open palm, including in head-aim mode.
+    @discardableResult mutating func toggle(at time: Double) -> Bool {
+        if isEnabled { cancel(); return true }
+        guard time.isFinite, let last, time >= last, time - last <= 0.2,
+              owner != nil, open else { return false }
+        isEnabled = true
+        return true
+    }
+
+    mutating func update(hand: TrackedHand?, open: Bool,
                          reliable: Bool, blocked: Bool, at time: Double) -> Bool {
         guard reliable, let hand, time.isFinite else { cancel(); return false }
         if let last, time < last || time - last > 0.2 { cancel() }
         if let owner, owner != hand { cancel() }
-        owner = hand; last = time; canVisible = fist
-        if blocked { armed = false; openSince = nil; return false }
-        if open && !fist {
-            if openSince == nil { openSince = time }
-            if time - (openSince ?? time) >= 0.08 { armed = true }
-        } else { openSince = nil }
-        return fist && armed
+        owner = hand; last = time; self.open = open
+        // Hovering a control pauses the stroke without undoing its enable action.
+        canVisible = isEnabled && open && !blocked
+        return canVisible
     }
 }
 

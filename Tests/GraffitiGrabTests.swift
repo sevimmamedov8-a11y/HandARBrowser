@@ -55,6 +55,30 @@ import Foundation
         let tabletop = GraffitiCollider(center:SIMD3(0,-0.5,0),half:SIMD3(1,0.05,1))
         for _ in 0..<300 { _ = tableFlight.step(1.0/60,halfSize:small,obstacles:[tabletop]) }
         check(tableFlight.resting && abs(tableFlight.position.y+0.35)<0.002,"falls onto thin tabletop without tunnelling")
+        for half in [SIMD3<Float>(0.058,0.14,0.06), SIMD3(0.18,0.41,0.07), SIMD3(0.31,0.34,0.15)] {
+            var drop = GraffitiFlight(position:SIMD3(2,1,0),velocity:.zero,angles:.zero,
+                spin:GraffitiFlight.releaseSpin(velocity:.zero,hand:.left))
+            for _ in 0..<12 { _ = drop.step(1.0/60,halfSize:half,obstacles:[]) }
+            check(GraffitiFlight.length(drop.angles)>0.1,"stationary hand still releases a tumbling body")
+            for _ in 0..<1200 { _ = drop.step(1.0/60,halfSize:half,obstacles:[]) }
+            check(drop.resting,"can, skateboard and radio settle after tumbling")
+            let extent = GraffitiFlight.extent(half:half,angles:drop.angles)
+            check(extent.y <= min(half.x,min(half.y,half.z))+0.003,"prop rests on a low face instead of standing on an edge")
+        }
+        var ball = GraffitiFlight(position:SIMD3(0,1,0),velocity:SIMD3(1.5,0,0),angles:.zero,spin:.zero)
+        var bounced = false, rebound: Float = -100, travelled: Float = 0
+        for _ in 0..<1200 {
+            let hit = ball.step(1.0/60,halfSize:SIMD3(repeating:0.111),obstacles:[],ball:true)
+            if hit > 1 { bounced = true }
+            if bounced { rebound = max(rebound,ball.position.y); travelled = max(travelled,abs(ball.position.x)) }
+            check(ball.position.y >= GraffitiRoomLayout.floorY+0.138,"sphere retains fixed collision radius while rotating")
+        }
+        check(bounced && rebound > -0.5,"football has a visible elastic rebound")
+        check(ball.resting && travelled > 1.5 && GraffitiFlight.length(ball.angles)>1,"football rolls, rotates and eventually stops")
+        let mesh = GraffitiFootball.patches()
+        check(mesh.vertices.count == 552 && mesh.indices.count == 2700,"twelve curved pentagons stay within mesh budget")
+        for v in mesh.vertices { check(abs(GraffitiFlight.length(v)-1.006)<0.0001,"football patches follow spherical surface") }
+        check(mesh.indices.allSatisfy { $0>=0 && Int($0)<mesh.vertices.count },"football triangles only reference valid vertices")
         let savedPosition = tableFlight.position
         _ = tableFlight.step(.nan,halfSize:small,obstacles:[])
         check(savedPosition == tableFlight.position,"invalid time has no motion")

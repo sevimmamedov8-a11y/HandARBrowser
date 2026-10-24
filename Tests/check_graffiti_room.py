@@ -43,7 +43,14 @@ final class SCNMaterial {
  var lightingModel = Lighting.constant, isDoubleSided = false, writesToDepthBuffer = true
  let diffuse = Property(), multiply = Property()
 }
+final class SCNGeometrySource { let vertices: [SCNVector3]; init(vertices:[SCNVector3]) { self.vertices = vertices }; init(normals:[SCNVector3]) { vertices = [] } }
+final class SCNGeometryElement { enum Kind { case triangles }; init(indices:[Int32],primitiveType:Kind) {} }
+typealias SCNGeometry = Geometry
 class Geometry {
+ init() {}
+ init(sources:[SCNGeometrySource],elements:[SCNGeometryElement]) {
+  for v in sources.flatMap({ $0.vertices }) { halfSize = SIMD3(max(halfSize.x,abs(v.x)),max(halfSize.y,abs(v.y)),max(halfSize.z,abs(v.z))) }
+ }
  var materials: [SCNMaterial] = []
  var firstMaterial: SCNMaterial? { get { materials.first } set { materials = newValue.map { [$0] } ?? [] } }
  var halfSize = SCNVector3.zero
@@ -135,6 +142,8 @@ tests = r'''
          "front central painting area remains clear")
    if let cylinder = node.geometry as? SCNCylinder { check(cylinder.radialSegmentCount <= 16, "cans and speakers use small meshes") }
   }
+  let football = h.room.childNodes.first { $0.name == "Футбольный мяч" }
+  check(football != nil && football!.childNodes.count == 2,"football is one grabbable root with a highlight")
   let sculpture = nodes.first { $0.animated }!
   check(sculpture.geometry?.firstMaterial === h.sculptureMaterial, "selected paint color can update the sculpture without rebuilding it")
   let sign = nodes.compactMap { $0 as? CineText }.first!
@@ -146,7 +155,7 @@ tests = r'''
   check(h.roomAccents.map { $0.0.diffuse.contents as! UIColor } != neon, "sunset changes actual merged materials")
   h.mood = .mint;h.updateRoomMood();h.mood = .neon;h.updateRoomMood()
   check(h.roomAccents.map { $0.0.diffuse.contents as! UIColor } == neon, "lighting cycles back without rebuilding room")
-  check(h.room.childNodes.filter { $0.name != nil }.count == 15, "all small props have independent pickable roots")
+  check(h.room.childNodes.filter { $0.name != nil }.count == 16, "all small props have independent pickable roots")
   h.preferences.grid = false; h.preferences.animation = false; h.preferences.brightness = 0; h.applyRoomSettings()
   check(h.floorGrid.isHidden && h.roomSculpture?.isPaused == true, "settings control actual grid and animation nodes")
   check(meshes.allSatisfy { ($0.geometry?.firstMaterial?.multiply.contents as? UIColor) == UIColor(white: 0.55, alpha: 1) }, "brightness changes actual room materials")
@@ -163,7 +172,7 @@ tests = r'''
   // Execute the actual prop manager, not just its gesture latch.
   let props = GraffitiProps(), playground = SCNNode()
   var picked = 0, confirmed = 0
-  props.onPickColor = { picked += $0+1 }; props.onInteraction = { _ in confirmed += 1 }
+  props.onPickColor = { picked += $0+1 }; props.onInteraction = { _, gain in precondition(gain>0 && gain<=1);confirmed += 1 }
   props.add(parts: [SCNNode()], name: "A", center: SCNVector3(0,0,-2), halfSize: SIMD3(0.1,0.1,0.1), color: 0, in: playground)
   props.add(parts: [SCNNode()], name: "B", center: SCNVector3(1,0,-2), halfSize: SIMD3(0.1,0.1,0.1), color: 1, in: playground)
   let a = playground.childNodes[0], b = playground.childNodes[1]
@@ -220,6 +229,19 @@ tests = r'''
   }
   check(selected == 1, "pointed can wins over a slightly nearer adjacent can inside assist cone")
 
+  let ballProps = GraffitiProps(), ballRoom = SCNNode()
+  let ballNode = ballProps.add(parts:[SCNNode()],name:"football",center:SCNVector3(0,0,-2),halfSize:SIMD3(repeating:0.111),sound:.rubber,ball:true,in:ballRoom)
+  var ballHits: [Float] = []
+  ballProps.onInteraction = { sound, gain in if sound == .rubber { ballHits.append(gain) } }
+  for i in 0...54 {
+   ballProps.update(hand:.right,generation:1,fist:i<4,open:i>=4,ray:rayA,distance:0.5,
+     orientation:simd_quatf(),blocked:false,ready:true,at:10+Double(i)*0.04)
+  }
+  check(!ballProps.isHeld(ballNode),"football uses the same two-second release")
+  for i in 0..<480 { ballProps.tick(at:12.16+Double(i)/60,ready:true) }
+  check(!ballHits.isEmpty && ballHits.allSatisfy { $0>0 && $0<=1 },"actual ball produces scaled rubber impact sounds")
+  check(abs(ballNode.simdPosition.y-(GraffitiRoomLayout.floorY+0.028+0.111))<0.002,"actual ball keeps spherical height after falling and rotating")
+  check(ballNode.eulerAngles != .zero,"actual released object rotates even with a stationary hand")
   print("PASS: \(count) production graffiti room bounds, free painting space, prop budget and material checks")
  }
 }

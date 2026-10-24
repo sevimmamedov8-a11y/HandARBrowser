@@ -31,6 +31,7 @@ final class Audio {
  var onPlay: (() -> Void)?
  func play(_ sound: GraffitiSound) { if enabled { onPlay?() } }
  func setSpraying(_ value: Bool) {}
+ func setErasing(_ value: Bool) {}
  func toggle() { enabled.toggle() }
  func nextVolume() { volumeTitle = "85%" }
  func resetSettings() { enabled = true;volumeTitle = "55%" }
@@ -80,10 +81,10 @@ final class Harness {
     var sprayGate = GraffitiSprayGate()
     let can = Node(), aim = Node(), room = Node(), home = Node(), panel = Node(), ring = Ring()
     let paletteButton = Button("palette")
-    var buttons = [("color-1", Button("color-1")), ("room", Button("room")), ("home", Button("home")), ("rainbow", Button("rainbow")), ("mood", Button("mood"))]
+    var buttons = [("eraser", Button("eraser")), ("color-1", Button("color-1")), ("room", Button("room")), ("home", Button("home")), ("rainbow", Button("rainbow")), ("mood", Button("mood"))]
     let settingButtons = ["tab-radio", "radio-toggle", "radio-next", "radio-volume", "radio-import", "radio-own", "radio-default", "radio-close", "tab-paint", "tab-settings", "setting-paint", "setting-grab", "setting-flow", "setting-edge", "setting-light", "setting-grid", "setting-animation", "setting-props", "setting-reset", "setting-close", "setting-sound", "setting-volume"]
     init() { for id in settingButtons { buttons.append((id,Button(id))) }; updateSelection() }
-    var paintingHand: TrackedHand?, rainbow = false, mood = GraffitiRoomMood.neon, moodChanges = 0
+    var paintingHand: TrackedHand?, rainbow = false, erasing = false, mood = GraffitiRoomMood.neon, moodChanges = 0
     var roomCanvases: [Canvas] = [], homeCanvases: [Canvas] = [], undo: [(UUID, Int)] = []
     var mode = GraffitiMode.room, colors = (0..<8).map { (String($0),Color()) }, radii = [0.01, 0.02, 0.03], colorIndex = 0, sizeIndex = 0
     var lastHandAt = -Double.infinity, lastUpload = -Double.infinity, hint = "", strokesEnded = 0
@@ -167,6 +168,11 @@ tests = r'''
     _ = h.perform("setting-sound");check(!h.audio.enabled, "sound switch reaches audio controller")
     _ = h.perform("setting-volume");check(h.audio.volumeTitle == "85%", "volume button reaches audio controller")
     _ = h.perform("setting-reset");check(h.audio.enabled && h.audio.volumeTitle == "55%", "settings reset includes sound")
+    h.setPalette(true);_ = h.perform("tab-paint")
+    for _ in 0..<60 { _ = frame("eraser") }
+    check(h.erasing && h.buttons.first { $0.0 == "eraser" }!.1.title.contains("✓"),"long dwell selects eraser once")
+    _ = h.perform("color-1");check(!h.erasing,"selecting color returns to paint")
+    _ = h.perform("eraser");_ = h.perform("rainbow");check(!h.erasing && h.rainbow,"rainbow returns to paint")
     _ = h.perform("setting-close");check(!h.paletteOpen, "settings can close without leaving app")
     h.setPalette(true);_ = h.perform("tab-radio")
     check(h.radioPage && !h.settingsPage && !h.radioStatus.isHidden,"radio has its own tab")

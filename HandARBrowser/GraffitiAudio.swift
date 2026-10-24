@@ -1,7 +1,8 @@
 import Foundation
 
 enum GraffitiSound: String, CaseIterable {
-    case tap, palette, color, undo, reset, grab, metal, wood, soft, plastic, spray
+    case tap, palette, color, undo, reset, grab, metal, wood, soft, plastic, rubber, spray, sprayStart, sprayEnd, erase
+    var loops: Bool { self == .spray || self == .erase }
     static func feedback(for action: String) -> Self {
         if action.hasPrefix("color-") || action == "rainbow" { return .color }
         if action == "undo" { return .undo }
@@ -22,6 +23,8 @@ final class GraffitiAudio {
     private var observers: [NSObjectProtocol] = []
     private var interrupted = false
     private var foreground = true
+    private var sprayStartedAt: Double?
+    private var variation = 0
     private(set) var enabled = !UserDefaults.standard.bool(forKey: "graffiti.sound.muted")
     private(set) var level: Int = {
         let value = UserDefaults.standard.object(forKey: "graffiti.sound.level") as? Int ?? 1
@@ -49,30 +52,50 @@ final class GraffitiAudio {
         for sound in GraffitiSound.allCases {
             guard let url = Bundle.main.url(forResource: sound.rawValue, withExtension: "wav", subdirectory: "GraffitiSounds") else { continue }
             var voices: [AVAudioPlayer] = []
-            for _ in 0..<(sound == .spray ? 1 : 2) {
+            for _ in 0..<(sound.loops ? 1 : 2) {
                 guard let player = try? AVAudioPlayer(contentsOf: url) else { continue }
-                player.numberOfLoops = sound == .spray ? -1 : 0
+                player.numberOfLoops = sound.loops ? -1 : 0
+                player.enableRate = true
                 player.prepareToPlay(); voices.append(player)
             }
             players[sound] = voices
         }
         applyVolume()
     }
-    func play(_ sound: GraffitiSound, at time: Double = ProcessInfo.processInfo.systemUptime) {
-        guard enabled, !interrupted, foreground, sound != .spray, time.isFinite,
+    func play(_ sound: GraffitiSound, intensity: Float = 1, at time: Double = ProcessInfo.processInfo.systemUptime) {
+        guard enabled, !interrupted, foreground, !sound.loops, time.isFinite, intensity.isFinite,
               time-(lastPlayed[sound] ?? -.infinity) >= 0.04,
               let voices = players[sound], let player = voices.first(where: { !$0.isPlaying }) ?? voices.first else { return }
         lastPlayed[sound] = time
-        player.currentTime = 0; player.volume = volume; player.play()
+        variation = (variation+1)%5
+        let impact = [GraffitiSound.metal,.wood,.soft,.plastic,.rubber].contains(sound)
+        player.rate = impact ? [0.96,1.02,0.99,1.04,1][variation] : 1
+        player.currentTime = 0; player.volume = volume*max(0,min(1,intensity)); player.play()
     }
-    func setSpraying(_ spraying: Bool) {
+    func setSpraying(_ spraying: Bool, at time: Double = ProcessInfo.processInfo.systemUptime) {
         guard let player = players[.spray]?.first else { return }
-        if spraying && enabled && !interrupted && foreground {
-            if !player.isPlaying { player.volume = volume*0.6; player.play() }
-        } else if player.isPlaying { player.pause(); player.currentTime = 0 }
+        if spraying && enabled && !interrupted && foreground && time.isFinite {
+            guard sprayStartedAt == nil else { return }
+            sprayStartedAt = time
+            play(.sprayStart, intensity: 0.8, at: time)
+            player.currentTime = 0; player.volume = volume*0.10; player.play()
+            player.setVolume(volume*0.6, fadeDuration: 0.55)
+        } else if let start = sprayStartedAt {
+            sprayStartedAt = nil
+            player.setVolume(0, fadeDuration: 0); player.pause(); player.currentTime = 0
+            let duration = time.isFinite ? max(0,time-start) : 0
+            play(.sprayEnd, intensity: Float(min(0.7,0.25+duration)), at: time)
+        }
+    }
+    func setErasing(_ erasing: Bool) {
+        guard let player = players[.erase]?.first else { return }
+        if erasing && enabled && !interrupted && foreground {
+            if !player.isPlaying { player.volume = 0; player.play(); player.setVolume(volume*0.32, fadeDuration: 0.06) }
+        } else { player.setVolume(0, fadeDuration: 0); player.pause(); player.currentTime = 0 }
     }
     func stop() {
-        for voices in players.values { for player in voices { player.pause(); player.currentTime = 0 } }
+        sprayStartedAt = nil
+        for voices in players.values { for player in voices { player.setVolume(0, fadeDuration: 0); player.pause(); player.currentTime = 0 } }
         lastPlayed.removeAll()
     }
     func toggle() {
@@ -89,7 +112,12 @@ final class GraffitiAudio {
         applyVolume()
     }
     private func applyVolume() {
-        for (sound, voices) in players { for player in voices { player.volume = volume*(sound == .spray ? 0.6 : 1) } }
+        for (sound, voices) in players { for player in voices {
+            if sound == .spray, let start = sprayStartedAt {
+                let remaining = max(0,0.55-(ProcessInfo.processInfo.systemUptime-start))
+                player.setVolume(volume*0.6, fadeDuration: remaining)
+            } else { player.volume = volume*(sound == .erase ? 0.32 : (sound == .spray ? 0.1 : 1)) }
+        } }
     }
 }
 #endif

@@ -49,7 +49,7 @@ private final class GraffitiCanvas {
         dirty = true
     }
 
-    func spray(points: [SIMD2<Double>], radius: Double, color: UIColor, clip: [SIMD2<Double>]?, flow: Double, hardEdge: Bool) {
+    func spray(points: [SIMD2<Double>], radius: Double, color: UIColor, clip: [SIMD2<Double>]?, flow: Double, hardEdge: Bool, erasing: Bool = false) {
         guard let context = bitmap(), !points.isEmpty else { return }
         let scale = Double(width) / size.x
         func pixel(_ p: SIMD2<Double>) -> CGPoint {
@@ -60,6 +60,17 @@ private final class GraffitiCanvas {
             context.beginPath(); context.move(to: pixel(clip[0]))
             for point in clip.dropFirst() { context.addLine(to: pixel(point)) }
             context.closePath(); context.clip()
+        }
+        if erasing {
+            // Replace pixels with the original wall, including transparent
+            // pixels in passthrough mode. Painting white would obscure the room.
+            context.setBlendMode(.copy); context.setFillColor(base.cgColor)
+            let r = CGFloat(radius*scale)
+            for point in points {
+                let center = pixel(point)
+                context.fillEllipse(in: CGRect(x:center.x-r,y:center.y-r,width:2*r,height:2*r))
+            }
+            context.restoreGState(); dirty = true; return
         }
         let colors = [color.withAlphaComponent(CGFloat(0.28*flow)).cgColor, color.withAlphaComponent(CGFloat((hardEdge ? 0.25 : 0.10)*flow)).cgColor,
                       color.withAlphaComponent(0).cgColor] as CFArray
@@ -98,6 +109,8 @@ final class GraffitiStudio {
     private var roomAccents: [(SCNMaterial, Bool)] = []
     private var mood = GraffitiRoomMood.neon
     private var rainbow = false
+    private var erasing = false
+    private var brushRadius: Double { radii[sizeIndex] * (erasing ? 2 : 1) }
     private let status = CineText()
     private let paletteButton = CineButton(title: "Цвет", color: .darkGray, width: 0.24, height: 0.16)
     private var buttons: [(String, CineButton)] = []
@@ -146,10 +159,10 @@ final class GraffitiStudio {
         radio.onChange = { [weak self] in self?.updateRadioControls() }
         props.onPickColor = { [weak self] color in
             guard let self else { return }
-            self.colorIndex = color; self.rainbow = false; self.updateSelection()
+            self.colorIndex = color; self.rainbow = false; self.erasing = false; self.updateSelection()
         }
         props.onHint = { [weak self] text in self?.setHint(text) }
-        props.onInteraction = { [weak self] sound in self?.audio.play(sound) }
+        props.onInteraction = { [weak self] sound, intensity in self?.audio.play(sound, intensity: intensity) }
         let target = SCNTorus(ringRadius: 0.018, pipeRadius: 0.002)
         target.firstMaterial = material(.white)
         aim.geometry = target; aim.eulerAngles.x = .pi / 2
@@ -218,8 +231,9 @@ final class GraffitiStudio {
         button("home", "Мои стены", 0.27, -0.20, width: 0.49)
         button("rainbow", "Радуга: выкл", -0.27, -0.38, width: 0.49)
         button("mood", "Свет: Неон", 0.27, -0.38, width: 0.49)
-        button("undo", "Отменить", -0.27, -0.56, width: 0.49)
-        button("exit", "В меню", 0.27, -0.56, width: 0.49)
+        button("eraser", "Стиралка", -0.35, -0.56, width: 0.32)
+        button("undo", "Отменить", 0, -0.56, width: 0.32)
+        button("exit", "В меню", 0.35, -0.56, width: 0.32)
         for (index, entry) in [
             ("setting-paint", "Краска: вкл"), ("setting-grab", "Захват: вкл"),
             ("setting-flow", "Слой: обычный"), ("setting-edge", "Край: мягкий"),
@@ -421,6 +435,22 @@ final class GraffitiStudio {
             } }
         }
         movable(skateStart, "Скейт", SCNVector3(1.93, floor + 0.47, rear + 3.59), SIMD3(0.18, 0.41, 0.07))
+        // A grabbable football with raised curved pentagonal panels.
+        let ballStart = decor.childNodes.count
+        let ballCenter = SCNVector3(1.1, floor+0.139, 3.5)
+        let sphere = SCNSphere(radius:0.11); sphere.segmentCount = 24
+        sphere.firstMaterial = material(UIColor(white:0.92,alpha:1))
+        let ballBody = SCNNode(geometry:sphere); ballBody.position = ballCenter; decor.addChildNode(ballBody)
+        let patches = GraffitiFootball.patches()
+        let vertices = patches.vertices.map { SCNVector3($0.x*0.11,$0.y*0.11,$0.z*0.11) }
+        let element = SCNGeometryElement(indices:patches.indices,primitiveType:.triangles)
+        let normals = patches.vertices.map { SCNVector3($0.x/1.006,$0.y/1.006,$0.z/1.006) }
+        let panels = SCNGeometry(sources:[SCNGeometrySource(vertices:vertices),SCNGeometrySource(normals:normals)],elements:[element])
+        panels.firstMaterial = material(charcoal)
+        let ballPanels = SCNNode(geometry:panels); ballPanels.position = ballCenter; decor.addChildNode(ballPanels)
+        for part in decor.childNodes.dropFirst(ballStart) { part.geometry?.firstMaterial?.lightingModel = .lambert }
+        props.add(parts:Array(decor.childNodes.dropFirst(ballStart)),name:"Футбольный мяч",center:ballCenter,
+            halfSize:SIMD3(repeating:0.111),sound:.rubber,ball:true,in:room)
         let sign = CineText()
         sign.constraints = []; sign.setText("HANDAR  /  SPRAY LAB", color: cyan); sign.fitWidth(2.6)
         sign.position = SCNVector3(-1.65, 1.28, half - 0.05); sign.eulerAngles.y = .pi
@@ -516,7 +546,7 @@ final class GraffitiStudio {
         stop()
         isRunning = true; aligned = false; mode = .room
         sprayGate = GraffitiSprayGate(); colorIndex = 0; sizeIndex = 1
-        rainbow = false; mood = .neon
+        rainbow = false; erasing = false; mood = .neon
         preferences = GraffitiPreferences.load(); settingsPage = false; radioPage = false
         audio.prepare(); audio.play(.palette)
         root.simdTransform = matrix_identity_float4x4
@@ -578,7 +608,7 @@ final class GraffitiStudio {
         status.setText(value); status.fitWidth(1.35)
     }
 
-    private func endStroke() { activeCanvas = nil; sampler.reset(); mist.isHidden = true; paintingHand = nil; audio.setSpraying(false) }
+    private func endStroke() { activeCanvas = nil; sampler.reset(); mist.isHidden = true; paintingHand = nil; audio.setSpraying(false); audio.setErasing(false) }
 
     private func stopSpraying() {
         sprayGate.cancel(); endStroke(); can.isHidden = true; aim.isHidden = true
@@ -648,7 +678,7 @@ final class GraffitiStudio {
             return
         }
         lastHandAt = time
-        can.isHidden = !sprayGate.canVisible
+        can.isHidden = erasing || !sprayGate.canVisible
         can.simdWorldPosition = ray.point(at: distance) + toolOffset
         can.look(at: SCNVector3(ray.point(at: distance + 1)), up: SCNVector3(0, 1, 0), localFront: SCNVector3(0, 0, -1))
         guard spraying else {
@@ -660,7 +690,7 @@ final class GraffitiStudio {
         }
         guard let hit = paintHit(ray: ray) else {
             endStroke(); aim.isHidden = true
-            setHint(mode == .home ? (homeCanvases.count >= 12 ? "Лимит холстов сеанса · рисуй на уже начатой стене" : "Осмотри стену камерой, чтобы найти поверхность") : "Направь ладонь на стену")
+            setHint(erasing ? "Направь стиралку на стену с рисунком" : (mode == .home ? (homeCanvases.count >= 12 ? "Лимит холстов сеанса · рисуй на уже начатой стене" : "Осмотри стену камерой, чтобы найти поверхность") : "Направь ладонь на стену"))
             return
         }
         aim.isHidden = false
@@ -670,23 +700,26 @@ final class GraffitiStudio {
         can.look(at: marker, up: SCNVector3(0, 1, 0), localFront: SCNVector3(0, 0, -1))
         // The small ring geometry lies in XZ; rotate its own mesh into the wall's XY.
         aim.simdWorldOrientation = hit.canvas.node.simdWorldOrientation * simd_quatf(angle: .pi / 2, axis: SIMD3(1, 0, 0))
+        let aimScale: Float = erasing ? Float(brushRadius/0.018) : 1
+        aim.scale = SCNVector3(aimScale,aimScale,aimScale)
         if activeCanvas != hit.canvas.id {
             endStroke()
             guard let image = hit.canvas.snapshot() else { setHint("Не удалось создать холст"); return }
             activeCanvas = hit.canvas.id
             undo.append((hit.canvas.id, image)); if undo.count > 6 { undo.removeFirst() }
         }
-        let points = sampler.points(to: hit.point, radius: radii[sizeIndex], at: time)
+        let points = sampler.points(to: hit.point, radius: brushRadius, at: time)
         paintingHand = hand
         let color = paintColor(at: time)
         canMaterial.diffuse.contents = color
         sculptureMaterial.diffuse.contents = color
         mist.geometry?.firstMaterial?.diffuse.contents = color.withAlphaComponent(0.16)
-        hit.canvas.spray(points: points, radius: radii[sizeIndex], color: color, clip: hit.clip,
-                         flow: preferences.flow, hardEdge: preferences.hardEdge)
-        mist.isHidden = false
-        audio.setSpraying(true)
-        setHint("\(rainbow ? "Радуга" : colors[colorIndex].0) · убери или закрой ладонь — стоп")
+        hit.canvas.spray(points: points, radius: brushRadius, color: color, clip: hit.clip,
+                         flow: preferences.flow, hardEdge: preferences.hardEdge, erasing: erasing)
+        mist.isHidden = erasing
+        audio.setSpraying(!erasing)
+        audio.setErasing(erasing)
+        setHint("\(erasing ? "Стиралка" : (rainbow ? "Радуга" : colors[colorIndex].0)) · убери или закрой ладонь — стоп")
     }
 
     private struct Hit { let canvas: GraffitiCanvas; let point: SIMD2<Double>; let clip: [SIMD2<Double>]? }
@@ -722,6 +755,7 @@ final class GraffitiStudio {
                 GraffitiGeometry.uv(point: SIMD2(Double(local.x), Double(local.y)), size: surface.size) != nil
         }
         if canvas == nil {
+            guard !erasing else { return nil }
             guard homeCanvases.count < 12 else { setHint("Достигнут лимит стен этого сеанса"); return nil }
             let new = GraffitiCanvas(size: SIMD2(2, 2), base: .clear)
             home.addChildNode(new.node)
@@ -766,6 +800,7 @@ final class GraffitiStudio {
             if id.hasPrefix("size-"), let n = Int(id.dropFirst(5)) { button.setTitle((n == sizeIndex ? "✓ " : "") + ["Тонко", "Средне", "Широко"][n]) }
             if id == "room" { button.setTitle(mode == .room ? "✓ Комната" : "Комната") }
             if id == "home" { button.setTitle(mode == .home ? "✓ Мои стены" : "Мои стены") }
+            if id == "eraser" { button.setTitle(erasing ? "✓ Стиралка" : "Стиралка") }
             if id == "rainbow" { button.setTitle(rainbow ? "Радуга: вкл" : "Радуга: выкл") }
             if id == "mood" { button.setTitle("Свет: \(mood.title)") }
             if id == "setting-paint" { button.setTitle(preferences.paintEnabled ? "Краска: вкл" : "Краска: выкл") }
@@ -846,8 +881,9 @@ final class GraffitiStudio {
         if action == "setting-volume" { audio.nextVolume() }
         if action == "setting-close" { setPalette(false) }
         if action.hasPrefix("setting-") { preferences.save(); applyRoomSettings() }
-        if action.hasPrefix("color-"), let n = Int(action.dropFirst(6)), colors.indices.contains(n) { colorIndex = n; rainbow = false }
-        if action == "rainbow" { rainbow.toggle() }
+        if action.hasPrefix("color-"), let n = Int(action.dropFirst(6)), colors.indices.contains(n) { colorIndex = n; rainbow = false; erasing = false }
+        if action == "rainbow" { rainbow.toggle(); erasing = false }
+        if action == "eraser" { erasing.toggle() }
         if action == "mood" { mood = mood.next; updateRoomMood() }
         if action.hasPrefix("size-"), let n = Int(action.dropFirst(5)), radii.indices.contains(n) { sizeIndex = n }
         if action == "room" || action == "home" {

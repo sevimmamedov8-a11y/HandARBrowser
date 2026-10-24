@@ -12,10 +12,11 @@ final class GraffitiProps {
         let halfSize: SIMD3<Float>
         let color: Int?
         let sound: GraffitiSound
+        let ball: Bool
         let marker: SCNNode
         var flight: GraffitiFlight?
         var lastImpact = -Double.infinity
-        var radius: Float { simd_length(halfSize) }
+        var radius: Float { ball ? halfSize.x : simd_length(halfSize) }
     }
     private struct Slot {
         var gate = GraffitiGrabGate()
@@ -37,11 +38,11 @@ final class GraffitiProps {
         return material
     }()
     var onPickColor: ((Int) -> Void)?
-    var onInteraction: ((GraffitiSound) -> Void)?
+    var onInteraction: ((GraffitiSound, Float) -> Void)?
     var onHint: ((String) -> Void)?
 
     @discardableResult
-    func add(parts: [SCNNode], name: String, center: SCNVector3, halfSize: SIMD3<Float>, color: Int? = nil, sound: GraffitiSound = .wood, in room: SCNNode) -> SCNNode {
+    func add(parts: [SCNNode], name: String, center: SCNVector3, halfSize: SIMD3<Float>, color: Int? = nil, sound: GraffitiSound = .wood, ball: Bool = false, in room: SCNNode) -> SCNNode {
         let group = SCNNode()
         for part in parts {
             part.position = SCNVector3(part.position.x-center.x, part.position.y-center.y, part.position.z-center.z)
@@ -57,7 +58,7 @@ final class GraffitiProps {
                              length: CGFloat(halfSize.z*2+0.035), chamferRadius: 0.025)
         outline.firstMaterial = highlightMaterial
         let marker = SCNNode(geometry: outline); marker.isHidden = true; node.addChildNode(marker)
-        items.append(Item(node: node, name: name, home: SIMD3(center.x, center.y, center.z), halfSize: halfSize, color: color, sound: sound, marker: marker))
+        items.append(Item(node: node, name: name, home: SIMD3(center.x, center.y, center.z), halfSize: halfSize, color: color, sound: sound, ball: ball, marker: marker))
         return node
     }
 
@@ -137,12 +138,12 @@ final class GraffitiProps {
             if let ray { move(id, slot: &slot, ray: ray, orientation: orientation, elapsed: 0) }
             if let color = items[id].color { onPickColor?(color) }
             onHint?("\(items[id].name) · держи ладонь открытой 2 с для отпускания")
-            onInteraction?(.grab)
+            onInteraction?(.grab, 0.7)
         case .released(let id):
             let velocity = GraffitiFlight.capped(slot.velocity, at: 5)
             let e = items[id].node.eulerAngles
             items[id].flight = GraffitiFlight(position: items[id].node.simdPosition, velocity: velocity,
-                angles: SIMD3(e.x,e.y,e.z), spin: GraffitiFlight.capped(SIMD3(velocity.z,velocity.x*0.3,-velocity.x)*1.8, at: 8))
+                angles: SIMD3(e.x,e.y,e.z), spin: GraffitiFlight.releaseSpin(velocity: velocity, hand: hand))
             slot.previousPosition = nil; slot.velocity = .zero
             onHint?("Отпущено · закрой руку в стороне от вещей перед рисованием")
         case .cancelled(let id): settle(id)
@@ -183,15 +184,15 @@ final class GraffitiProps {
             var obstacles = [bench,lounge]
             for other in items.indices where other != index && left.gate.held != other && right.gate.held != other {
                 let node = items[other].node, e = node.eulerAngles
-                let half = GraffitiFlight.extent(half: items[other].halfSize, angles: SIMD3(e.x,e.y,e.z))
+                let half = items[other].ball ? items[other].halfSize : GraffitiFlight.extent(half: items[other].halfSize, angles: SIMD3(e.x,e.y,e.z))
                 obstacles.append(GraffitiCollider(center: node.simdPosition, half: half))
             }
-            let impact = flight.step(elapsed, halfSize: items[index].halfSize, obstacles: obstacles)
+            let impact = flight.step(elapsed, halfSize: items[index].halfSize, obstacles: obstacles, ball: items[index].ball)
             items[index].node.simdPosition = flight.position
             items[index].node.eulerAngles = SCNVector3(flight.angles.x,flight.angles.y,flight.angles.z)
             items[index].flight = flight
             if impact > 0.6 && time-items[index].lastImpact > 0.12 {
-                items[index].lastImpact = time; onInteraction?(items[index].sound)
+                items[index].lastImpact = time; onInteraction?(items[index].sound, min(1, 0.18+impact*0.14))
             }
         }
     }

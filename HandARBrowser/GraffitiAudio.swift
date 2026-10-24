@@ -25,6 +25,7 @@ final class GraffitiAudio {
     private var foreground = true
     private var sprayStartedAt: Double?
     private var variation = 0
+    private var brushing = false, erasing = false
     private(set) var enabled = !UserDefaults.standard.bool(forKey: "graffiti.sound.muted")
     private(set) var level: Int = {
         let value = UserDefaults.standard.object(forKey: "graffiti.sound.level") as? Int ?? 1
@@ -87,14 +88,18 @@ final class GraffitiAudio {
             play(.sprayEnd, intensity: Float(min(0.7,0.25+duration)), at: time)
         }
     }
-    func setErasing(_ erasing: Bool) {
+    func setBrushing(_ value: Bool) { brushing = value; updateRubbing() }
+    func setErasing(_ value: Bool) { erasing = value; updateRubbing() }
+    private func updateRubbing() {
         guard let player = players[.erase]?.first else { return }
-        if erasing && enabled && !interrupted && foreground {
-            if !player.isPlaying { player.volume = 0; player.play(); player.setVolume(volume*0.32, fadeDuration: 0.06) }
-        } else { player.setVolume(0, fadeDuration: 0); player.pause(); player.currentTime = 0 }
+        if (erasing || brushing) && enabled && !interrupted && foreground {
+            let gain: Float = erasing ? 0.32 : 0.12
+            if !player.isPlaying { player.volume = 0; player.play() }
+            player.setVolume(volume*gain,fadeDuration:0.06)
+        } else { player.setVolume(0,fadeDuration:0); player.pause(); player.currentTime = 0 }
     }
     func stop() {
-        sprayStartedAt = nil
+        sprayStartedAt = nil; brushing = false; erasing = false
         for voices in players.values { for player in voices { player.setVolume(0, fadeDuration: 0); player.pause(); player.currentTime = 0 } }
         lastPlayed.removeAll()
     }
@@ -116,7 +121,7 @@ final class GraffitiAudio {
             if sound == .spray, let start = sprayStartedAt {
                 let remaining = max(0,0.55-(ProcessInfo.processInfo.systemUptime-start))
                 player.setVolume(volume*0.6, fadeDuration: remaining)
-            } else { player.volume = volume*(sound == .erase ? 0.32 : (sound == .spray ? 0.1 : 1)) }
+            } else { player.volume = volume*(sound == .erase ? (erasing ? 0.32 : 0.12) : (sound == .spray ? 0.1 : 1)) }
         } }
     }
 }

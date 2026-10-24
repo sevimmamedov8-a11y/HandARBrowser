@@ -32,6 +32,7 @@ final class Audio {
  func play(_ sound: GraffitiSound) { if enabled { onPlay?() } }
  func setSpraying(_ value: Bool) {}
  func setErasing(_ value: Bool) {}
+ func setBrushing(_ value: Bool) {}
  func toggle() { enabled.toggle() }
  func nextVolume() { volumeTitle = "85%" }
  func resetSettings() { enabled = true;volumeTitle = "55%" }
@@ -72,6 +73,9 @@ final class Canvas {
     func restore(_ image: Int) { dirty = true }
 }
 final class Harness {
+    var lastSaveAt = -Double.infinity, brushSoundAt = -Double.infinity
+    func saveRoom(force: Bool = false) {}
+    func cancelBrushes() {}
     var isRunning = true, aligned = true, paletteOpen = false, uiBlocked = false
     var preferences = GraffitiPreferences(), settingsPage = false, roomSettingsApplied = 0
     let audio = Audio(), radio = Radio(), radioStatus = Text(), radioButton = Button("radio-world")

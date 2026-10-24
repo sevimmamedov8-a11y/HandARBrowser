@@ -107,7 +107,12 @@ tests = r'''
   audio.setSpraying(false,at:101.1);audio.setErasing(true)
   let erase = AVAudioPlayer.all.first { $0.name == "erase" }!
   check(erase.isPlaying && !spray.isPlaying,"eraser uses a separate rubbing loop")
+  audio.setBrushing(false);check(erase.isPlaying,"idle brush watchdog cannot stop an active eraser")
   audio.setErasing(false);check(!erase.isPlaying,"eraser stops on release")
+  audio.setBrushing(true);let rubbingStarts = erase.plays
+  audio.setErasing(false);audio.setBrushing(true)
+  check(erase.isPlaying && erase.plays == rubbingStarts && erase.volume < 0.2,"brush rub is quiet and survives the spray watchdog without restarting")
+  audio.setBrushing(false);check(!erase.isPlaying,"leaving brush contact stops rubbing")
   audio.play(.rubber,intensity:0.2,at:200);let ballSounds = AVAudioPlayer.all.filter { $0.name == "rubber" }
   let quiet = ballSounds.first { $0.isPlaying }!.volume
   audio.play(.rubber,intensity:0.9,at:201)
@@ -132,7 +137,8 @@ with tempfile.TemporaryDirectory(prefix='handar-audio-') as directory:
 studio = (root/'HandARBrowser/GraffitiStudio.swift').read_text(encoding='utf-8')
 assert 'paintingHand = nil; audio.setSpraying(false)' in studio
 assert studio.index('hit.canvas.spray(') < studio.index('audio.setSpraying(!erasing)')
-assert 'cancelInput()\n        audio.stop()' in studio
+stop = studio[studio.index('    func stop() {'):studio.index('    func update(anchor:')]
+assert stop.index('cancelInput()') < stop.index('saveRoom(force:true)') < stop.index('audio.stop()')
 assert 'sound: .metal' in studio and 'sound: .plastic' in studio and 'sound: .soft' in studio
 project = (root/'HandARBrowser.xcodeproj/project.pbxproj').read_text(encoding='utf-8')
 assert project.count('/* GraffitiAudio.swift in Sources */') == 2

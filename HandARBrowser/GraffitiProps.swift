@@ -13,6 +13,7 @@ final class GraffitiProps {
         let color: Int?
         let sound: GraffitiSound
         let ball: Bool
+        let brushRadius: Double?
         let marker: SCNNode
         var flight: GraffitiFlight?
         var lastImpact = -Double.infinity
@@ -38,11 +39,12 @@ final class GraffitiProps {
         return material
     }()
     var onPickColor: ((Int) -> Void)?
+    var onPickBrush: (() -> Void)?
     var onInteraction: ((GraffitiSound, Float) -> Void)?
     var onHint: ((String) -> Void)?
 
     @discardableResult
-    func add(parts: [SCNNode], name: String, center: SCNVector3, halfSize: SIMD3<Float>, color: Int? = nil, sound: GraffitiSound = .wood, ball: Bool = false, in room: SCNNode) -> SCNNode {
+    func add(parts: [SCNNode], name: String, center: SCNVector3, halfSize: SIMD3<Float>, color: Int? = nil, sound: GraffitiSound = .wood, ball: Bool = false, brushRadius: Double? = nil, in room: SCNNode) -> SCNNode {
         let group = SCNNode()
         for part in parts {
             part.position = SCNVector3(part.position.x-center.x, part.position.y-center.y, part.position.z-center.z)
@@ -58,7 +60,7 @@ final class GraffitiProps {
                              length: CGFloat(halfSize.z*2+0.035), chamferRadius: 0.025)
         outline.firstMaterial = highlightMaterial
         let marker = SCNNode(geometry: outline); marker.isHidden = true; node.addChildNode(marker)
-        items.append(Item(node: node, name: name, home: SIMD3(center.x, center.y, center.z), halfSize: halfSize, color: color, sound: sound, ball: ball, marker: marker))
+        items.append(Item(node: node, name: name, home: SIMD3(center.x, center.y, center.z), halfSize: halfSize, color: color, sound: sound, ball: ball, brushRadius: brushRadius, marker: marker))
         return node
     }
 
@@ -71,6 +73,33 @@ final class GraffitiProps {
     func isHeld(_ node: SCNNode?) -> Bool {
         guard let node, let id = items.firstIndex(where: { $0.node === node }) else { return false }
         return left.gate.held == id || right.gate.held == id
+    }
+
+    func savedState() -> [GraffitiPropSave] {
+        items.enumerated().map { index, item in
+            let e = item.node.eulerAngles
+            let held = left.gate.held == index || right.gate.held == index
+            return GraffitiPropSave(id:"\(item.name)#\(index)",position:item.node.simdPosition,
+                angles:SIMD3(e.x,e.y,e.z),free:item.flight != nil || held,moving:held || item.flight?.resting == false)
+        }
+    }
+    func restore(_ states: [GraffitiPropSave]) {
+        cancel()
+        for (index,item) in items.enumerated() {
+            guard let state = states.first(where: { $0.id == "\(item.name)#\(index)" }), state.valid else { continue }
+            item.node.simdPosition = state.position
+            item.node.eulerAngles = SCNVector3(state.angles.x,state.angles.y,state.angles.z)
+            if state.free {
+                var flight = GraffitiFlight(position:state.position,velocity:.zero,angles:state.angles,spin:.zero)
+                flight.resting = !state.moving; items[index].flight = flight
+            } else { items[index].flight = nil }
+        }
+    }
+    func brushTip(_ hand: TrackedHand) -> (position: SIMD3<Float>, radius: Double)? {
+        let slot = hand == .left ? left : right
+        guard let index = slot.gate.held, let radius = items[index].brushRadius, slot.gate.releaseProgress == 0 else { return nil }
+        let tip = items[index].node.convertPosition(SCNVector3(0,0.185,0), to:nil)
+        return (SIMD3(tip.x,tip.y,tip.z),radius)
     }
 
     private func settle(_ index: Int) {
@@ -111,6 +140,10 @@ final class GraffitiProps {
         let reliable = ready && ray != nil && generation != nil
         let elapsed = time-slot.lastSeen
         if let held = slot.gate.held, let ray, reliable {
+            if items[held].brushRadius != nil {
+                let reach = max(0.25,min(0.9,distance))
+                slot.reach += (reach-slot.reach)*min(1,Float(max(0,elapsed))*12)
+            }
             move(held, slot: &slot, ray: ray, orientation: orientation, elapsed: elapsed)
         }
         if reliable { slot.lastSeen = time }
@@ -137,6 +170,7 @@ final class GraffitiProps {
             slot.previousPosition = nil; slot.velocity = .zero
             if let ray { move(id, slot: &slot, ray: ray, orientation: orientation, elapsed: 0) }
             if let color = items[id].color { onPickColor?(color) }
+            if items[id].brushRadius != nil { onPickBrush?() }
             onHint?("\(items[id].name) · держи ладонь открытой 2 с для отпускания")
             onInteraction?(.grab, 0.7)
         case .released(let id):
@@ -159,7 +193,8 @@ final class GraffitiProps {
 
     private func move(_ id: Int, slot: inout Slot, ray: WorldRay, orientation: simd_quatf, elapsed: Double) {
         items[id].node.simdWorldPosition = ray.point(at: slot.reach)
-        items[id].node.simdWorldOrientation = orientation
+        items[id].node.simdWorldOrientation = items[id].brushRadius != nil
+            ? simd_quatf(from:SIMD3(0,1,0),to:ray.direction) : orientation
         let position = items[id].node.simdPosition
         if let previous = slot.previousPosition, elapsed > 0.005, elapsed <= 0.2,
            simd_length(position-previous) < 0.45 {

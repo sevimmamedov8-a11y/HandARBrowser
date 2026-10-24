@@ -21,7 +21,7 @@ shim = r'''
 import Foundation
 typealias SCNVector3 = SIMD3<Float>
 let SCNVector3Zero = SCNVector3.zero
-struct simd_quatf {}
+struct simd_quatf { var up = SIMD3<Float>(0,1,0); init() {}; init(from:SIMD3<Float>,to:SIMD3<Float>) { up = to } }
 func simd_length(_ v: SIMD3<Float>) -> Float { sqrt(v.x*v.x+v.y*v.y+v.z*v.z) }
 struct WorldRay { let origin: SIMD3<Float>, direction: SIMD3<Float>; func point(at t: Float) -> SIMD3<Float> { origin+direction*t } }
 struct UIColor: Hashable {
@@ -96,6 +96,7 @@ class SCNNode {
  init(geometry: Geometry? = nil) { self.geometry = geometry }
  func addChildNode(_ node: SCNNode) { node.removeFromParentNode();childNodes.append(node);node.parent = self }
  func removeFromParentNode() { parent?.childNodes.removeAll { $0 === self }; parent = nil }
+ func convertPosition(_ point:SCNVector3,to node:SCNNode?) -> SCNVector3 { simdWorldPosition+simdWorldOrientation.up*point.y+SIMD3(point.x,0,point.z) }
  func flattenedClone() -> SCNNode { flattened = true;return self }
  func runAction(_ action: SCNAction) { animated = true }
 }
@@ -242,6 +243,28 @@ tests = r'''
   check(!ballHits.isEmpty && ballHits.allSatisfy { $0>0 && $0<=1 },"actual ball produces scaled rubber impact sounds")
   check(abs(ballNode.simdPosition.y-(GraffitiRoomLayout.floorY+0.028+0.111))<0.002,"actual ball keeps spherical height after falling and rotating")
   check(ballNode.eulerAngles != .zero,"actual released object rotates even with a stationary hand")
+  let paintTools = GraffitiProps(), toolRoom = SCNNode()
+  toolRoom.simdPosition = SIMD3(3,0,0)
+  let toolNode = paintTools.add(parts:[SCNNode()],name:"brush",center:SCNVector3(-3,0,-2),halfSize:SIMD3(0.02,0.19,0.02),brushRadius:0.003,in:toolRoom)
+  for i in 0...6 { paintTools.update(hand:.left,generation:1,fist:true,open:false,ray:rayA,distance:0.5,
+     orientation:simd_quatf(),blocked:false,ready:true,at:Double(i)*0.04) }
+  let tip = paintTools.brushTip(.left)!
+  check(tip.radius == 0.003 && abs(tip.position.z-(toolNode.simdWorldPosition.z-0.185))<0.0001,"actual held brush points its bristles along the palm ray")
+  check(paintTools.brushTip(.right) == nil,"other hand cannot paint with this brush")
+  let oldDepth = tip.position.z
+  for i in 7...20 { paintTools.update(hand:.left,generation:1,fist:true,open:false,ray:rayA,distance:0.85,
+     orientation:simd_quatf(),blocked:false,ready:true,at:Double(i)*0.04) }
+  check(paintTools.brushTip(.left)!.position.z < oldDepth-0.2,"extending the hand moves brush tip toward wall")
+  for i in 21...22 { paintTools.update(hand:.left,generation:1,fist:false,open:true,ray:rayA,distance:0.85,
+     orientation:simd_quatf(),blocked:false,ready:true,at:Double(i)*0.04) }
+  check(paintTools.brushTip(.left) == nil,"release countdown disables brush contact before the object drops")
+  paintTools.cancel()
+  let savedTools = paintTools.savedState()
+  toolNode.position = .zero;paintTools.restore(savedTools)
+  check(paintTools.savedState() == savedTools,"prop save and restore preserve local pose under translated room")
+  let savedRoom = h.props.savedState()
+  h.props.reset();h.props.restore(savedRoom)
+  check(h.props.savedState() == savedRoom,"all sixteen room objects restore their transforms and motion state")
   print("PASS: \(count) production graffiti room bounds, free painting space, prop budget and material checks")
  }
 }
@@ -249,8 +272,8 @@ tests = r'''
 with tempfile.TemporaryDirectory(prefix='handar-room-') as directory:
     script = Path(directory)/'room.swift'
     script.write_text(shim.replace('final class Harness {', props_class + '\nfinal class Harness {') + '\n'.join(method(name) for name in ('material', 'box', 'buildRoomDecor', 'buildCan', 'updateRoomMood', 'paintColor', 'applyRoomSettings')) + tests, encoding='utf-8')
-    run_swift_sources([root/'HandARBrowser/HandGesture.swift', root/'HandARBrowser/GraffitiState.swift', root/'HandARBrowser/GraffitiAudio.swift', root/'HandARBrowser/GraffitiPhysics.swift', script])
+    run_swift_sources([root/'HandARBrowser/HandGesture.swift', root/'HandARBrowser/GraffitiState.swift', root/'HandARBrowser/GraffitiAudio.swift', root/'HandARBrowser/GraffitiPhysics.swift', root/'HandARBrowser/GraffitiRoomSave.swift', script])
 
-assert 'textureWidth: 2048' in source
+assert 'textureWidth: 4096' in source
 assert 'sculptureMaterial.diffuse.contents = colors[colorIndex].1' in source
 assert 't < GraffitiRoomLayout.maximumPaintDistance' in source

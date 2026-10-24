@@ -21,6 +21,7 @@ shim = r'''
 import Foundation
 import CoreGraphics
 import CoreFoundation
+import ImageIO
 struct UIColor {
  let cgColor: CGColor
  init(_ r: CGFloat, _ g: CGFloat, _ b: CGFloat, _ a: CGFloat = 1) { cgColor = CGColor(srgbRed:r,green:g,blue:b,alpha:a) }
@@ -46,6 +47,8 @@ final class SCNNode {
 tests = r'''
 import Foundation
 import CoreGraphics
+import ImageIO
+import CoreFoundation
 @main struct Tests {
  static func main() {
   var count = 0
@@ -73,6 +76,22 @@ import CoreGraphics
    check(pixel(canvas.snapshot()!,135) == pixel(original,135),"eraser works inside tracked wall boundary")
    check(pixel(canvas.snapshot()!,121) == pixel(painted,121),"eraser cannot cross tracked wall boundary")
   }
+  let detail = GraffitiCanvas(size:SIMD2(2,2),base:UIColor(0,0,0,0),textureWidth:256)
+  check(detail.imageForSave() == nil && detail.revision == 0,"untouched wall does not allocate a bitmap for saves")
+  detail.spray(points:[.zero],radius:0.025,color:UIColor(0,0,1),clip:nil,flow:1,hardEdge:true,brush:true)
+  let image = detail.snapshot()!
+  check(pixel(image)[3] == 255 && pixel(image)[2] == 255,"physical brush produces dense ink rather than spray haze")
+  check(pixel(image,136)[3] == 0,"fine brush leaves surrounding pixels untouched")
+  let bytes = NSMutableData()
+  let destination = CGImageDestinationCreateWithData(bytes as CFMutableData,"public.png" as CFString,1,nil)!
+  CGImageDestinationAddImage(destination,image,nil)
+  check(CGImageDestinationFinalize(destination),"PNG snapshot encodes")
+  let source = CGImageSourceCreateWithData(bytes as CFData,nil)!
+  let decoded = CGImageSourceCreateImageAtIndex(source,0,nil)!
+  let restored = GraffitiCanvas(size:SIMD2(2,2),base:UIColor(0,0,0,0),textureWidth:256)
+  restored.restore(decoded)
+  check(pixel(restored.snapshot()!) == pixel(image),"brush ink survives PNG encode, decode and canvas restore")
+  check(detail.revision == 1 && restored.revision == 1,"changes and restores advance save revisions")
   print("PASS: \(count) production CoreGraphics paint, eraser, transparency, clipping and undo checks")
  }
 }

@@ -1,4 +1,5 @@
 import ARKit
+import ImageIO
 import SceneKit
 import UIKit
 import simd
@@ -13,6 +14,8 @@ private final class GraffitiCanvas {
     private let height: Int
     private var context: CGContext?
     private(set) var dirty = false
+    private(set) var revision: UInt64 = 0
+    func imageForSave() -> CGImage? { context?.makeImage() }
 
     init(size: SIMD2<Double>, base: UIColor, textureWidth: Int = 1024) {
         self.size = size; self.base = base
@@ -46,10 +49,10 @@ private final class GraffitiCanvas {
         guard let context = bitmap() else { return }
         let rect = CGRect(x: 0, y: 0, width: width, height: height)
         context.clear(rect); context.draw(image, in: rect)
-        dirty = true
+        dirty = true; revision &+= 1
     }
 
-    func spray(points: [SIMD2<Double>], radius: Double, color: UIColor, clip: [SIMD2<Double>]?, flow: Double, hardEdge: Bool, erasing: Bool = false) {
+    func spray(points: [SIMD2<Double>], radius: Double, color: UIColor, clip: [SIMD2<Double>]?, flow: Double, hardEdge: Bool, erasing: Bool = false, brush: Bool = false) {
         guard let context = bitmap(), !points.isEmpty else { return }
         let scale = Double(width) / size.x
         func pixel(_ p: SIMD2<Double>) -> CGPoint {
@@ -70,7 +73,16 @@ private final class GraffitiCanvas {
                 let center = pixel(point)
                 context.fillEllipse(in: CGRect(x:center.x-r,y:center.y-r,width:2*r,height:2*r))
             }
-            context.restoreGState(); dirty = true; return
+            context.restoreGState(); dirty = true; revision &+= 1; return
+        }
+        if brush {
+            context.setFillColor(color.cgColor)
+            let r = CGFloat(radius*scale)
+            for point in points {
+                let center = pixel(point)
+                context.fillEllipse(in:CGRect(x:center.x-r,y:center.y-r,width:2*r,height:2*r))
+            }
+            context.restoreGState(); dirty = true; revision &+= 1; return
         }
         let colors = [color.withAlphaComponent(CGFloat(0.28*flow)).cgColor, color.withAlphaComponent(CGFloat((hardEdge ? 0.25 : 0.10)*flow)).cgColor,
                       color.withAlphaComponent(0).cgColor] as CFArray
@@ -81,7 +93,7 @@ private final class GraffitiCanvas {
                     endCenter: center, endRadius: CGFloat(radius * scale), options: [])
             }
         }
-        context.restoreGState(); dirty = true
+        context.restoreGState(); dirty = true; revision &+= 1
     }
 
     func upload() {
@@ -98,6 +110,17 @@ final class GraffitiStudio {
     private let sculptureMaterial = SCNMaterial()
     private let props = GraffitiProps(), floorGrid = SCNNode()
     private let audio = GraffitiAudio()
+    private let roomStore = GraffitiRoomStore()
+    private let saveQueue = DispatchQueue(label:"HandAR.graffiti.save",qos:.utility)
+    private let saveStatus = CineText()
+    private var saveSession = UUID(), pendingSaves = 0
+    private var saveAllowed = true, lastSaveAt = -Double.infinity
+    private var savedProgress: GraffitiRoomProgress?
+    private var savedRevisions: [UInt64] = []
+    private var encodedWalls = [Data](repeating:Data(),count:4)
+    private var leftBrush = GraffitiBrushContact(), rightBrush = GraffitiBrushContact()
+    private var brushSoundAt = -Double.infinity
+    private var backgroundObserver: NSObjectProtocol?
     private var roomSculpture: SCNNode?
     private var preferences = GraffitiPreferences.load()
     private var settingsPage = false
@@ -156,18 +179,25 @@ final class GraffitiStudio {
         paletteButton.node.position = SCNVector3(0.59, -0.30, -1.15)
         status.position = SCNVector3(0, -0.86, -1.5)
         buildPalette(); buildCan()
+        backgroundObserver = NotificationCenter.default.addObserver(forName:UIApplication.didEnterBackgroundNotification,object:nil,queue:.main) { [weak self] _ in
+            guard let self, self.isRunning else { return }
+            self.cancelInput(); self.saveRoom(force:true)
+        }
         radio.onChange = { [weak self] in self?.updateRadioControls() }
         props.onPickColor = { [weak self] color in
             guard let self else { return }
             self.colorIndex = color; self.rainbow = false; self.erasing = false; self.updateSelection()
         }
         props.onHint = { [weak self] text in self?.setHint(text) }
+        props.onPickBrush = { [weak self] in self?.erasing = false; self?.updateSelection() }
         props.onInteraction = { [weak self] sound, intensity in self?.audio.play(sound, intensity: intensity) }
         let target = SCNTorus(ringRadius: 0.018, pipeRadius: 0.002)
         target.firstMaterial = material(.white)
         aim.geometry = target; aim.eulerAngles.x = .pi / 2
         aim.isHidden = true
     }
+
+    deinit { if let backgroundObserver { NotificationCenter.default.removeObserver(backgroundObserver) } }
 
     private func material(_ color: UIColor) -> SCNMaterial {
         let m = SCNMaterial(); m.lightingModel = .constant; m.diffuse.contents = color
@@ -202,7 +232,7 @@ final class GraffitiStudio {
     }
 
     private func buildPalette() {
-        box(SCNVector3(1.12, 1.38, 0.035), at: SCNVector3(0, -0.04, -1.36),
+        box(SCNVector3(1.12, 1.52, 0.035), at: SCNVector3(0, -0.10, -1.36),
             color: UIColor(red: 0.06, green: 0.08, blue: 0.12, alpha: 0.97), parent: panel)
         func button(_ id: String, _ title: String, _ x: Float, _ y: Float, _ color: UIColor = .darkGray, width: Float = 0.25) {
             let b = CineButton(title: title, color: color, width: width, height: 0.14)
@@ -243,6 +273,8 @@ final class GraffitiStudio {
             ("setting-sound", "Звук: вкл"), ("setting-volume", "Громкость: 55%")].enumerated() {
             button(entry.0, entry.1, index % 2 == 0 ? -0.27 : 0.27, 0.32-Float(index/2)*0.19, width: 0.49)
         }
+        saveStatus.constraints = []; saveStatus.position = SCNVector3(0,-0.77,-1.30)
+        panel.addChildNode(saveStatus); setSaveStatus("Комната сохраняется на iPhone")
         panel.isHidden = true
     }
 
@@ -321,10 +353,10 @@ final class GraffitiStudio {
             decor.addChildNode(node)
         }
         @discardableResult
-        func movable(_ start: Int, _ name: String, _ center: SCNVector3, _ halfSize: SIMD3<Float>, color: Int? = nil, sound: GraffitiSound = .wood) -> SCNNode {
+        func movable(_ start: Int, _ name: String, _ center: SCNVector3, _ halfSize: SIMD3<Float>, color: Int? = nil, sound: GraffitiSound = .wood, brushRadius: Double? = nil) -> SCNNode {
             let parts = Array(decor.childNodes.dropFirst(start))
             for part in parts { part.geometry?.firstMaterial?.lightingModel = .lambert }
-            return props.add(parts: parts, name: name, center: center, halfSize: halfSize, color: color, sound: sound, in: room)
+            return props.add(parts: parts, name: name, center: center, halfSize: halfSize, color: color, sound: sound, brushRadius: brushRadius, in: room)
         }
         // Fine grain in the five wooden worktop boards, flattened with the bench.
         for board in 0..<5 { for line in 0..<7 {
@@ -417,7 +449,7 @@ final class GraffitiStudio {
             cylinder(0.016, 0.24, SCNVector3(x, 0.46, (rear + 3.855)), colors[index].1)
             box(SCNVector3(0.045, 0.065, 0.03), at: SCNVector3(x, 0.60, (rear + 3.855)), color: metal, parent: decor)
             box(SCNVector3(0.045, 0.08, 0.03), at: SCNVector3(x, 0.67, (rear + 3.855)), color: UIColor(white: 0.76, alpha: 1), parent: decor)
-            movable(start, "Кисть", SCNVector3(x, 0.525, rear + 3.855), SIMD3(0.024, 0.19, 0.018), sound: .soft)
+            movable(start, "Кисть", SCNVector3(x, 0.525, rear + 3.855), SIMD3(0.024, 0.19, 0.018), sound: .soft, brushRadius: [0.003,0.006,0.010][index])
         }
         // A skateboard resting in the rear corner, clear of the painting wall.
         let skateStart = decor.childNodes.count
@@ -544,6 +576,8 @@ final class GraffitiStudio {
 
     func start(in scene: SCNScene, head: SCNNode) {
         stop()
+        saveSession = UUID(); pendingSaves = 0; saveAllowed = true; lastSaveAt = -.infinity
+        savedProgress = nil; savedRevisions = []; encodedWalls = [Data](repeating:Data(),count:4)
         isRunning = true; aligned = false; mode = .room
         sprayGate = GraffitiSprayGate(); colorIndex = 0; sizeIndex = 1
         rainbow = false; erasing = false; mood = .neon
@@ -566,13 +600,15 @@ final class GraffitiStudio {
         let half = GraffitiRoomLayout.span * 0.5
         for index in 0..<4 {
             let size = SIMD2(Double(GraffitiRoomLayout.span), Double(GraffitiRoomLayout.wallHeight))
-            let canvas = GraffitiCanvas(size: size, base: UIColor(white: 0.80 - CGFloat(index) * 0.025, alpha: 1), textureWidth: 2048)
+            let canvas = GraffitiCanvas(size: size, base: UIColor(white: 0.80 - CGFloat(index) * 0.025, alpha: 1), textureWidth: 4096)
             let angle = Float(index) * .pi / 2
             canvas.node.position = SCNVector3(-sin(angle) * half, GraffitiRoomLayout.wallCenterY, -cos(angle) * half)
             canvas.node.eulerAngles.y = angle
             room.addChildNode(canvas.node); roomCanvases.append(canvas)
         }
         buildRoomDecor()
+        restoreRoom()
+        updateSelection()
         recenterControls(head: head)
         setHint("Открой ладонь — рисовать · «Цвет» — палитра")
     }
@@ -588,6 +624,7 @@ final class GraffitiStudio {
 
     func stop() {
         cancelInput()
+        saveRoom(force:true)
         audio.stop(); radio.stop()
         for anchor in paintAnchors { onRemoveAnchor?(anchor) }
         paintAnchors.removeAll()
@@ -603,6 +640,108 @@ final class GraffitiStudio {
         canvasAnchors[anchor.identifier]?.node.simdWorldTransform = anchor.transform
     }
 
+    private func setSaveStatus(_ text: String) {
+        saveStatus.setText(text); saveStatus.fitWidth(1.02)
+    }
+
+    private func restoreRoom() {
+        do {
+            guard let saved = try saveQueue.sync(execute: { try roomStore.load() }) else {
+                setSaveStatus("Автосохранение комнаты включено"); return
+            }
+            var images: [Int: CGImage] = [:]
+            for (index,data) in saved.walls.enumerated() where !data.isEmpty {
+                guard let source = CGImageSourceCreateWithData(data as CFData,nil),
+                      let properties = CGImageSourceCopyPropertiesAtIndex(source,0,nil) as? [String:Any],
+                      let width = properties[kCGImagePropertyPixelWidth as String] as? NSNumber,
+                      let height = properties[kCGImagePropertyPixelHeight as String] as? NSNumber,
+                      width.intValue > 0, width.intValue <= 4096, height.intValue > 0, height.intValue <= 4096,
+                      let image = CGImageSourceCreateImageAtIndex(source,0,nil) else { throw GraffitiRoomStore.Failure.invalid }
+                images[index] = image
+            }
+            for (index,image) in images { roomCanvases[index].restore(image); roomCanvases[index].upload() }
+            let progress = saved.progress
+            props.restore(progress.props); colorIndex = progress.color; sizeIndex = progress.size
+            mood = GraffitiRoomMood(rawValue:progress.mood) ?? .neon
+            rainbow = progress.rainbow; erasing = progress.erasing
+            updateRoomMood(); applyRoomSettings()
+            encodedWalls = saved.walls; savedProgress = progress; savedRevisions = roomCanvases.map(\.revision)
+            setSaveStatus("Комната восстановлена")
+        } catch {
+            // Preserve an unreadable save instead of overwriting it with blanks.
+            saveAllowed = false; setSaveStatus("Ошибка загрузки · сохранение защищено от перезаписи")
+        }
+    }
+
+    func saveRoom(force: Bool = false) {
+        guard isRunning, aligned, roomCanvases.count == 4, saveAllowed, force || pendingSaves == 0 else { return }
+        let progress = GraffitiRoomProgress(props:props.savedState(),color:colorIndex,size:sizeIndex,mood:mood.rawValue,
+            rainbow:rainbow,erasing:erasing)
+        let revisions = roomCanvases.map(\.revision)
+        guard force || progress != savedProgress || revisions != savedRevisions else { return }
+        var images: [Int:CGImage] = [:]
+        for (index,canvas) in roomCanvases.enumerated() where canvas.revision != (savedRevisions.indices.contains(index) ? savedRevisions[index] : 0) {
+            guard let image = canvas.imageForSave() else { setSaveStatus("Не удалось сохранить рисунок · повторю"); return }
+            images[index] = image
+        }
+        let previous = encodedWalls, session = saveSession, store = roomStore
+        let imagesToSave = images
+        pendingSaves += 1; setSaveStatus("Сохраняю комнату…")
+        let task = UIApplication.shared.beginBackgroundTask(withName:"Save graffiti room",expirationHandler:nil)
+        saveQueue.async { [weak self] in
+            var walls = previous
+            var success = false
+            do {
+                for (index,image) in imagesToSave {
+                    let bytes = NSMutableData()
+                    guard let destination = CGImageDestinationCreateWithData(bytes as CFMutableData,"public.png" as CFString,1,nil) else { throw GraffitiRoomStore.Failure.invalid }
+                    CGImageDestinationAddImage(destination,image,nil)
+                    guard CGImageDestinationFinalize(destination) else { throw GraffitiRoomStore.Failure.invalid }
+                    walls[index] = bytes as Data
+                }
+                try store.write(GraffitiRoomArchive(progress:progress,walls:walls)); success = true
+            } catch { success = false }
+            let result = success, savedWalls = walls
+            DispatchQueue.main.async {
+                if task != .invalid { UIApplication.shared.endBackgroundTask(task) }
+                guard let self, self.saveSession == session else { return }
+                self.pendingSaves = max(0,self.pendingSaves-1)
+                if result {
+                    self.encodedWalls = savedWalls; self.savedProgress = progress; self.savedRevisions = revisions
+                }
+                self.setSaveStatus(result ? "Сохранено на iPhone" : "Ошибка сохранения · повторю автоматически")
+            }
+        }
+    }
+
+    private func cancelBrushes() {
+        leftBrush.cancel(); rightBrush.cancel(); brushSoundAt = -.infinity; audio.setBrushing(false)
+    }
+
+    private func updateBrush(hand: TrackedHand, allowed: Bool, at time: Double) {
+        var contact = hand == .left ? leftBrush : rightBrush
+        defer { if hand == .left { leftBrush = contact } else { rightBrush = contact } }
+        guard allowed, let brush = props.brushTip(hand) else { contact.cancel(); return }
+        var best: (index:Int, point:SIMD2<Double>, depth:Double)?
+        for (index,canvas) in roomCanvases.enumerated() {
+            let p = canvas.node.simdWorldTransform.inverse * SIMD4(brush.position,1)
+            let point = SIMD2(Double(p.x),Double(p.y))
+            guard GraffitiGeometry.uv(point:point,size:canvas.size) != nil, p.z >= -0.015, p.z <= 0.045 else { continue }
+            if best == nil || abs(Double(p.z)) < abs(best!.depth) { best = (index,point,Double(p.z)) }
+        }
+        guard let hit = best else { contact.cancel(); setHint("Поднеси кончик кисти к стене · раскрыть ладонь на 2 с — отпустить"); return }
+        let stroke = contact.update(wall:hit.index,point:hit.point,depth:hit.depth,radius:brush.radius,allowed:true,at:time)
+        guard !stroke.points.isEmpty else { return }
+        let canvas = roomCanvases[hit.index]
+        if stroke.began {
+            guard let image = canvas.snapshot() else { contact.cancel(); return }
+            undo.append((canvas.id,image)); if undo.count > 6 { undo.removeFirst() }
+        }
+        canvas.spray(points:stroke.points,radius:brush.radius,color:paintColor(at:time),clip:nil,flow:1,hardEdge:true,brush:true)
+        brushSoundAt = time
+        setHint("Кисть · \(Int(brush.radius*2000)) мм · отведи кончик от стены — стоп")
+    }
+
     private func setHint(_ value: String) {
         guard hint != value else { return }; hint = value
         status.setText(value); status.fitWidth(1.35)
@@ -615,6 +754,7 @@ final class GraffitiStudio {
     }
 
     func cancelInput() {
+        cancelBrushes()
         props.cancel()
         stopSpraying(); uiGate.cancel(); ring.isHidden = true
         uiHand = nil; uiBlocked = false
@@ -622,6 +762,9 @@ final class GraffitiStudio {
 
     func tick(at time: Double, trackingReady: Bool) {
         guard isRunning else { return }
+        if time-lastSaveAt >= 2 { saveRoom(); lastSaveAt = time }
+        if !trackingReady { cancelBrushes() }
+        audio.setBrushing(trackingReady && time-brushSoundAt < 0.12)
         props.tick(at: time, ready: trackingReady && mode == .room && preferences.grabbing)
         if !trackingReady || time - lastHandAt > 0.2 {
             if paintingHand != nil { setHint("Покажи открытую ладонь, чтобы продолжить") }
@@ -646,17 +789,18 @@ final class GraffitiStudio {
         ring.show(on: target?.1.node, progress: uiGate.dwellProgress)
         if let action, perform(action) { audio.play(GraffitiSound.feedback(for: action)) }
         uiBlocked = target != nil || paletteOpen
-        if uiBlocked { endStroke(); can.isHidden = true; aim.isHidden = true }
+        if uiBlocked { cancelBrushes(); endStroke(); can.isHidden = true; aim.isHidden = true }
         return uiBlocked
     }
 
     func updateProp(hand: TrackedHand, generation: UInt64?, fist: Bool, open: Bool, ray: WorldRay?,
                     distance: Float, orientation: simd_quatf, blocked: Bool, trackingReady: Bool, at time: Double) {
         guard isRunning, aligned else { return }
-        guard mode == .room, preferences.grabbing else { props.cancel(); return }
+        guard mode == .room, preferences.grabbing else { props.cancel(); cancelBrushes(); return }
         props.update(hand: hand, generation: generation, fist: fist, open: open, ray: ray, distance: distance,
             orientation: orientation, blocked: blocked || uiBlocked || paletteOpen || !preferences.grabbing || mode != .room,
             ready: trackingReady, at: time)
+        updateBrush(hand:hand,allowed:trackingReady && !open && !blocked && !uiBlocked && !paletteOpen && preferences.paintEnabled,at:time)
     }
 
     func updateHand(hand: TrackedHand?, open: Bool, ray: WorldRay?, distance: Float, toolOffset: SIMD3<Float>,
@@ -778,9 +922,10 @@ final class GraffitiStudio {
     }
 
     private func setPalette(_ open: Bool) {
+        cancelBrushes()
         paletteOpen = open; panel.isHidden = !open
         paletteButton.setTitle(open ? "Готово" : "Цвет")
-        setHint(open ? "Рисунки этого сеанса удалятся при выходе в меню" : "Открой ладонь — рисовать · «Цвет» — палитра")
+        setHint(open ? "Комната сохраняется · «Мои стены» — только этот сеанс" : "Открой ладонь — рисовать · «Цвет» — палитра")
         stopSpraying()
         // Keep the dwell latch until the pointer leaves the toggle button.
     }
@@ -859,7 +1004,7 @@ final class GraffitiStudio {
 
     private func perform(_ action: String) -> Bool {
         if action == "palette" { setPalette(!paletteOpen); return true }
-        stopSpraying()
+        stopSpraying(); cancelBrushes()
         if action.hasPrefix("tab-") { settingsPage = action == "tab-settings"; radioPage = action == "tab-radio" }
         if action == "radio-toggle" || action == "radio-world" { radio.toggle() }
         if action == "radio-next" { radio.next() }

@@ -638,6 +638,8 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     private var directVideoLeft: WKWebView!
     private var directVideoActive = false
     private var directVideoURL: URL?
+    private var cinemaWebLoadStartedAt: Double = 0
+    private var cinemaWebRecoveryRequired = false
     private var directVideoGeneration = UUID()
     private var directVideoSyncTimer: Timer?
     private var directVideoSyncInFlight = false
@@ -716,10 +718,20 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     private let cinemaHall = CinemaHall()
     private let panorama = OfflinePanorama()
     private var panoramaActive: Bool { panorama.isRunning }
+    private let graffiti = GraffitiStudio()
+    private var graffitiActive: Bool { graffiti.isRunning }
+    private var graffitiCameraOverridden = false
+    private var graffitiTrackingReady: Bool {
+        guard let frame = tracking.latestFrameCopy, frame.mode == .worldTracking, tracking.isCurrent(frame),
+              CACurrentMediaTime() >= frame.timestamp, CACurrentMediaTime() - frame.timestamp <= 0.2,
+              let camera = frame.camera.arCamera else { return false }
+        if case .normal = camera.trackingState { return true }
+        return false
+    }
     private let cinemaControlMasks = [CAShapeLayer(), CAShapeLayer()]
     private let cinemaPlayback = CinemaPlayback()
     private var cameraPassthroughRequested: Bool {
-        panoramaActive ? false : (cinemaActive ? cinemaHall.comfort.isPeeking : profile.passthrough)
+        graffitiActive ? graffiti.mode == .home : (panoramaActive ? false : (cinemaActive ? cinemaHall.comfort.isPeeking : profile.passthrough))
     }
     private var cinemaProbeTimer: Timer?
     private var cinemaProbeGeneration = UUID()
@@ -916,6 +928,13 @@ final class MainViewController: UIViewController, MTKViewDelegate {
             components.queryItems?.append(URLQueryItem(name: "t", value: time))
         }
         return components.url
+    }
+
+    private func isYouTubePage(_ url: URL) -> Bool {
+        guard ["https", "http"].contains(url.scheme?.lowercased() ?? ""),
+              let host = url.host?.lowercased() else { return false }
+        return host == "youtu.be" || host == "youtube.com" || host.hasSuffix(".youtube.com") ||
+               host == "youtube-nocookie.com" || host.hasSuffix(".youtube-nocookie.com")
     }
 
     // MARK: Жизненный цикл
@@ -1134,7 +1153,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     /// A site's fullscreen request stays inside its spatial window. The hall
     /// is an explicit, separate app; playing a movie must not resize the desktop.
     private func setCinemaMode(_ active: Bool) {
-        guard inVR, !cinemaActive, !panoramaActive, !directVideoActive else { return }
+        guard inVR, !cinemaActive, !panoramaActive, !graffitiActive, !directVideoActive else { return }
         isCinemaMode = false
         if active, let url = browser.url, ["https", "http"].contains(url.scheme?.lowercased() ?? "") {
             openExternalPage(url)
@@ -1487,11 +1506,19 @@ final class MainViewController: UIViewController, MTKViewDelegate {
           window.__handarDirectRole = '\(role)';
           window.__handarDirectMuted = \(muted);
           var wanted=true, blocked=false, pending=false, lastPlay=-Infinity, lastSeek=-Infinity;
-          var configured=new WeakSet(),soundAttempted=new WeakSet();
+          var configured=new WeakSet(),soundAttempted=new WeakSet(),surfaceVideo=null;
           function video(){
             var all=[].slice.call(document.querySelectorAll('video'));
             all.sort(function(a,b){return (b.clientWidth*b.clientHeight)-(a.clientWidth*a.clientHeight);});
             return all[0]||null;
+          }
+          function pageError(){
+            var node=document.querySelector('.ytp-error-content-wrap,ytm-player-error-message-renderer,yt-player-error-message-renderer');
+            if(!node)return null;
+            var rect=node.getBoundingClientRect(),css=window.getComputedStyle(node);
+            if(rect.width<=0||rect.height<=0||css.display==='none'||css.visibility==='hidden'||css.opacity==='0')return null;
+            var text=(node.innerText||node.textContent||'').trim();
+            return text ? text.slice(0,240) : null;
           }
           function configure(v){
             if(!v)return;
@@ -1521,9 +1548,17 @@ final class MainViewController: UIViewController, MTKViewDelegate {
           }
           window.__handarTuneDirectVideo=function(){
             if(window.__handarDirectMuted)document.querySelectorAll('audio').forEach(configure);
-            var v=video(); if(!v) return;
-            configure(v);
-            if(window.__handarCinemaSurface && v.readyState>=2 && (!v.paused || v.currentTime>0)){
+            var v=video();
+            if(v)configure(v);
+            var show=!!(window.__handarCinemaSurface&&v&&!v.error&&!pageError()&&v.readyState>=2&&(!v.paused||v.currentTime>0));
+            if(surfaceVideo && (surfaceVideo!==v || !show))surfaceVideo.removeAttribute('data-handar-cinema-video');
+            surfaceVideo=show?v:null;
+            if(!show){
+              document.documentElement.classList.remove('handar-cinema-surface');
+              return;
+            }
+            if(show){
+              v.setAttribute('data-handar-cinema-video','');
               document.documentElement.classList.add('handar-cinema-surface');
               if(!window.__handarDirectMuted&&!window.__handarVolumeChosen&&!v.paused&&!soundAttempted.has(v)){
                 soundAttempted.add(v);
@@ -1544,10 +1579,10 @@ final class MainViewController: UIViewController, MTKViewDelegate {
             window.__handarTuneDirectVideo();ensurePlaying(video());
           };
           window.__handarDirectState=function(){
-            var v=video();if(!v)return 'null';
+            var error=pageError(),v=video();if(!v)return JSON.stringify({missing:true,e:error});
             return JSON.stringify({t:v.currentTime||0,p:v.paused,w:wanted&&!v.ended,b:blocked,
               s:v.playbackRate||1,r:v.readyState,d:Number.isFinite(v.duration)?v.duration:0,
-              q:!!v.seeking,a:Date.now(),m:!!v.muted,v:v.volume,e:v.error?v.error.message:null});
+              q:!!v.seeking,a:Date.now(),m:!!v.muted,v:v.volume,e:error||(v.error?(v.error.message||"Ошибка видеоплеера"):null)});
           };
           window.__handarSyncDirectVideo=function(master){
             var v=video();if(!v||!master)return;configure(v);
@@ -1597,7 +1632,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
           var style=document.createElement('style');
           style.textContent='html.handar-cinema-surface,html.handar-cinema-surface body{background:#000!important;margin:0!important;}' +
             'html.handar-cinema-surface,html.handar-cinema-surface body{overflow:hidden!important;}' +
-            '.handar-cinema-surface video{visibility:visible!important;position:fixed!important;inset:0!important;width:100vw!important;height:100vh!important;object-fit:contain!important;z-index:2147483646!important;}' +
+            '.handar-cinema-surface video[data-handar-cinema-video]{visibility:visible!important;position:fixed!important;inset:0!important;width:100vw!important;height:100vh!important;object-fit:contain!important;z-index:2147483646!important;}' +
             '.handar-cinema-surface .html5-video-player,.handar-cinema-surface .html5-video-container{position:fixed!important;inset:0!important;width:100vw!important;height:100vh!important;}';
           function installStyle(){var parent=document.head||document.documentElement;if(parent)parent.appendChild(style);else requestAnimationFrame(installStyle);}
           installStyle();
@@ -1737,6 +1772,8 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         liveBrowserActive = browsing
         liveProcessRecoveries.removeAll()
         liveLoadError = nil
+        cinemaWebLoadStartedAt = CACurrentMediaTime()
+        setCinemaWebRecovery(false)
         // This flag is installed before page scripts, and persists across navigation.
         for webView in [directVideoLeft!] {
             let controller = webView.configuration.userContentController
@@ -1783,6 +1820,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         directVideoSyncInFlight = false
         vrView?.isPaused = !inVR
         directVideoActive = false
+        setCinemaWebRecovery(false)
         browserPlaneNode.geometry = browserPlaneGeometry
         liveBrowserActive = false
         cinemaScreenMappings = [nil, nil]
@@ -1841,12 +1879,31 @@ final class MainViewController: UIViewController, MTKViewDelegate {
             guard let self,self.directVideoActive,self.directVideoGeneration==generation else { return }
             defer { self.directVideoSyncInFlight=false }
             guard let raw=result as? String,let data=raw.data(using:.utf8),
-                  let state=(try? JSONSerialization.jsonObject(with:data)) as? [String:Any],
-                  let time=state["t"] as? Double,time.isFinite,let paused=state["p"] as? Bool else { return }
-            if let error=self.liveLoadError { self.setDirectVideoNotice(error) }
-            else if let error=state["e"] as? String { self.setDirectVideoNotice("Ошибка видео: "+error) }
-            else if state["b"] as? Bool==true { self.setDirectVideoNotice("Нажми ▶ для продолжения видео") }
-            else if self.cinemaWebScreenActive,AVAudioSession.sharedInstance().outputVolume<=0 {
+                  let state=(try? JSONSerialization.jsonObject(with:data)) as? [String:Any] else {
+                self.updateCinemaWebWaiting()
+                return
+            }
+            if let error = self.liveLoadError {
+                self.setDirectVideoNotice(error); self.setCinemaWebRecovery(true); return
+            }
+            if let error = state["e"] as? String, !error.isEmpty {
+                self.setDirectVideoNotice(error + (self.cinemaWebScreenActive ? "\nНа пульте: «Обновить»." : ""))
+                self.setCinemaWebRecovery(true); return
+            }
+            guard let time=state["t"] as? Double,time.isFinite,let paused=state["p"] as? Bool else {
+                self.updateCinemaWebWaiting(); return
+            }
+            if state["b"] as? Bool == true {
+                self.setCinemaWebRecovery(false)
+                self.setDirectVideoNotice("Нажми «Смотреть» на пульте для продолжения видео")
+                return
+            }
+            if (state["r"] as? Int ?? 0) < 2 {
+                self.updateCinemaWebWaiting(); return
+            }
+            self.cinemaWebLoadStartedAt = CACurrentMediaTime()
+            self.setCinemaWebRecovery(false)
+            if self.cinemaWebScreenActive,AVAudioSession.sharedInstance().outputVolume<=0 {
                 self.setDirectVideoNotice("Увеличь громкость кнопками iPhone")
             }
             else if self.cinemaWebScreenActive,!paused,
@@ -1858,6 +1915,28 @@ final class MainViewController: UIViewController, MTKViewDelegate {
             self.cinemaHall.setPlayingState(!paused)
             self.cinemaHall.setTime(current:time,duration:state["d"] as? Double ?? 0)
         }
+    }
+
+    private func setCinemaWebRecovery(_ required: Bool) {
+        cinemaWebRecoveryRequired = cinemaWebScreenActive && required
+        cinemaHall.setReloadAvailable(cinemaWebRecoveryRequired)
+    }
+
+    private func updateCinemaWebWaiting() {
+        guard cinemaWebScreenActive else { return }
+        if let error = liveLoadError {
+            setDirectVideoNotice(error); setCinemaWebRecovery(true)
+        } else if CACurrentMediaTime() - cinemaWebLoadStartedAt >= 20 {
+            setDirectVideoNotice("Видео ещё не загрузилось. Выбери ролик на странице или нажми «Обновить» на пульте.")
+            setCinemaWebRecovery(true)
+        }
+    }
+
+    private func retryCinemaWebVideo() {
+        guard cinemaWebScreenActive, let url = directVideoLeft.url ?? directVideoURL ?? cinemaOriginalURL else { return }
+        cancelHandInteraction()
+        handOwnership.suppressUntilOpen()
+        presentDirectVideoStage(url: url)
     }
 
     private func removeDirectVideoMessageHandlers() {
@@ -1942,7 +2021,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     private func wireServices() {
         tracking.onFrame = { [weak self] pixelBuffer, orientation in
             guard let self, self.inVR else { return }
-            if !self.usesHeadAim || self.lensCalibrationView != nil {
+            if !self.usesHeadAim || self.lensCalibrationView != nil || self.graffitiActive {
                 self.hands.process(pixelBuffer: pixelBuffer, orientation: orientation)
             }
         }
@@ -1953,12 +2032,14 @@ final class MainViewController: UIViewController, MTKViewDelegate {
             if self.cinemaActive, self.cinemaNeedsAlignment {
                 self.alignCinemaToCurrentPose()
             }
+            if self.graffitiActive, self.graffitiTrackingReady { self.graffiti.align(head: self.headNode) }
             self.ensureBrowserAnchor(using: frame.camera.transform)
         }
         tracking.onCamera = { frame in cameraDelivery.submit(frame) }
 
         tracking.onAnchorUpdate = { [weak self] anchor in
             DispatchQueue.main.async {
+                if let self, self.graffitiActive { self.graffiti.update(anchor: anchor) }
                 // В зале экран держит CinemaHall — якорь панели не трогаем.
                 guard let self, self.inVR, !self.isDragging, !self.cinemaActive else { return }
                 guard self.browserAnchor?.identifier == anchor.identifier else { return }
@@ -2055,7 +2136,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     }
 
     private func startLensCalibration() {
-        guard lensCalibrationView == nil, !cinemaActive, !securityGameActive, !panoramaActive else { return }
+        guard lensCalibrationView == nil, !cinemaActive, !securityGameActive, !panoramaActive, !graffitiActive else { return }
         let wasInVR=inVR
         let present: () -> Void = { [weak self] in
             guard let self,self.inVR else { return }
@@ -2215,6 +2296,72 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         hidePointerDot()
     }
 
+    // MARK: Graffiti
+
+    private func startGraffiti() {
+        guard inVR, !cinemaActive, !securityGameActive else { return }
+        cancelHandInteraction(); endDrag(); endResize(); hands.reset(); handOwnership.reset(); menuSwipe.reset()
+        stopBrowserCapture(); browser.stopLoading(); pauseAndMute(browser); hideDirectVideoStage()
+        browserPlaneNode.isHidden = true; toolbarNode.isHidden = true
+        spatialHomeVisible = false
+        hidePointer(); hidePointerDot(); controllerHandRoot.isHidden = true
+        graffiti.onExit = { [weak self] in self?.exitGraffiti() }
+        graffiti.onInteraction = { [weak self] in self?.playUIConfirmation() }
+        graffiti.onModeChanged = { [weak self] mode in self?.tracking.setWallDetectionEnabled(mode == .home) }
+        graffiti.onAddAnchor = { [weak self] anchor in self?.tracking.add(anchor: anchor) }
+        graffiti.onRemoveAnchor = { [weak self] anchor in self?.tracking.remove(anchor: anchor) }
+        graffiti.wallHit = { [weak self] ray in self?.tracking.detectedWallHit(ray: ray) }
+        graffiti.start(in: worldScene, head: headNode)
+        graffitiCameraOverridden = (tracking.latestFrameCopy?.mode ?? CameraMode.load(ultraWideAvailable: UltraWideCapture.isAvailable)) != .worldTracking
+        if graffitiCameraOverridden {
+            tracking.start(mode: .worldTracking)
+        } else if graffitiTrackingReady { graffiti.align(head: headNode) }
+    }
+
+    private func stopGraffiti(restoreCamera: Bool) {
+        guard graffitiActive else { return }
+        graffiti.stop(); tracking.setWallDetectionEnabled(false)
+        if restoreCamera, graffitiCameraOverridden { tracking.start() }
+        graffitiCameraOverridden = false
+        cancelHandInteraction(); hands.reset(); handOwnership.reset()
+    }
+
+    private func exitGraffiti() {
+        stopGraffiti(restoreCamera: true)
+        resetBrowserAnchor(); openVRDesktop()
+        hidePointer(); hidePointerDot()
+    }
+
+    private func handleGraffitiHands(left: HandSample?, right: HandSample?, at time: Double) {
+        let candidates = [right, left].compactMap { $0 }
+        let sample = candidates.first { $0.hand == graffiti.handOwner } ?? candidates.first
+        let ready = graffitiTrackingReady
+        let palm: CGPoint? = sample.flatMap { sample in
+            guard let wrist = sample.maskJoints[.wrist], let base = sample.maskJoints[.middleMCP] else { return nil }
+            return CGPoint(x: (wrist.x + base.x) * 0.5, y: (wrist.y + base.y) * 0.5)
+        }
+        let fist = sample?.isFist ?? false
+        let pointer = sample.flatMap { $0.maskJoints[.indexTip] }
+        let point = fist ? palm : pointer
+        let ray = ready ? point.flatMap { tracking.worldRay(visionPoint: $0) } : nil
+        let blocked = usesHeadAim ? false : graffiti.updateUI(ray: ray, fist: fist, at: time)
+        var distance: Float = 0.5
+        if let sample, let wrist = sample.maskJoints[.wrist], let base = sample.maskJoints[.middleMCP],
+           let frame = tracking.latestFrameCopy, let projection = tracking.projection(for: frame) {
+            let dx = Double(wrist.x - base.x), dy = Double(wrist.y - base.y)
+            distance = GraffitiGeometry.canDistance(palmFraction: sqrt(dx * dx + dy * dy),
+                                                     verticalTangent: Double(frame.camera.imageResolution.height) / (2 * projection.fy))
+        }
+        graffiti.updateHand(hand: sample?.hand, fist: fist, open: sample?.openPalmCenter != nil,
+                            ray: ray, distance: distance, blocked: blocked, trackingReady: ready, at: time)
+        if !usesHeadAim {
+            if !fist, let ray { showPointerDot(at: ray.point(at: 0.9), transform: headNode.simdWorldTransform, active: false) }
+            else { hidePointerDot() }
+            rayNode.isHidden = true
+        }
+        controllerHandRoot.isHidden = true
+    }
+
     // MARK: Offline 360° travel
 
     private func startPanorama(id: String) {
@@ -2369,7 +2516,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
 
         let requested = url ?? Self.youTubeURL
         cinemaOriginalURL = youtubeWatchURL(requested) ?? requested
-        if youtubeWatchURL(requested) != nil {
+        if isYouTubePage(requested) {
             // Do not wait for an extractable URL from YouTube's HTML video.
             startCinemaWebFallback()
             return
@@ -2675,6 +2822,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     }
 
     private func cinemaRestart() {
+        if cinemaWebScreenActive, cinemaWebRecoveryRequired { retryCinemaWebVideo(); return }
         activateDirectVideoAudio()
         if cinemaWebScreenActive {
             directVideoLeft.evaluateJavaScript("window.__handarSeekVideo && window.__handarSeekVideo(0, true);") { [weak self] _, _ in self?.syncDirectVideoEyes() }
@@ -2729,6 +2877,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         cancelHandInteraction()
         handOwnership.reset()
         hands.reset()
+        stopGraffiti(restoreCamera: false)
         tracking.pause()
         panorama.stop()
         stopBrowserCapture()
@@ -2771,6 +2920,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     @objc private func handleRecenterTap() {
         // В кинотеатре тап по экрану не должен перетягивать экран зала.
         guard inVR, !cinemaActive else { return }
+        if graffitiActive { graffiti.recenterControls(head: headNode); return }
         if panoramaActive { panorama.recenter(head: headNode); return }
         resetBrowserAnchor()
         UIImpactFeedbackGenerator(style: .light).impactOccurred()
@@ -2817,7 +2967,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
 
     private func ensureBrowserAnchor(using cameraTransform: simd_float4x4) {
         guard inVR, !didCreateInitialAnchor else { return }
-        guard !cinemaActive, !panoramaActive else { return }
+        guard !cinemaActive, !panoramaActive, !graffitiActive else { return }
         guard view.bounds.width > view.bounds.height, view.bounds.width > 100 else { return }
 
         let position = SIMD3<Float>(
@@ -2884,10 +3034,11 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         browserPlaneNode.simdWorldTransform = transform
         // Во время Security VR браузерный слой должен оставаться скрытым:
         // иначе меню просвечивает сквозь игровую комнату.
-        browserPlaneNode.isHidden = !inVR || securityGameActive || panoramaActive
+        browserPlaneNode.isHidden = !inVR || securityGameActive || panoramaActive || graffitiActive
     }
 
     private func resetBrowserAnchor() {
+        if graffitiActive { graffiti.recenterControls(head: headNode); return }
         if panoramaActive { panorama.recenter(head: headNode); return }
         if cinemaActive { alignCinemaToCurrentPose(); return }
         if let anchor = browserAnchor {
@@ -2902,7 +3053,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
 
     private func startBrowserCapture() {
         stopBrowserCapture()
-        guard inVR, !directVideoActive, !cinemaPlayback.isActive, !securityGameActive, !panoramaActive else { return }
+        guard inVR, !directVideoActive, !cinemaPlayback.isActive, !securityGameActive, !panoramaActive, !graffitiActive else { return }
         browserCaptureEnabled = true
         scheduleBrowserCapture()
     }
@@ -2977,7 +3128,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         guard ready else {
             // Do not reset the session's settling timer while waiting for it.
             releasePointer(); hidePointer(); hidePointerDot()
-            cinemaHall.cancelInput(); securityGame.cancelInput(); panorama.cancelInput()
+            cinemaHall.cancelInput(); securityGame.cancelInput(); panorama.cancelInput(); graffiti.cancelInput()
             toolbarClickGate.cancel()
             return
         }
@@ -2989,7 +3140,9 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         }
         let ray = WorldRay(origin: headNode.simdWorldPosition, direction: simd_normalize(forward))
         controllerHandRoot.isHidden = true
-        if panoramaActive {
+        if graffitiActive {
+            _ = graffiti.updateUI(ray: graffitiTrackingReady ? ray : nil, at: time)
+        } else if panoramaActive {
             handlePanoramaRay(ray, down: false, allowBegin: false, dwell: true)
         } else if cinemaActive {
             // Looking at the film must never activate the video's pause surface.
@@ -3042,6 +3195,11 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     }
 
     private func handleControllerButton(_ button: VRBoxButton, pressed: Bool) {
+        if graffitiActive {
+            if pressed, button == .menu || button == .b { exitGraffiti() }
+            if pressed, button == .y { graffiti.recenterControls(head: headNode) }
+            return
+        }
         if usesHeadAim, lensCalibrationView == nil {
             if button == .menu, pressed { leaveVRToMenu() }
             return
@@ -3099,6 +3257,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     }
 
     private func updateControllerHand() {
+        if graffitiActive { controllerHandRoot.isHidden = true; return }
         guard !usesHeadAim || lensCalibrationView != nil else { return }
         if let calibration=lensCalibrationView {
             calibration.updatePointer(CGPoint(x:controllerPointer.x*view.bounds.width*0.5,y:controllerPointer.y*view.bounds.height),
@@ -3159,18 +3318,20 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         cinemaHall.cancelInput()
         securityGame.cancelInput()
         panorama.cancelInput()
+        graffiti.cancelInput()
         toolbarClickGate.cancel()
         toolbarDwellRing.isHidden=true
         updateCinemaWebPointers(nil)
     }
 
     private func handleHands(left rawLeft: HandSample?, right rawRight: HandSample?) {
-        guard inVR, !usesHeadAim || lensCalibrationView != nil else { return }
+        guard inVR, !usesHeadAim || lensCalibrationView != nil || graffitiActive else { return }
         let now = CACurrentMediaTime()
         let freshLeft = rawLeft.flatMap { now-$0.timestamp <= 0.2 && now >= $0.timestamp && tracking.acceptsHand(timestamp:$0.timestamp) ? $0 : nil }
         let freshRight = rawRight.flatMap { now-$0.timestamp <= 0.2 && now >= $0.timestamp && tracking.acceptsHand(timestamp:$0.timestamp) ? $0 : nil }
         lastHandDeliveryTime = max(freshLeft?.timestamp ?? -.infinity, freshRight?.timestamp ?? -.infinity)
         if freshLeft != nil || freshRight != nil { lastHandSeenTime = now }
+        if graffitiActive { handleGraffitiHands(left: freshLeft, right: freshRight, at: now); return }
         if lensCalibrationView == nil && !directVideoActive && !cinemaActive && !panoramaActive { queueHandForegroundMask(left:freshLeft,right:freshRight) }
         if spatialHomeVisible, !cinemaActive, !securityGameActive, !panoramaActive, lensCalibrationView == nil,
            !isDragging, !isResizing {
@@ -3852,6 +4013,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
 
         let drawableSize = view.drawableSize
         guard drawableSize.width > 1, drawableSize.height > 1 else { return }
+        if graffitiActive { graffiti.tick(at: CACurrentMediaTime(), trackingReady: graffitiTrackingReady) }
         panorama.followPosition(head: headNode)
         updateHeadAim(at: CACurrentMediaTime())
         tickCinemaComfort(at: CACurrentMediaTime())
@@ -3894,7 +4056,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
             frame: frame,
             hasCamera: cameraTextures != nil
         )
-        uniforms.handMaskEnabled = !panoramaActive && syncHandMaskTexture() ? 1 : 0
+        uniforms.handMaskEnabled = !panoramaActive && !graffitiActive && syncHandMaskTexture() ? 1 : 0
 
         let handMaskTexture = handMaskTexture ?? eyeTexture
         if let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: passDescriptor) {
@@ -4147,7 +4309,7 @@ button.handar-confirmed{outline:2px solid #ffffffb0;outline-offset:2px}
 <main class="workspace">
 <header class="status"><span id="time">--:--</span><span class="divider"></span><span>Главный экран</span><span id="controllerState"></span></header>
 <nav class="rail glass" aria-label="Разделы"><button data-view="people" aria-label="Люди"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8" r="3"/><path d="M3 20v-2a6 6 0 0 1 12 0v2M16 5a3 3 0 0 1 0 6M18 14a5 5 0 0 1 3 5"/></svg></button><button class="active" data-view="apps" aria-label="Приложения" aria-pressed="true"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="6" r="1.5"/><circle cx="12" cy="6" r="1.5"/><circle cx="18" cy="6" r="1.5"/><circle cx="6" cy="12" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="18" cy="12" r="1.5"/><circle cx="6" cy="18" r="1.5"/><circle cx="12" cy="18" r="1.5"/><circle cx="18" cy="18" r="1.5"/></svg></button><button data-view="environments" aria-label="Окружения"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m2 19 7-12 5 8 3-5 5 9ZM7 10l2 2 2-2"/><circle cx="17" cy="5" r="2"/></svg></button></nav>
-<section class="view" id="apps" aria-label="Приложения"><div class="app-page" data-page="0"><div class="app-row"><button class="app" data-id="cinema" aria-label="Кино"><div class="icon teal"><svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M7 5v14M17 5v14M3 9h4M3 15h4M17 9h4M17 15h4"/></svg></div><span>Кино</span></button><button class="app" data-id="spotify" aria-label="Музыка"><div class="icon red"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 17V6l9-2v11M10 8l9-2"/><ellipse cx="7" cy="17" rx="3" ry="2.3" fill="white" stroke="none"/><ellipse cx="16" cy="15" rx="3" ry="2.3" fill="white" stroke="none"/></svg></div><span>Музыка</span></button><button class="app" data-id="safari" aria-label="Safari"><div class="icon blue"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10" fill="#36a8f5" stroke="#b9e8ff"/><g stroke="#fff" stroke-width=".6"><path d="M12 3v1.6" transform="rotate(0 12 12)"/><path d="M12 3v1.6" transform="rotate(30 12 12)"/><path d="M12 3v1.6" transform="rotate(60 12 12)"/><path d="M12 3v1.6" transform="rotate(90 12 12)"/><path d="M12 3v1.6" transform="rotate(120 12 12)"/><path d="M12 3v1.6" transform="rotate(150 12 12)"/><path d="M12 3v1.6" transform="rotate(180 12 12)"/><path d="M12 3v1.6" transform="rotate(210 12 12)"/><path d="M12 3v1.6" transform="rotate(240 12 12)"/><path d="M12 3v1.6" transform="rotate(270 12 12)"/><path d="M12 3v1.6" transform="rotate(300 12 12)"/><path d="M12 3v1.6" transform="rotate(330 12 12)"/></g><path d="m16 7-3 6-2-2Z" fill="#ff5263" stroke="none"/><path d="m8 17 3-6 2 2Z" fill="white" stroke="none"/></svg></div><span>Safari</span></button><button class="app" data-id="photos" aria-label="Фото"><div class="icon pink"><svg viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="7" rx="3.4" ry="5.2" fill="#ffb92e" opacity=".82" transform="rotate(0 12 12)" stroke="none"/><ellipse cx="12" cy="7" rx="3.4" ry="5.2" fill="#ff7b28" opacity=".82" transform="rotate(45 12 12)" stroke="none"/><ellipse cx="12" cy="7" rx="3.4" ry="5.2" fill="#fc4267" opacity=".82" transform="rotate(90 12 12)" stroke="none"/><ellipse cx="12" cy="7" rx="3.4" ry="5.2" fill="#d758bb" opacity=".82" transform="rotate(135 12 12)" stroke="none"/><ellipse cx="12" cy="7" rx="3.4" ry="5.2" fill="#7c75d7" opacity=".82" transform="rotate(180 12 12)" stroke="none"/><ellipse cx="12" cy="7" rx="3.4" ry="5.2" fill="#49a3eb" opacity=".82" transform="rotate(225 12 12)" stroke="none"/><ellipse cx="12" cy="7" rx="3.4" ry="5.2" fill="#57c990" opacity=".82" transform="rotate(270 12 12)" stroke="none"/><ellipse cx="12" cy="7" rx="3.4" ry="5.2" fill="#c2d94c" opacity=".82" transform="rotate(315 12 12)" stroke="none"/></svg></div><span>Фото</span></button></div><div class="app-row"><button class="app" data-id="gmail" aria-label="Почта"><div class="icon red"><svg viewBox="0 0 24 24"><path d="M4 6h16v12H4z"/><path d="m4 7 8 6 8-6"/></svg></div><span>Почта</span></button><button class="app" data-id="messages" aria-label="Сообщения"><div class="icon green"><svg viewBox="0 0 24 24"><path d="M4 5h16v11H9l-5 4z"/></svg></div><span>Сообщения</span></button><button class="app" data-id="maps" aria-label="Карты"><div class="icon orange"><svg viewBox="0 0 24 24"><path d="M12 20s6-6 6-10a6 6 0 1 0-12 0c0 4 6 10 6 10Z"/><circle cx="12" cy="10" r="2"/></svg></div><span>Карты</span></button><button class="app" data-id="notes" aria-label="Заметки"><div class="icon orange"><svg viewBox="0 0 24 24"><path d="M6 4h12v16H6z"/><path d="M9 8h6M9 12h6M9 16h4"/></svg></div><span>Заметки</span></button><button class="app" data-id="settings" aria-label="Настройки"><div class="icon gray"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 0 0-.1-1.2l2-1.5-2-3.4-2.3.9a7 7 0 0 0-2-1.1L14.3 3h-4.6l-.4 2.7a7 7 0 0 0-2 1.1L5 5.9 3 9.3l2 1.5A7 7 0 0 0 5 12c0 .4 0 .8.1 1.2l-2 1.5 2 3.4 2.3-.9a7 7 0 0 0 2 1.1l.4 2.7h4.6l.4-2.7a7 7 0 0 0 2-1.1l2.3.9 2-3.4-2-1.5c.1-.4.1-.8.1-1.2Z"/></svg></div><span>Настройки</span></button></div><div class="app-row"><button class="app" data-id="files" aria-label="Файлы"><div class="icon blue"><svg viewBox="0 0 24 24"><path d="M4 7h6l2 2h8v9H4z"/><path d="M4 10h16"/></svg></div><span>Файлы</span></button><button class="app" data-id="telegram" aria-label="Telegram"><div class="icon cyan"><svg viewBox="0 0 24 24"><path class="solid" d="M20.8 4.4 3.2 11.2c-1 .4-1 1.1-.2 1.4l4.5 1.4 1.7 5.1c.2.6.1.9.8.9.5 0 .8-.2 1.1-.5l2.1-2 4.4 3.3c.8.4 1.4.2 1.6-.7l3.1-14.4c.3-1.2-.5-1.8-1.5-1.3Z"/></svg></div><span>Telegram</span></button><button class="app" data-id="games" aria-label="Игры"><div class="icon purple"><svg viewBox="0 0 24 24"><rect x="4" y="7" width="16" height="11" rx="3"/><path d="M8 12h4M10 10v4"/><circle cx="16" cy="11.5" r="1" fill="#fff" stroke="none"/><circle cx="18" cy="14.5" r="1" fill="#fff" stroke="none"/></svg></div><span>Игры</span></button><button class="app" data-id="calculator" aria-label="Калькулятор"><div class="icon dark"><svg viewBox="0 0 24 24"><rect x="5" y="3" width="14" height="18" rx="2"/><path d="M8 7h8M8 11h2M12 11h2M16 11h0M8 15h2M12 15h2M8 18h8"/></svg></div><span>Калькулятор</span></button></div></div><div class="app-page" data-page="1" hidden><div class="app-row"><button class="app" data-id="youtube" aria-label="YouTube"><div class="icon red"><svg viewBox="0 0 24 24"><path class="solid" d="M21 7.4a2.8 2.8 0 0 0-2-2C17.2 5 12 5 12 5s-5.2 0-7 .4a2.8 2.8 0 0 0-2 2A29 29 0 0 0 2.6 12 29 29 0 0 0 3 16.6a2.8 2.8 0 0 0 2 2c1.8.4 7 .4 7 .4s5.2 0 7-.4a2.8 2.8 0 0 0 2-2 29 29 0 0 0 .4-4.6A29 29 0 0 0 21 7.4Z"/><path d="m10 9 5 3-5 3z" fill="#e21c2a" stroke="none"/></svg></div><span>YouTube</span></button><button class="app" data-id="tiktok" aria-label="TikTok"><div class="icon dark"><svg viewBox="0 0 24 24"><path d="M14 5v9a4 4 0 1 1-3.2-3.9"/><path d="M14 5c1.2 2.2 2.8 3.4 5 3.6"/></svg></div><span>TikTok</span></button><button class="app" data-id="discord" aria-label="Discord"><div class="icon indigo"><svg viewBox="0 0 24 24"><path d="M7 7.8c2.9-1.1 7.1-1.1 10 0 1.5 1.3 2.3 4.6 1.9 7.6-1.9 1.3-3.7 2-5.5 2.4l-.8-1.1"/><path d="M7 7.8c-1.5 1.3-2.3 4.6-1.9 7.6 1.9 1.3 3.7 2 5.5 2.4l.8-1.1"/><circle cx="9.2" cy="12.5" r="1"/><circle cx="14.8" cy="12.5" r="1"/></svg></div><span>Discord</span></button><button class="app" data-id="google" aria-label="Google"><div class="icon dark"><svg viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.2-5.5"/><path d="M20 7v5h-5"/></svg></div><span>Google</span></button></div><div class="app-row"><button class="app" data-id="wikipedia" aria-label="Wikipedia"><div class="icon gray"><svg viewBox="0 0 24 24"><path d="M4 6h4l4 10 4-10h4"/><path d="M9 18h6"/></svg></div><span>Wikipedia</span></button><button class="app" data-id="reddit" aria-label="Reddit"><div class="icon orange"><svg viewBox="0 0 24 24"><circle cx="12" cy="13" r="6.5"/><circle cx="9.5" cy="12.5" r=".9" fill="#fff" stroke="none"/><circle cx="14.5" cy="12.5" r=".9" fill="#fff" stroke="none"/><path d="M9 15c1.7 1.2 4.3 1.2 6 0"/><path d="m14.5 6 1.8-2.2"/><circle cx="17.2" cy="3.5" r="1"/></svg></div><span>Reddit</span></button><button class="app" data-id="travel" aria-label="Путешествия"><div class="icon cyan"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><ellipse cx="12" cy="12" rx="4" ry="9"/><path d="M3 12h18"/></svg></div><span>Путешествия</span></button><button class="app" data-id="phone" aria-label="Телефон"><div class="icon green"><svg viewBox="0 0 24 24"><path d="M7 4c1.1 0 2 .9 2 2 0 1-.2 1.8-.6 2.6-.2.4-.1.8.2 1.1l2.1 2.1c.3.3.7.4 1.1.2.8-.4 1.6-.6 2.6-.6 1.1 0 2 .9 2 2v3c0 1.1-.9 2-2 2C9.8 18.4 5.6 14.2 4.6 9.1 4.4 8.1 5.2 7 6.3 6.7z"/></svg></div><span>Телефон</span></button></div></div><div class="pages" aria-label="Страницы"><button class="page-dot active" data-show-page="0" aria-label="Первая страница" aria-pressed="true"></button><button class="page-dot" data-show-page="1" aria-label="Вторая страница" aria-pressed="false"></button></div></section>
+<section class="view" id="apps" aria-label="Приложения"><div class="app-page" data-page="0"><div class="app-row"><button class="app" data-id="cinema" aria-label="Кино"><div class="icon teal"><svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M7 5v14M17 5v14M3 9h4M3 15h4M17 9h4M17 15h4"/></svg></div><span>Кино</span></button><button class="app" data-id="spotify" aria-label="Музыка"><div class="icon red"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 17V6l9-2v11M10 8l9-2"/><ellipse cx="7" cy="17" rx="3" ry="2.3" fill="white" stroke="none"/><ellipse cx="16" cy="15" rx="3" ry="2.3" fill="white" stroke="none"/></svg></div><span>Музыка</span></button><button class="app" data-id="safari" aria-label="Safari"><div class="icon blue"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10" fill="#36a8f5" stroke="#b9e8ff"/><g stroke="#fff" stroke-width=".6"><path d="M12 3v1.6" transform="rotate(0 12 12)"/><path d="M12 3v1.6" transform="rotate(30 12 12)"/><path d="M12 3v1.6" transform="rotate(60 12 12)"/><path d="M12 3v1.6" transform="rotate(90 12 12)"/><path d="M12 3v1.6" transform="rotate(120 12 12)"/><path d="M12 3v1.6" transform="rotate(150 12 12)"/><path d="M12 3v1.6" transform="rotate(180 12 12)"/><path d="M12 3v1.6" transform="rotate(210 12 12)"/><path d="M12 3v1.6" transform="rotate(240 12 12)"/><path d="M12 3v1.6" transform="rotate(270 12 12)"/><path d="M12 3v1.6" transform="rotate(300 12 12)"/><path d="M12 3v1.6" transform="rotate(330 12 12)"/></g><path d="m16 7-3 6-2-2Z" fill="#ff5263" stroke="none"/><path d="m8 17 3-6 2 2Z" fill="white" stroke="none"/></svg></div><span>Safari</span></button><button class="app" data-id="photos" aria-label="Фото"><div class="icon pink"><svg viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="7" rx="3.4" ry="5.2" fill="#ffb92e" opacity=".82" transform="rotate(0 12 12)" stroke="none"/><ellipse cx="12" cy="7" rx="3.4" ry="5.2" fill="#ff7b28" opacity=".82" transform="rotate(45 12 12)" stroke="none"/><ellipse cx="12" cy="7" rx="3.4" ry="5.2" fill="#fc4267" opacity=".82" transform="rotate(90 12 12)" stroke="none"/><ellipse cx="12" cy="7" rx="3.4" ry="5.2" fill="#d758bb" opacity=".82" transform="rotate(135 12 12)" stroke="none"/><ellipse cx="12" cy="7" rx="3.4" ry="5.2" fill="#7c75d7" opacity=".82" transform="rotate(180 12 12)" stroke="none"/><ellipse cx="12" cy="7" rx="3.4" ry="5.2" fill="#49a3eb" opacity=".82" transform="rotate(225 12 12)" stroke="none"/><ellipse cx="12" cy="7" rx="3.4" ry="5.2" fill="#57c990" opacity=".82" transform="rotate(270 12 12)" stroke="none"/><ellipse cx="12" cy="7" rx="3.4" ry="5.2" fill="#c2d94c" opacity=".82" transform="rotate(315 12 12)" stroke="none"/></svg></div><span>Фото</span></button></div><div class="app-row"><button class="app" data-id="gmail" aria-label="Почта"><div class="icon red"><svg viewBox="0 0 24 24"><path d="M4 6h16v12H4z"/><path d="m4 7 8 6 8-6"/></svg></div><span>Почта</span></button><button class="app" data-id="messages" aria-label="Сообщения"><div class="icon green"><svg viewBox="0 0 24 24"><path d="M4 5h16v11H9l-5 4z"/></svg></div><span>Сообщения</span></button><button class="app" data-id="maps" aria-label="Карты"><div class="icon orange"><svg viewBox="0 0 24 24"><path d="M12 20s6-6 6-10a6 6 0 1 0-12 0c0 4 6 10 6 10Z"/><circle cx="12" cy="10" r="2"/></svg></div><span>Карты</span></button><button class="app" data-id="notes" aria-label="Заметки"><div class="icon orange"><svg viewBox="0 0 24 24"><path d="M6 4h12v16H6z"/><path d="M9 8h6M9 12h6M9 16h4"/></svg></div><span>Заметки</span></button><button class="app" data-id="settings" aria-label="Настройки"><div class="icon gray"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 0 0-.1-1.2l2-1.5-2-3.4-2.3.9a7 7 0 0 0-2-1.1L14.3 3h-4.6l-.4 2.7a7 7 0 0 0-2 1.1L5 5.9 3 9.3l2 1.5A7 7 0 0 0 5 12c0 .4 0 .8.1 1.2l-2 1.5 2 3.4 2.3-.9a7 7 0 0 0 2 1.1l.4 2.7h4.6l.4-2.7a7 7 0 0 0 2-1.1l2.3.9 2-3.4-2-1.5c.1-.4.1-.8.1-1.2Z"/></svg></div><span>Настройки</span></button></div><div class="app-row"><button class="app" data-id="files" aria-label="Файлы"><div class="icon blue"><svg viewBox="0 0 24 24"><path d="M4 7h6l2 2h8v9H4z"/><path d="M4 10h16"/></svg></div><span>Файлы</span></button><button class="app" data-id="telegram" aria-label="Telegram"><div class="icon cyan"><svg viewBox="0 0 24 24"><path class="solid" d="M20.8 4.4 3.2 11.2c-1 .4-1 1.1-.2 1.4l4.5 1.4 1.7 5.1c.2.6.1.9.8.9.5 0 .8-.2 1.1-.5l2.1-2 4.4 3.3c.8.4 1.4.2 1.6-.7l3.1-14.4c.3-1.2-.5-1.8-1.5-1.3Z"/></svg></div><span>Telegram</span></button><button class="app" data-id="games" aria-label="Игры"><div class="icon purple"><svg viewBox="0 0 24 24"><rect x="4" y="7" width="16" height="11" rx="3"/><path d="M8 12h4M10 10v4"/><circle cx="16" cy="11.5" r="1" fill="#fff" stroke="none"/><circle cx="18" cy="14.5" r="1" fill="#fff" stroke="none"/></svg></div><span>Игры</span></button><button class="app" data-id="calculator" aria-label="Калькулятор"><div class="icon dark"><svg viewBox="0 0 24 24"><rect x="5" y="3" width="14" height="18" rx="2"/><path d="M8 7h8M8 11h2M12 11h2M16 11h0M8 15h2M12 15h2M8 18h8"/></svg></div><span>Калькулятор</span></button></div></div><div class="app-page" data-page="1" hidden><div class="app-row"><button class="app" data-id="youtube" aria-label="YouTube"><div class="icon red"><svg viewBox="0 0 24 24"><path class="solid" d="M21 7.4a2.8 2.8 0 0 0-2-2C17.2 5 12 5 12 5s-5.2 0-7 .4a2.8 2.8 0 0 0-2 2A29 29 0 0 0 2.6 12 29 29 0 0 0 3 16.6a2.8 2.8 0 0 0 2 2c1.8.4 7 .4 7 .4s5.2 0 7-.4a2.8 2.8 0 0 0 2-2 29 29 0 0 0 .4-4.6A29 29 0 0 0 21 7.4Z"/><path d="m10 9 5 3-5 3z" fill="#e21c2a" stroke="none"/></svg></div><span>YouTube</span></button><button class="app" data-id="tiktok" aria-label="TikTok"><div class="icon dark"><svg viewBox="0 0 24 24"><path d="M14 5v9a4 4 0 1 1-3.2-3.9"/><path d="M14 5c1.2 2.2 2.8 3.4 5 3.6"/></svg></div><span>TikTok</span></button><button class="app" data-id="discord" aria-label="Discord"><div class="icon indigo"><svg viewBox="0 0 24 24"><path d="M7 7.8c2.9-1.1 7.1-1.1 10 0 1.5 1.3 2.3 4.6 1.9 7.6-1.9 1.3-3.7 2-5.5 2.4l-.8-1.1"/><path d="M7 7.8c-1.5 1.3-2.3 4.6-1.9 7.6 1.9 1.3 3.7 2 5.5 2.4l.8-1.1"/><circle cx="9.2" cy="12.5" r="1"/><circle cx="14.8" cy="12.5" r="1"/></svg></div><span>Discord</span></button><button class="app" data-id="google" aria-label="Google"><div class="icon dark"><svg viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.2-5.5"/><path d="M20 7v5h-5"/></svg></div><span>Google</span></button></div><div class="app-row"><button class="app" data-id="wikipedia" aria-label="Wikipedia"><div class="icon gray"><svg viewBox="0 0 24 24"><path d="M4 6h4l4 10 4-10h4"/><path d="M9 18h6"/></svg></div><span>Wikipedia</span></button><button class="app" data-id="reddit" aria-label="Reddit"><div class="icon orange"><svg viewBox="0 0 24 24"><circle cx="12" cy="13" r="6.5"/><circle cx="9.5" cy="12.5" r=".9" fill="#fff" stroke="none"/><circle cx="14.5" cy="12.5" r=".9" fill="#fff" stroke="none"/><path d="M9 15c1.7 1.2 4.3 1.2 6 0"/><path d="m14.5 6 1.8-2.2"/><circle cx="17.2" cy="3.5" r="1"/></svg></div><span>Reddit</span></button><button class="app" data-id="travel" aria-label="Путешествия"><div class="icon cyan"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><ellipse cx="12" cy="12" rx="4" ry="9"/><path d="M3 12h18"/></svg></div><span>Путешествия</span></button><button class="app" data-id="graffiti" aria-label="Граффити"><div class="icon purple"><svg viewBox="0 0 24 24"><rect x="7" y="8" width="10" height="13" rx="2"/><path d="M9 8V5h6v3M11 5V2h4M18 4h3M19 7l2 1"/></svg></div><span>Граффити</span></button><button class="app" data-id="phone" aria-label="Телефон"><div class="icon green"><svg viewBox="0 0 24 24"><path d="M7 4c1.1 0 2 .9 2 2 0 1-.2 1.8-.6 2.6-.2.4-.1.8.2 1.1l2.1 2.1c.3.3.7.4 1.1.2.8-.4 1.6-.6 2.6-.6 1.1 0 2 .9 2 2v3c0 1.1-.9 2-2 2C9.8 18.4 5.6 14.2 4.6 9.1 4.4 8.1 5.2 7 6.3 6.7z"/></svg></div><span>Телефон</span></button></div></div><div class="pages" aria-label="Страницы"><button class="page-dot active" data-show-page="0" aria-label="Первая страница" aria-pressed="true"></button><button class="page-dot" data-show-page="1" aria-label="Вторая страница" aria-pressed="false"></button></div></section>
 <section class="view" id="people" hidden><div class="panel glass"><h1>Люди</h1><p>Выбери, где продолжить общение.</p><div class="tiles"><button class="tile" data-id="telegram"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8" r="3"/><path d="M3 20v-2a6 6 0 0 1 12 0v2M16 5a3 3 0 0 1 0 6M18 14a5 5 0 0 1 3 5"/></svg>Telegram<small>Открыть веб-приложение</small></button><button class="tile" data-id="discord"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8" r="3"/><path d="M3 20v-2a6 6 0 0 1 12 0v2M16 5a3 3 0 0 1 0 6M18 14a5 5 0 0 1 3 5"/></svg>Discord<small>Открыть веб-приложение</small></button><button class="tile" data-id="messages"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8" r="3"/><path d="M3 20v-2a6 6 0 0 1 12 0v2M16 5a3 3 0 0 1 0 6M18 14a5 5 0 0 1 3 5"/></svg>Сообщения<small>Локальный интерфейс HandAR</small></button></div></div></section>
 <section class="view" id="environments" hidden><div class="panel glass"><h1>Окружения</h1><p>Переключай пространство вокруг своих приложений.</p><div class="tiles"><button class="tile" data-system="environment-camera"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="2" y="6" width="20" height="14" rx="4"/><circle cx="12" cy="13" r="4"/><path d="m8 6 2-3h4l2 3"/></svg>Твоё пространство<small>Сквозное видео с камеры</small></button><button class="tile" data-system="environment-dark"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 15A9 9 0 0 1 9 3a9 9 0 1 0 11 12Z"/></svg>Тёмное пространство<small>Спокойный фон без камеры</small></button><button class="tile" data-id="cinema"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m2 19 7-12 5 8 3-5 5 9ZM7 10l2 2 2-2"/><circle cx="17" cy="5" r="2"/></svg>Кинотеатр<small>Объёмный зал HandAR</small></button></div></div></section>
 <div class="home-bottom"><div class="grab"></div><button class="control glass" id="control-toggle" aria-label="Пункт управления" aria-expanded="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5h14M5 12h14M5 19h14"/><circle cx="9" cy="5" r="2" fill="#aaa"/><circle cx="15" cy="12" r="2" fill="#aaa"/><circle cx="9" cy="19" r="2" fill="#aaa"/></svg></button></div>
@@ -4417,6 +4579,7 @@ addEventListener('resize',()=>{if(current==='fruit')[fruitW,fruitH]=fitCanvas(fc
     }
 
     private func openVRDesktop() {
+        if graffitiActive { stopGraffiti(restoreCamera: true); resetBrowserAnchor() }
         if panoramaActive { cancelHandInteraction(); panorama.stop(); resetBrowserAnchor() }
         if directVideoActive { hideDirectVideoStage() }
         isCinemaMode = false
@@ -4428,6 +4591,7 @@ addEventListener('resize',()=>{if(current==='fruit')[fruitW,fruitH]=fitCanvas(fc
     }
 
     private func openVRApp(id: String) {
+        if graffitiActive { stopGraffiti(restoreCamera: true); resetBrowserAnchor() }
         if panoramaActive { cancelHandInteraction(); panorama.stop(); resetBrowserAnchor() }
         if directVideoActive { hideDirectVideoStage(); startBrowserCapture() }
         isCinemaMode = false
@@ -4451,6 +4615,8 @@ addEventListener('resize',()=>{if(current==='fruit')[fruitW,fruitH]=fitCanvas(fc
             openExternalPage(Self.spotifyURL)
         case "maps":
             openExternalPage(Self.mapsURL)
+        case "graffiti":
+            startGraffiti()
         case "travel":
             browser.loadHTMLString(Self.vrTravelHTML, baseURL: URL(string: "https://handar.vision/"))
         case "panorama-burj":
@@ -4613,16 +4779,17 @@ extension MainViewController: WKNavigationDelegate, WKUIDelegate {
     private func reportVideoNavigationFailure(_ webView: WKWebView, error: Error) {
         guard (error as NSError).code != NSURLErrorCancelled else { return }
         if directVideoActive, webView === directVideoLeft {
-            let message = cinemaWebScreenActive ? "Не удалось загрузить видео. Вернись домой и открой ссылку ещё раз." : "Не удалось загрузить. Нажми «Обновить». " + error.localizedDescription
+            let message = cinemaWebScreenActive ? "Не удалось загрузить видео. На пульте нажми «Обновить». " + error.localizedDescription : "Не удалось загрузить. Нажми «Обновить». " + error.localizedDescription
             liveLoadError = message
             setDirectVideoNotice(message)
+            setCinemaWebRecovery(true)
         } else if webView === browser, cinemaActive, !directVideoActive {
             startCinemaWebFallback()
         }
     }
 
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
-        guard !panoramaActive else { return }
+        guard !panoramaActive, !graffitiActive else { return }
         guard directVideoActive, webView === directVideoLeft else {
             if webView === browser { browser.reload() }
             return
@@ -4635,9 +4802,10 @@ extension MainViewController: WKNavigationDelegate, WKUIDelegate {
             setDirectVideoNotice("Восстанавливаю страницу…")
             webView.reload()
         } else {
-            let message = cinemaWebScreenActive ? "Страница остановлена. Вернись домой и открой ссылку ещё раз." : "Страница остановлена. Нажми «Обновить» или «Домой»."
+            let message = cinemaWebScreenActive ? "Страница остановлена. На пульте нажми «Обновить»." : "Страница остановлена. Нажми «Обновить» или «Домой»."
             liveLoadError = message
             setDirectVideoNotice(message)
+            setCinemaWebRecovery(true)
         }
     }
 
@@ -4651,7 +4819,7 @@ extension MainViewController: WKNavigationDelegate, WKUIDelegate {
 
     func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
                  decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
-        if panoramaActive { decisionHandler(.cancel); return }
+        if panoramaActive || graffitiActive { decisionHandler(.cancel); return }
         if webView === browser, navigationAction.targetFrame?.isMainFrame == true,
            let url = navigationAction.request.url,
            ["http", "https"].contains(url.scheme?.lowercased() ?? ""), url.host != "handar.vision" {
@@ -4669,6 +4837,8 @@ extension MainViewController: WKNavigationDelegate, WKUIDelegate {
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
         if directVideoActive, webView === directVideoLeft {
             liveLoadError = nil
+            cinemaWebLoadStartedAt = CACurrentMediaTime()
+            setCinemaWebRecovery(false)
         }
         if directVideoActive, webView === directVideoLeft {
             directVideoGeneration = UUID()
@@ -4682,7 +4852,7 @@ extension MainViewController: WKNavigationDelegate, WKUIDelegate {
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        guard !panoramaActive else { return }
+        guard !panoramaActive, !graffitiActive else { return }
         if directVideoActive, webView === directVideoLeft {
             liveLoadError = nil
             webView.evaluateJavaScript("window.__handarCinemaSurface = \(cinemaWebScreenActive ? "true" : "false"); window.__handarTuneDirectVideo ? window.__handarTuneDirectVideo() : null;", completionHandler: nil)
@@ -4730,6 +4900,7 @@ final class ARStereoTrackingManager: NSObject, ARSessionDelegate {
     }
     private var interfaceOrientation: UIInterfaceOrientation = .landscapeRight
     private var runState = CameraRunState()
+    private var wallDetectionEnabled = false
     private let ultraWideCapture = UltraWideCapture()
 
     var onFrame: ((CVPixelBuffer, CGImagePropertyOrientation) -> Void)?
@@ -4809,9 +4980,9 @@ final class ARStereoTrackingManager: NSObject, ARSessionDelegate {
         return WorldRay(origin: origin, direction: simd_normalize(rotation * directionInCamera))
     }
 
-    func start() {
+    func start(mode override: CameraMode? = nil) {
         pause() // Invalidate old source callbacks before opening a new run gate.
-        let mode=CameraMode.load(ultraWideAvailable:UltraWideCapture.isAvailable)
+        let mode=override ?? CameraMode.load(ultraWideAvailable:UltraWideCapture.isAvailable)
         frameLock.lock()
         let token=runState.begin(mode,at:CACurrentMediaTime());latestFrame=nil
         frameLock.unlock()
@@ -4827,6 +4998,23 @@ final class ARStereoTrackingManager: NSObject, ARSessionDelegate {
         }
     }
 
+    func setWallDetectionEnabled(_ enabled: Bool) {
+        frameLock.lock(); wallDetectionEnabled = enabled; frameLock.unlock()
+        guard currentMode == .worldTracking,
+              let configuration = session.configuration as? ARWorldTrackingConfiguration else { return }
+        configuration.planeDetection = enabled ? [.vertical] : []
+        session.run(configuration, options: [])
+    }
+
+    func detectedWallHit(ray: WorldRay) -> ARRaycastResult? {
+        guard currentMode == .worldTracking else { return nil }
+        frameLock.lock(); let enabled = wallDetectionEnabled; frameLock.unlock()
+        guard enabled else { return nil }
+        let query = ARRaycastQuery(origin: ray.origin, direction: ray.direction,
+                                  allowing: .existingPlaneGeometry, alignment: .vertical)
+        return session.raycast(query).first { $0.anchor is ARPlaneAnchor }
+    }
+
     private func startWorldTracking() {
         guard ARWorldTrackingConfiguration.isSupported else {
             reportFailure("Этот iPhone не поддерживает ARKit World Tracking.",mode:.worldTracking)
@@ -4836,7 +5024,8 @@ final class ARStereoTrackingManager: NSObject, ARSessionDelegate {
         let configuration = ARWorldTrackingConfiguration()
         configuration.worldAlignment = .gravity
         configuration.isAutoFocusEnabled = true
-        configuration.planeDetection = []
+        frameLock.lock(); let detectWalls = wallDetectionEnabled; frameLock.unlock()
+        configuration.planeDetection = detectWalls ? [.vertical] : []
         configuration.environmentTexturing = ARWorldTrackingConfiguration.EnvironmentTexturing.none
 
         // Реконструкция сцены и текстурирование окружения стоят кадров,

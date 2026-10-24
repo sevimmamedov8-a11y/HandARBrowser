@@ -48,6 +48,7 @@ final class Controls {
   if gate.update(target:target,down:pinch,allowBegin:allowBegin,dwell:dwell,at:clock) != nil {clicks+=1}
   return true
  }
+ @discardableResult func updateUI(ray:WorldRay?,at time:Double)->Bool { update(ray:ray,pinch:false,allowBegin:false,dwell:true) }
  func setHeadAiming(_ v:Bool,head:Node){headAiming=v}
 }
 typealias CinemaHall=Controls
@@ -57,12 +58,12 @@ final class Harness {
  var inVR=true,pointerControlMode=PointerControlMode.head
  var usesHeadAim:Bool{pointerControlMode == .head}
  var headAimSession=HeadAimSession(),handClickMode=HandClickMode.pinch
- var lensCalibrationView:Int?,cinemaActive=false,securityGameActive=false,cinemaWebScreenActive=false,panoramaActive=false
+ var lensCalibrationView:Int?,cinemaActive=false,securityGameActive=false,cinemaWebScreenActive=false,panoramaActive=false,graffitiActive=false,graffitiTrackingReady=true
  var controllerButtonDown=true,dragging=true,resizing=true,windowUpdates=0,releases=0,dots=0
  var lastWindowRay:WorldRay?,lastWebPointer:CGPoint?
  let tracking=Tracking(),headNode=Node(),controllerHandRoot=Node(),rayNode=Node()
  let leftHandSkeletonNode=Node(),rightHandSkeletonNode=Node()
- let cinemaHall=Controls(),securityGame=Controls(),window=Controls(),panorama=Controls()
+ let cinemaHall=Controls(),securityGame=Controls(),window=Controls(),panorama=Controls(),graffiti=Controls()
  let handOwnership=Resettable(),hands=Resettable(),menuSwipe=Resettable()
  var menu:Menu?=Menu(),toolbarClickGate=ReleaseClickGate<Int>()
  func releasePointer(){releases+=1;window.cancelInput()}
@@ -150,6 +151,12 @@ check(travel.windowUpdates==0 && travel.cinemaHall.updates==0 && travel.security
 clock=5
 travel.updateHeadAim(at:clock)
 check(travel.panorama.cancels>0,"stale head frame cancels travel dwell")
+let art=Harness()
+art.graffitiActive=true
+for i in 0...60 {
+ clock=Double(i)*0.05;art.tracking.latestFrameCopy=Frame(timestamp:clock);art.updateHeadAim(at:clock)
+}
+check(art.graffiti.clicks==1 && art.windowUpdates==0,"head aim controls graffiti palette without clicking browser")
 print("PASS: \(count) head aim freshness, routing, dwell, tracking recovery and mode-switch checks")
 '''
 with tempfile.TemporaryDirectory(prefix='handar-head-') as directory:
@@ -157,7 +164,7 @@ with tempfile.TemporaryDirectory(prefix='handar-head-') as directory:
     main.write_text(shim+method('setPointerControlMode')+'\n'+method('updateHeadAim')+tests,encoding='utf-8')
     run_swift_sources([root/'HandARBrowser/HandGesture.swift', main])
 
-assert 'guard inVR, !usesHeadAim || lensCalibrationView != nil else' in method('handleHands')
+assert 'guard inVR, !usesHeadAim || lensCalibrationView != nil || graffitiActive else' in method('handleHands')
 assert 'if !self.usesHeadAim || self.lensCalibrationView != nil' in source
 assert '!self.usesHeadAim, self.handOwnership.hand != nil' in source
 for name in ['handleControllerStick','handleControllerGyro','updateControllerHand']:

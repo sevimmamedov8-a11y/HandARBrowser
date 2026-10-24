@@ -12,6 +12,7 @@ import Foundation
 #if canImport(FoundationNetworking)
 import FoundationNetworking
 #endif
+func CACurrentMediaTime()->Double {0}
 final class WKNavigation {}
 enum WKNavigationActionPolicy { case allow, cancel }
 struct Frame { var isMainFrame:Bool }
@@ -25,10 +26,12 @@ final class WKWebView {
 }
 final class Harness {
  let browser=WKWebView(),directVideoLeft=WKWebView(),toolbarNode=Node()
- var inVR=true,cinemaActive=false,isCinemaMode=false,cinemaWebScreenActive=false,panoramaActive=false
+ var inVR=true,cinemaActive=false,isCinemaMode=false,cinemaWebScreenActive=false,panoramaActive=false,graffitiActive=false
  var directVideoActive=true,liveBrowserActive=true,directVideoSyncInFlight=true
  var liveProcessRecoveries:Set<ObjectIdentifier>=[];var liveLoadError:String?
  var directVideoGeneration=UUID(),snapshotGeneration=UUID()
+ var cinemaWebLoadStartedAt:Double=0,recovery=false
+ func setCinemaWebRecovery(_ value:Bool){recovery=value}
  var notice="",opened:[URL]=[],cancels=0,opaque=false,fallbacks=0
  func setDirectVideoNotice(_ text:String) {notice=text}
  func cancelHandInteraction() {cancels+=1}
@@ -81,7 +84,7 @@ struct Tests {
   check(h.directVideoLeft.requests.isEmpty,"finishing a source page does not start a second eye navigation")
   h.cinemaWebScreenActive=true
   h.reportVideoNavigationFailure(h.directVideoLeft,error:NSError(domain:NSURLErrorDomain,code:NSURLErrorTimedOut))
-  check(!h.notice.contains("Обновить"),"cinema failure describes the available hall Home control")
+  check(h.notice.contains("Обновить") && h.recovery,"cinema failure exposes the native reload action")
   h.directVideoActive=false;h.cinemaActive=true
   h.reportVideoNavigationFailure(h.browser,error:NSError(domain:NSURLErrorDomain,code:NSURLErrorTimedOut))
   check(h.fallbacks==1,"cinema retains live-video fallback")

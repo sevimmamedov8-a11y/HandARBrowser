@@ -13,8 +13,8 @@ function fixture(){
   play(){plays++;this.paused=false;return Promise.resolve()},pause(){pauses++;this.paused=true}};
  Object.defineProperty(video,'muted',{get(){return muted},set(value){const old=muted;muted=value;if(old&&!value&&pauseOnUnmute)video.paused=true}});
  const context={window:{addEventListener(){}},Date:{now(){return now}},
-  document:{hidden:false,querySelectorAll(selector){return selector==='audio'?[]:[video]},addEventListener(){},createElement(){return {}},
-   head:{appendChild(){}},documentElement:{classList:{add(){}}}},MutationObserver:class{observe(){}disconnect(){}},
+  document:{hidden:false,querySelector(){return null},querySelectorAll(selector){return selector==='audio'?[]:[video]},addEventListener(){},createElement(){return {}},
+   head:{appendChild(){}},documentElement:{classList:{add(){},remove(){}}}},MutationObserver:class{observe(){}disconnect(){}},
   requestAnimationFrame(){},setInterval(fn){timers.push(fn)},setTimeout(){}};
  vm.createContext(context);vm.runInContext('(function(){'+media,context);vm.runInContext(role,context);
  return {w:context.window,v:video,tick(){now+=1600;timers.forEach(f=>f())},pauseOnUnmute(value){pauseOnUnmute=value},get plays(){return plays},get removed(){return removed}};

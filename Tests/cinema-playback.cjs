@@ -6,17 +6,18 @@ let checks=0;function check(value,message){checks++;assert(value,message)}
 function fixture(role='left'){
  let now=0,starts=0,pauses=0,seeks=0,time=5,failure=null;
  const intervals=[],timeouts=[],listeners={},styles=[],mutingAtPlay=[],audios=[];
+ const classes=new Set();let pageError=null,missing=false;
  const video={clientWidth:500,clientHeight:300,paused:true,muted:false,defaultMuted:false,volume:1,
-  readyState:4,duration:100,seeking:false,ended:false,playbackRate:1,style:{setProperty(){}},setAttribute(){},
+  readyState:4,duration:100,seeking:false,ended:false,playbackRate:1,style:{setProperty(){}},setAttribute(){},removeAttribute(){},
   seekable:{length:1,start(){return 0},end(){return 100}},
   play(){starts++;mutingAtPlay.push(this.muted);if(!failure)this.paused=false;
    return {then(resolve,reject){failure?reject({name:failure}):resolve()}}},
   pause(){pauses++;this.paused=true}
  };
  Object.defineProperty(video,'currentTime',{get(){return time},set(value){time=value;seeks++}});
- const context={Date:{now(){return now}},window:{addEventListener(name,fn){listeners[name]=fn}},
-  document:{hidden:false,querySelectorAll(selector){return selector==='audio'?audios:[video]},createElement(){return {}},
-   documentElement:{classList:{add(){}}},head:{appendChild(style){styles.push(style.textContent)}},
+ const context={Date:{now(){return now}},window:{addEventListener(name,fn){listeners[name]=fn},getComputedStyle(node){return node.css||{display:"block",visibility:"visible",opacity:"1"}}},
+  document:{hidden:false,querySelector(){return pageError},querySelectorAll(selector){return selector==='audio'?audios:(missing?[]:[video])},createElement(){return {}},
+   documentElement:{classList:{add(c){classes.add(c)},remove(c){classes.delete(c)}}},head:{appendChild(style){styles.push(style.textContent)}},
    addEventListener(name,fn){listeners[name]=fn}},
   MutationObserver:class{observe(){}disconnect(){}},requestAnimationFrame(){},
   setInterval(fn){intervals.push(fn)},setTimeout(fn){timeouts.push(fn)}};
@@ -25,7 +26,7 @@ function fixture(role='left'){
  return {v:video,w:context.window,doc:context.document,listeners,styles,mutingAtPlay,audios,
   tick(ms=1600){now+=ms;intervals.forEach(fn=>fn())},
   run(script){vm.runInContext(script,context)},runTimeouts(){timeouts.splice(0).forEach(fn=>fn())},
-  get now(){return now},get starts(){return starts},get pauses(){return pauses},get seeks(){return seeks},
+  classes,error(node){pageError=node},missing(value){missing=value},get now(){return now},get starts(){return starts},get pauses(){return pauses},get seeks(){return seeks},
   failure(value){failure=value},state(){return JSON.parse(context.window.__handarDirectState())},
   master(overrides={}){return {t:20,p:false,w:true,s:1,r:4,d:100,q:false,...overrides}}};
 }
@@ -158,6 +159,24 @@ for(const role of ['left','right']){
  const f=fixture(role);f.w.__handarBrowseOnly=true;
  const audio={muted:false,defaultMuted:false,volume:1,setAttribute(){}};f.audios.push(audio);f.tick();
  check(audio.muted===(role==='right')&&audio.volume===(role==='right'?0:1),'audio elements are muted only in the right eye');
+}
+{
+ const f=fixture();f.w.__handarCinemaSurface=true;f.v.paused=false;f.tick();
+ check(f.classes.has('handar-cinema-surface'),'ready movie fills the hall screen');
+ f.error({innerText:'YouTube playback error 123',getBoundingClientRect(){return {width:400,height:120}}});f.tick();
+ check(!f.classes.has('handar-cinema-surface'),'site error is not covered by the fullscreen video');
+ check(f.state().e==='YouTube playback error 123','YouTube error text reaches native controls');
+ f.error(null);f.v.error={message:'Decoder failed'};f.tick();
+ check(!f.classes.has('handar-cinema-surface')&&f.state().e==='Decoder failed','media failure restores page and reports cause');
+ f.v.error=null;f.v.readyState=0;f.tick();
+ check(!f.classes.has('handar-cinema-surface'),'SPA navigation/loading removes stale cinema CSS');
+ f.missing(true);f.tick();check(f.state().missing===true,'missing video is an explicit loading state');
+ f.error({textContent:'Unavailable',getBoundingClientRect(){return {width:400,height:120}}});
+ check(f.state().e==='Unavailable','page error is reported even without a video element');
+ f.error({textContent:'Old error',getBoundingClientRect(){return {width:0,height:0}}});
+ check(f.state().e===null,'hidden stale YouTube errors are ignored');
+ f.error(null);f.missing(false);f.v.readyState=4;f.tick();
+ check(f.classes.has('handar-cinema-surface'),'successful next movie restores fullscreen');
 }
 console.log(`PASS: ${checks} cinema/browser playback continuity, intent, visibility and synchronization checks`);
 

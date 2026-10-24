@@ -765,6 +765,10 @@ final class CinemaHall {
         for strip in ceilingStrips { strip.opacity = on ? 0.85 : 0.32 }
     }
 
+    func setReloadAvailable(_ available: Bool) {
+        restartButton.setTitle(available ? "Обновить" : "Сначала")
+    }
+
     func setPlayingState(_ playing: Bool) {
         playButton.setTitle(playing ? "Пауза" : "Смотреть")
     }

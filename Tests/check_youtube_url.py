@@ -13,6 +13,12 @@ precondition(youtubeWatchURL(URL(string:"https://www.youtube.com/watch?v=LnFf8iF
 precondition(youtubeWatchURL(URL(string:"https://youtube.com/shorts/LnFf8iFs0a8")!) != nil)
 precondition(youtubeWatchURL(URL(string:"https://youtube.com.evil.example/watch?v=LnFf8iFs0a8")!) == nil)
 precondition(youtubeWatchURL(URL(string:"https://youtu.be/bad")!) == nil)
+for text in ["https://youtube.com/", "https://www.youtube.com/results?search_query=test", "https://m.youtube.com/playlist?list=abc", "https://youtu.be/LnFf8iFs0a8"] {
+ precondition(isYouTubePage(URL(string:text)!))
+}
+for text in ["https://youtube.com.evil.example/", "https://evilyoutube.com/", "file://youtube.com/watch"] {
+ precondition(!isYouTubePage(URL(string:text)!))
+}
 print("PASS: example link, timestamp, Shorts, domain and ID validation")
 '''
 with tempfile.TemporaryDirectory(prefix='handar-youtube-') as directory:

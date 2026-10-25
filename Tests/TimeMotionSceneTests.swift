@@ -77,6 +77,14 @@ import Foundation
         check(game.phase == .ready && game.score.points == 0 && game.health.remaining == 3,"replay resets lives, score and onboarding")
         game.recenterControls(head:SCNNode())
         check(!game.userPaused,"recentering before grabbing the pistol cannot block starting the game")
+        let turnedHead = SCNNode();turnedHead.simdPosition = SIMD3(2,1,-3)
+        turnedHead.simdWorldTransform.columns.2 = SIMD4(-1,0,0,0)
+        game.recenterControls(head:turnedHead)
+        let expectedControls: [SIMD3<Float>] = [SIMD3(3.2,0.75,-3.25),SIMD3(3.2,0.75,-2.75),
+                                              SIMD3(3.2,0.48,-3.25),SIMD3(3.2,0.48,-2.75)]
+        for (index,expected) in expectedControls.enumerated() {
+            check(simd_length(game.buttons[index].node.simdPosition-expected)<0.0001,"recentered control follows translated and turned head in the correct row and column")
+        }
         game.phase = .playing
         for _ in 0..<3 {game.playerTime += 1;game.playerHit()}
         check(game.phase == .defeat && !game.gunFiring,"three separated hits end the round and stop firing")
@@ -93,6 +101,9 @@ import Foundation
         check(pistol.ammo == 0 && game.bullets.count == 12,"pistol stops at twelve rounds, never fires empty")
         second.held = .left;second.position = SIMD3(-0.3,-0.2,-0.5);game.fireGun(second)
         check(second.ammo == 11 && pistol.ammo == 0 && game.bullets.count == 13,"two hands use independent magazines")
+        game.syncNodes()
+        check(pistol.node.scale == SCNVector3(0.7,0.7,0.7) && second.node.scale == SCNVector3(0.7,0.7,0.7),"both held guns shrink equally on every SceneKit axis")
+        check(game.items[1].node.scale == SCNVector3(1,1,1),"unheld props keep their original scale")
         game.returnItem(0);check(pistol.ammo == 0,"losing a hand cannot refill an empty magazine")
         game.resetRound();game.phase = .playing
         shotgun.held = .right;shotgun.position = SIMD3(0,-0.3,-0.5);shotgun.aim = SIMD3(0,1,0)

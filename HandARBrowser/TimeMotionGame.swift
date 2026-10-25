@@ -1332,7 +1332,7 @@ final class TimeMotionVRGame {
                 item.node.simdOrientation = simd_quatf(from:SIMD3(0,0,-1),to:item.aim)
             } else { item.node.simdEulerAngles = item.angles }
             let size: Float = item.held != nil && item.isGun ? 0.70 : 1
-            item.node.scale = SCNVector3(repeating:size)
+            item.node.scale = SCNVector3(size,size,size)
             if targetItem == index && item.held == nil { item.node.scale = SCNVector3(1.08,1.08,1.08) }
         }
         for bullet in bullets {
@@ -1361,8 +1361,12 @@ final class TimeMotionVRGame {
         let look = SIMD3(-t.columns.2.x,0,-t.columns.2.z)
         let facing = simd_length(look)>0.1 ? simd_normalize(look) : forward
         let side = simd_cross(facing,up)
+        let panelCenter: SIMD3<Float> = position + facing * Float(1.2)
         for (index,button) in buttons.enumerated() {
-            button.node.simdPosition = position+facing*1.2+side*(Float(index%2)*0.50-0.25)-up*(index<2 ? 0.25 : 0.52)
+            let columnOffset: Float = Float(index % 2) * 0.50 - 0.25
+            let rowOffset: Float = index < 2 ? 0.25 : 0.52
+            let horizontalPosition: SIMD3<Float> = panelCenter + side * columnOffset
+            button.node.simdPosition = horizontalPosition - up * rowOffset
         }
     }
 

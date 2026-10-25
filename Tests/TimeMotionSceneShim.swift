@@ -1,6 +1,13 @@
 // Minimal geometry-recording platform stand-ins for executing the production game on Windows.
 import Foundation
-typealias SCNVector3 = SIMD3<Float>
+// Keep SceneKit vectors distinct from SIMD: SCNVector3 has no repeating initializer.
+struct SCNVector3: Equatable {
+    var x: Float, y: Float, z: Float
+    init(_ x: Float, _ y: Float, _ z: Float) { self.x=x; self.y=y; self.z=z }
+    init(_ vector: SIMD3<Float>) { self.init(vector.x,vector.y,vector.z) }
+    static let zero = SCNVector3(0,0,0)
+    var vector: SIMD3<Float> { SIMD3(x,y,z) }
+}
 func simd_dot(_ a:SIMD3<Float>,_ b:SIMD3<Float>)->Float { a.x*b.x+a.y*b.y+a.z*b.z }
 func simd_dot(_ a:SIMD4<Float>,_ b:SIMD4<Float>)->Float { a.x*b.x+a.y*b.y+a.z*b.z+a.w*b.w }
 func simd_length(_ a:SIMD3<Float>)->Float { sqrt(simd_dot(a,a)) }
@@ -52,12 +59,12 @@ class SCNLight {
 }
 class SCNNode {
     var geometry:SCNGeometry?,light:SCNLight?,constraints:[SCNBillboardConstraint]?
-    var isHidden=false,position=SCNVector3.zero,eulerAngles=SCNVector3.zero,scale=SCNVector3(repeating:1)
-    var simdPosition:SIMD3<Float> { get {position} set {position=newValue} }
-    var simdEulerAngles:SIMD3<Float> { get {eulerAngles} set {eulerAngles=newValue} }
+    var isHidden=false,position=SCNVector3.zero,eulerAngles=SCNVector3.zero,scale=SCNVector3(1,1,1)
+    var simdPosition:SIMD3<Float> { get {position.vector} set {position=SCNVector3(newValue)} }
+    var simdEulerAngles:SIMD3<Float> { get {eulerAngles.vector} set {eulerAngles=SCNVector3(newValue)} }
     var simdOrientation=simd_quatf()
     var simdWorldTransform=simd_float4x4()
-    var simdWorldPosition:SIMD3<Float> { (parent?.simdWorldPosition ?? .zero)+position }
+    var simdWorldPosition:SIMD3<Float> { (parent?.simdWorldPosition ?? .zero)+position.vector }
     weak var parent:SCNNode?
     var childNodes:[SCNNode]=[]
     init(geometry:SCNGeometry?=nil) {self.geometry=geometry}
@@ -65,7 +72,7 @@ class SCNNode {
     func removeFromParentNode(){parent?.childNodes.removeAll{$0===self};parent=nil}
     func flattenedClone()->SCNNode {self}
     func clone()->SCNNode {let n=SCNNode(geometry:geometry);n.position=position;n.eulerAngles=eulerAngles;n.isHidden=isHidden;for c in childNodes{n.addChildNode(c.clone())};return n}
-    func convertPosition(_ p:SCNVector3,to:SCNNode?)->SCNVector3 {simdWorldPosition+simdOrientation.act(p)}
+    func convertPosition(_ p:SCNVector3,to:SCNNode?)->SCNVector3 {SCNVector3(simdWorldPosition+simdOrientation.act(p.vector))}
 }
 class SCNScene {let rootNode=SCNNode()}
 class TMLabel:SCNNode {

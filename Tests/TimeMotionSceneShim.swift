@@ -64,6 +64,7 @@ class SCNNode {
     func addChildNode(_ node:SCNNode) {node.removeFromParentNode();childNodes.append(node);node.parent=self}
     func removeFromParentNode(){parent?.childNodes.removeAll{$0===self};parent=nil}
     func flattenedClone()->SCNNode {self}
+    func clone()->SCNNode {let n=SCNNode(geometry:geometry);n.position=position;n.eulerAngles=eulerAngles;n.isHidden=isHidden;for c in childNodes{n.addChildNode(c.clone())};return n}
     func convertPosition(_ p:SCNVector3,to:SCNNode?)->SCNVector3 {simdWorldPosition+simdOrientation.act(p)}
 }
 class SCNScene {let rootNode=SCNNode()}
@@ -74,6 +75,7 @@ class TMLabel:SCNNode {
 class TMSoundBank {
     var events:[TMSound]=[]
     func prepare(){}
+    func setTimeScale(_ value:Double){}
     func play(_ sound:TMSound,volume:Float=0.9){events.append(sound)}
     func stopAll(){}
 }

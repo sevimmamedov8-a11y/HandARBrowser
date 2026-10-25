@@ -9,16 +9,16 @@ enum TimeMotionTuning {
     /// A long stall advances the game by at most this much real time.
     static let maxRealStep: Double = 0.1
     static let maxStepsPerFrame = 12
-    static let minimumScale: Double = 0.05
+    static let minimumScale: Double = 0
     /// Head angular speed (rad/s) and hand speed (m/s) below these values are sensor jitter.
     static let headNoise: Double = 0.25
-    static let handNoise: Double = 0.08
+    static let handNoise: Double = 0.12
     /// Faster than these is a tracking jump; gameplay pauses until a valid sample.
     static let headGlitch: Double = 6.0
     static let handGlitch: Double = 4.0
     /// Speeds that reach full game speed.
-    static let headFull: Double = 1.2
-    static let handFull: Double = 0.9
+    static let headFull: Double = 1.8
+    static let handFull: Double = 1.2
     static let fireInterval: Double = 0.28
     static let fireRearm: Double = 0.12
     static let meleeCooldown: Double = 0.35
@@ -42,18 +42,19 @@ enum MotionSample: Equatable {
 }
 
 /// Maps the player's motion to game speed. Moving makes time run at full speed,
-/// keeping still makes it crawl, and losing tracking pauses it.
+/// keeping still stops it, and losing tracking pauses it.
 struct TimeScaleController {
     private(set) var scale: Double = TimeMotionTuning.minimumScale
     private(set) var isPaused = false
     private var target: Double = TimeMotionTuning.minimumScale
+    private var stillFor = 0.0
 
     mutating func reset() { self = TimeScaleController() }
 
     static func targetScale(head: Double, hand: Double) -> Double {
-        let headSpeed = head < TimeMotionTuning.headNoise ? 0 : head
-        let handSpeed = hand < TimeMotionTuning.handNoise ? 0 : hand
-        let activity = min(1, max(headSpeed / TimeMotionTuning.headFull, handSpeed / TimeMotionTuning.handFull))
+        let headSpeed = max(0,head-TimeMotionTuning.headNoise)
+        let handSpeed = max(0,hand-TimeMotionTuning.handNoise)
+        let activity = min(1, max(headSpeed / (TimeMotionTuning.headFull-TimeMotionTuning.headNoise), handSpeed / (TimeMotionTuning.handFull-TimeMotionTuning.handNoise)))
         let eased = activity * activity * (3 - 2 * activity)
         return TimeMotionTuning.minimumScale + (1 - TimeMotionTuning.minimumScale) * eased
     }
@@ -63,10 +64,10 @@ struct TimeScaleController {
         let dt = min(realDt, TimeMotionTuning.maxRealStep)
         switch sample {
         case .lost:
-            isPaused = true; scale = 0; target = TimeMotionTuning.minimumScale
+            isPaused = true; scale = 0; target = TimeMotionTuning.minimumScale; stillFor = 0
             return
         case .glitch:
-            isPaused = true; scale = 0; target = TimeMotionTuning.minimumScale
+            isPaused = true; scale = 0; target = TimeMotionTuning.minimumScale; stillFor = 0
             return
         case let .motion(head, hand):
             if head.isFinite, hand.isFinite, head >= 0, hand >= 0,
@@ -79,7 +80,9 @@ struct TimeScaleController {
             isPaused = false
             scale = TimeMotionTuning.minimumScale
         }
-        let tau = target > scale ? 0.12 : 0.35
+        stillFor = target == 0 ? stillFor+dt : 0
+        if stillFor >= 0.16 { scale = 0; return }
+        let tau = target > scale ? 0.08 : 0.12
         scale += (target - scale) * (1 - exp(-dt / tau))
     }
 }
@@ -88,6 +91,7 @@ struct TimeScaleController {
 struct FixedStepClock {
     private(set) var gameTime: Double = 0
     private var accumulator: Double = 0
+    var interpolation: Float { Float(min(1,max(0,accumulator/TimeMotionTuning.fixedStep))) }
 
     mutating func reset() { self = FixedStepClock() }
 
@@ -113,7 +117,7 @@ struct FireScheduler {
     private(set) var cooldown = TimeMotionTuning.fireRearm
 
     /// Call once per fixed game step. Returns true when a shot should leave the barrel now.
-    mutating func advance(gameDt: Double, firing: Bool) -> Bool {
+    mutating func advance(gameDt: Double, firing: Bool, interval: Double = TimeMotionTuning.fireInterval) -> Bool {
         guard firing else {
             cooldown = TimeMotionTuning.fireRearm
             return false
@@ -121,7 +125,7 @@ struct FireScheduler {
         guard gameDt.isFinite, gameDt > 0 else { return false }
         cooldown -= gameDt
         guard cooldown <= 0 else { return false }
-        cooldown = max(0, cooldown + TimeMotionTuning.fireInterval)
+        cooldown = max(0, cooldown + max(0.05,interval))
         return true
     }
 
@@ -183,6 +187,7 @@ enum ProjectileOwner: Equatable { case player, enemy }
 /// A bullet that moves in game time and is checked along its swept path each step.
 struct ProjectileState: Equatable {
     var position: SIMD3<Float>
+    private(set) var previous: SIMD3<Float>
     var velocity: SIMD3<Float>
     let owner: ProjectileOwner
     private(set) var age: Double = 0
@@ -190,6 +195,7 @@ struct ProjectileState: Equatable {
 
     init(position: SIMD3<Float>, velocity: SIMD3<Float>, owner: ProjectileOwner, lifetime: Double) {
         self.position = position
+        self.previous = position
         self.velocity = velocity
         self.owner = owner
         self.lifetime = lifetime
@@ -200,6 +206,7 @@ struct ProjectileState: Equatable {
     /// Moves one fixed game step and returns the swept segment to test.
     mutating func step(gameDt: Double) -> (from: SIMD3<Float>, to: SIMD3<Float>) {
         let from = position
+        previous = position
         position += velocity * Float(gameDt)
         age += gameDt
         return (from, position)
@@ -316,6 +323,8 @@ struct WaveDirector {
     enum Phase: Equatable { case intro, spawning, fighting, breather, finished }
 
     static let waveSizes = [3, 5, 7]
+    var endless = false
+    private var waveSize: Int { endless ? min(8,3+wave) : Self.waveSizes[wave] }
 
     private(set) var wave = 0
     private(set) var phase: Phase = .intro
@@ -330,7 +339,7 @@ struct WaveDirector {
             timer -= gameDt
             if timer <= 0 {
                 phase = .spawning
-                toSpawn = Self.waveSizes[wave]
+                toSpawn = waveSize
                 timer = 0
             }
             return .none
@@ -349,7 +358,7 @@ struct WaveDirector {
         case .breather:
             timer -= gameDt
             guard timer <= 0 else { return .none }
-            if wave + 1 >= Self.waveSizes.count {
+            if !endless && wave + 1 >= Self.waveSizes.count {
                 phase = .finished
                 return .victory
             }
@@ -367,16 +376,56 @@ struct WaveDirector {
 enum TimeMotionBestScore {
     static let key = "timeMotion.bestScore.v1"
 
-    static func load(defaults: UserDefaults = .standard) -> Int {
-        max(0, defaults.integer(forKey: key))
+    static func load(defaults: UserDefaults = .standard, mode: TimeMotionMode = .waves) -> Int {
+        max(0, defaults.integer(forKey: mode == .waves ? key : "\(key).\(mode.rawValue)"))
     }
 
     /// Saves the score only when it beats the stored best. Returns true for a new record.
     @discardableResult
-    static func record(_ score: Int, defaults: UserDefaults = .standard) -> Bool {
-        guard score > load(defaults: defaults) else { return false }
-        defaults.set(score, forKey: key)
+    static func record(_ score: Int, defaults: UserDefaults = .standard, mode: TimeMotionMode = .waves) -> Bool {
+        guard score > load(defaults: defaults,mode:mode) else { return false }
+        defaults.set(score, forKey: mode == .waves ? key : "\(key).\(mode.rawValue)")
         return true
+    }
+}
+
+enum TimeMotionMode: Int, CaseIterable {
+    case waves, endless, headshots, hardcore
+    var title: String { ["Волны","Бесконечно","В голову","Хардкор"][rawValue] }
+    var next: Self { Self(rawValue:(rawValue+1)%Self.allCases.count)! }
+    var enemySpeed: Float { self == .hardcore ? 1.35 : 1 }
+    var headshotsOnly: Bool { self == .headshots }
+}
+
+enum TimeMotionWeapon: Int {
+    case prop, pistol, shotgun, katana
+    var capacity: Int { self == .pistol ? 12 : (self == .shotgun ? 6 : 0) }
+    var interval: Double { self == .shotgun ? 0.85 : 0.28 }
+    var isGun: Bool { self == .pistol || self == .shotgun }
+}
+
+/// A visual gun offset never changes the selected target. Shots converge from
+/// the lowered muzzle onto the hand's aim ray and still collide with cover.
+enum TimeMotionWeaponPose {
+    static func offset(distance: Float, left: Bool, right: SIMD3<Float>, up: SIMD3<Float>) -> SIMD3<Float> {
+        let depth = max(0.3,min(0.8,distance))
+        return right*(depth*(left ? -0.24 : 0.24))-up*(depth*0.26)
+    }
+}
+
+enum TimeMotionNavigation {
+    static func step(position: SIMD3<Float>, direction: SIMD3<Float>, distance: Float, obstacles: [BoxObstacle]) -> SIMD3<Float> {
+        let flat = SIMD3(direction.x,0,direction.z)
+        guard distance > 0, TimeMotionGeometry.length(flat)>0.001 else { return position }
+        let d = flat/TimeMotionGeometry.length(flat)
+        // Try a forward step, then oblique and perpendicular routes around cover.
+        for angle in [Float(0),0.65,-0.65,1.25,-1.25,1.57,-1.57] {
+            let rotated = SIMD3(d.x*cos(angle)-d.z*sin(angle),0,d.x*sin(angle)+d.z*cos(angle))
+            let next = position+rotated*distance
+            let blocked = obstacles.contains { TimeMotionGeometry.hitBox(from:position+SIMD3(0,0.9,0),to:next+SIMD3(0,0.9,0),box:$0,padding:0.25) != nil }
+            if !blocked { return next }
+        }
+        return position
     }
 }
 

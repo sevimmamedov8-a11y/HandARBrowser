@@ -28,6 +28,8 @@ assert 'tracking.start(mode: .worldTracking)' in start and 'if timeMotionCameraO
 assert 'pauseAndMute(browser)' in start and 'queueHandForegroundMask(left: nil, right: nil)' in start
 assert 'timeMotionActive ? false' in vc
 assert 'guard ready else { return }' in vc[vc.index('    private func tickTimeMotion('):vc.index('    // MARK: Graffiti')]
+tick=vc[vc.index('    private func tickTimeMotion('):vc.index('    // MARK: Graffiti')]
+assert tick.count('visible: false') == 2, 'Both virtual hands must be hidden only in Time Motion'
 assert vc.index('timeMotionLeft = freshLeft') < vc.index('        func eligible(_ sample: HandSample?)')
 assert vc.count('post(\'security-game\')') == 1 and 'case "security-game":' in vc  # existing game kept
 

@@ -2424,9 +2424,9 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         controllerHandRoot.isHidden = true
         virtualHands.tick(at: now, ready: ready, head: headNode)
         virtualHands.update(hand: .left, pose: left?.pose, timestamp: left?.timestamp ?? -.infinity,
-                            at: now, visible: left?.pose != nil)
+                            at: now, visible: false)
         virtualHands.update(hand: .right, pose: right?.pose, timestamp: right?.timestamp ?? -.infinity,
-                            at: now, visible: right?.pose != nil)
+                            at: now, visible: false)
     }
 
     // MARK: Graffiti

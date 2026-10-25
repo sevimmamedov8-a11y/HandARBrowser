@@ -16,7 +16,7 @@ import Foundation
         for _ in 0..<120 { still.update(.motion(head: 2.0, hand: 0.6), realDt: dt60) }
         check(still.scale > 0.95, "fast head and hand motion reaches full game speed")
         for _ in 0..<180 { still.update(.motion(head: 0, hand: 0), realDt: dt60) }
-        check(still.scale < 0.1 && !still.isPaused, "keeping still slows time to a crawl without pausing")
+        check(still.scale == 0 && !still.isPaused, "keeping still stops game time exactly without requiring pause")
 
         var jitter = TimeScaleController()
         for _ in 0..<600 { jitter.update(.motion(head: 0.1, hand: 0.02), realDt: dt60) }
@@ -255,6 +255,47 @@ import Foundation
             return shots
         }
         check(shotsAt(30)==shotsAt(60) && shotsAt(60)==shotsAt(120),"auto-fire timing is equal at 30, 60 and 120 display FPS")
+        // V104: true stop, continuous slow motion, weapon placement and new modes.
+        var responsive = TimeScaleController()
+        for _ in 0..<30 { responsive.update(.motion(head:2,hand:0),realDt:dt60) }
+        for _ in 0..<10 { responsive.update(.motion(head:0.1,hand:0.03),realDt:dt60) }
+        check(responsive.scale == 0,"stopping for 167 ms produces an exact freeze despite sensor noise")
+        responsive.update(.motion(head:0,hand:0.4),realDt:dt60)
+        check(responsive.scale>0 && responsive.scale<0.1,"slow deliberate hand motion smoothly restarts time")
+        check(TimeScaleController.targetScale(head:0,hand:0.2)<0.02,"small movement creates deep bullet time")
+        var slowClock = FixedStepClock()
+        _ = slowClock.advance(realDt:dt60,scale:0.01)
+        let fraction = slowClock.interpolation
+        check(fraction>0 && fraction<1 && slowClock.gameTime == 0,"slow render interpolation advances before a physics step")
+        _ = slowClock.advance(realDt:dt60,scale:0)
+        check(slowClock.interpolation == fraction,"freezing preserves the rendered fraction without drift")
+        check(projectile.previous == swept.from,"projectile remembers its previous physical position")
+        var shotgun = FireScheduler(),pellets = 0
+        for _ in 0..<240 where shotgun.advance(gameDt:fixed,firing:true,interval:0.85) { pellets += 1 }
+        check(pellets == 3,"shotgun has its own slow fire interval")
+        let rightOffset = TimeMotionWeaponPose.offset(distance:0.5,left:false,right:SIMD3(1,0,0),up:SIMD3(0,1,0))
+        let leftOffset = TimeMotionWeaponPose.offset(distance:0.5,left:true,right:SIMD3(1,0,0),up:SIMD3(0,1,0))
+        check(rightOffset.x>0.1 && rightOffset.y < -0.1 && rightOffset.z == 0,"weapon is lowered and moved away from the aim line")
+        check(rightOffset.x == -leftOffset.x && rightOffset.y == leftOffset.y,"gun offset is mirrored between hands")
+        let barrier = BoxObstacle(lo:SIMD3(-0.3,0,-0.6),hi:SIMD3(0.3,2,-0.4))
+        let detour = TimeMotionNavigation.step(position:.zero,direction:SIMD3(0,0,-1),distance:0.2,obstacles:[barrier])
+        check(abs(detour.x)>0.1 && detour.z<0,"enemy chooses a lateral route around nearby cover")
+        check(TimeMotionGeometry.hitBox(from:SIMD3(0,0.9,0),to:detour+SIMD3(0,0.9,0),box:barrier,padding:0.25) == nil,"detour keeps body clearance")
+        var endless = WaveDirector();endless.endless = true
+        var maxWave = 0,endlessVictory = false,perWave:[Int:Int] = [:]
+        for _ in 0..<12000 {
+            switch endless.tick(gameDt:fixed,alive:0) {
+            case let .spawn(wave): maxWave = max(maxWave,wave);perWave[wave,default:0] += 1
+            case .victory: endlessVictory = true
+            default: break
+            }
+        }
+        check(maxWave>8 && !endlessVictory,"endless mode advances beyond three waves without victory")
+        check(perWave.values.allSatisfy { $0<=8 },"endless waves never exceed the enemy pool")
+        _ = TimeMotionBestScore.record(90,defaults:defaults,mode:.endless)
+        _ = TimeMotionBestScore.record(200,defaults:defaults,mode:.headshots)
+        check(TimeMotionBestScore.load(defaults:defaults,mode:.endless)==90 && TimeMotionBestScore.load(defaults:defaults,mode:.headshots)==200 && TimeMotionBestScore.load(defaults:defaults)==0,"records remain separate by mode")
+        defaults.removePersistentDomain(forName:suite)
         print("PASS: \(count) time-motion checks")
     }
 }

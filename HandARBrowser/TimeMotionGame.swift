@@ -18,7 +18,8 @@ struct TimeMotionHandInput {
 
 private enum TMLayout {
     static let floorDepthBelowHead: Float = 1.45
-    static let arenaDistance: Float = 2.6
+    static let arenaDistance: Float = 6
+    static let lootStart = 7
     static let gunHalf = SIMD3<Float>(0.035, 0.12, 0.13)
     static let cubeHalf = SIMD3<Float>(0.06, 0.06, 0.06)
     static let gunRadius: Float = 0.12
@@ -26,10 +27,10 @@ private enum TMLayout {
     static let enemyHitRadius: Float = 0.38
     static let headRadius: Float = TimeMotionTuning.playerHeadRadius
     static let enemyPoolSize = 8
-    static let bulletPoolSize = 32
+    static let bulletPoolSize = 64
     static let shardPoolSize = 32
     static let playerBulletSpeed: Float = 30
-    static let enemyBulletSpeed: Float = 6
+    static let enemyBulletSpeed: Float = 4.5
     static let enemyBulletLifetime = 6.0
     static let playerBulletLifetime = 1.5
     static let windupSeconds = 0.8
@@ -51,22 +52,41 @@ private enum TMSound: String, CaseIterable {
     case thud = "tm_thud"
     case win = "tm_win"
     case lose = "tm_lose"
+    var followsTime: Bool { self == .shot || self == .enemyShot || self == .hit || self == .shatter || self == .thud }
 }
 
 private final class TMSoundBank {
     private var players: [TMSound: AVAudioPlayer] = [:]
+    private var frozen = Set<TMSound>()
+    private var timeScale = 1.0
 
     func prepare() { for sound in TMSound.allCases { _ = load(sound) } }
 
     func play(_ sound: TMSound, volume: Float = 0.9) {
+        guard !sound.followsTime || timeScale > 0 else { return }
         guard let player = players[sound] ?? load(sound) else { return }
+        player.enableRate = sound.followsTime
+        if sound.followsTime { player.rate = Float(max(0.5,min(1,timeScale))) }
         player.volume = volume
         player.currentTime = 0
         player.play()
     }
 
     func stopAll() {
+        frozen.removeAll()
         for player in players.values { player.stop() }
+    }
+
+    func setTimeScale(_ value: Double) {
+        timeScale = value
+        for (sound,player) in players where sound.followsTime {
+            if value == 0 {
+                if player.isPlaying { frozen.insert(sound); player.pause() }
+            } else {
+                player.enableRate = true; player.rate = Float(max(0.5,min(1,value)))
+                if frozen.remove(sound) != nil { player.play() }
+            }
+        }
     }
 
     private func load(_ sound: TMSound) -> AVAudioPlayer? {
@@ -187,7 +207,11 @@ private final class TMEnemy {
     private var stepPhase: Float = 0
     private(set) var alive = false
     private(set) var position = SIMD3<Float>.zero
+    var previousPosition = SIMD3<Float>.zero
     var approaches = false
+    var role = 0
+    var strafePhase: Double = 0
+    var meleeTimer = 0.0
     var shotTimer = 0.0
     var windup: Double?
     var muzzle: SIMD3<Float> {
@@ -229,7 +253,7 @@ private final class TMEnemy {
     }
     func spawn(at point: SIMD3<Float>, approaches: Bool, firstShot: Double) {
         alive = true; self.approaches = approaches; shotTimer = firstShot; windup = nil; stepPhase = 0
-        position = point; root.simdPosition = point; root.isHidden = false
+        position = point; previousPosition = point; root.simdPosition = point; root.isHidden = false; meleeTimer = 0.6; strafePhase = Double(id)*0.8
         material.diffuse.contents = Self.idleColor
         for leg in legs { leg.eulerAngles.x = 0 }
     }
@@ -257,24 +281,39 @@ private struct TMBullet {
 }
 
 private final class TMItem {
-    let isGun: Bool
+    var isGun: Bool { kind.isGun }
+    let kind: TimeMotionWeapon
+    var ammo: Int
+    var available = true
+    var triggerAllowed = false
+    var fire = FireScheduler()
     let half: SIMD3<Float>
     let radius: Float
     let node: SCNNode
+    let flash: SCNNode?
+    var flashTime = 0.0
     var home = SIMD3<Float>.zero
     var position = SIMD3<Float>.zero
     var velocity = SIMD3<Float>.zero
     var aim = SIMD3<Float>(0, 0, -1)
+    var muzzle: SIMD3<Float> { position+aim*(kind == .shotgun ? 0.24 : 0.11) }
     var resting = true
     var held: TrackedHand?
     var spin = SIMD3<Float>.zero
     var angles = SIMD3<Float>.zero
 
-    init(isGun: Bool, node: SCNNode) {
-        self.isGun = isGun
+    init(isGun: Bool, node: SCNNode, kind: TimeMotionWeapon? = nil) {
+        self.kind = kind ?? (isGun ? .pistol : .prop)
+        self.ammo = self.kind.capacity
         self.node = node
-        half = isGun ? TMLayout.gunHalf : TMLayout.cubeHalf
-        radius = isGun ? TMLayout.gunRadius : TMLayout.cubeRadius
+        flash = node.childNodes.first { $0.geometry is SCNCone }
+        if self.kind == .shotgun { flash?.position.z = -0.40 }
+        switch self.kind {
+        case .shotgun: half = SIMD3(0.04,0.12,0.32); radius = 0.14
+        case .katana: half = SIMD3(0.07,0.02,0.65); radius = 0.12
+        case .pistol: half = TMLayout.gunHalf; radius = TMLayout.gunRadius
+        case .prop: half = TMLayout.cubeHalf; radius = TMLayout.cubeRadius
+        }
     }
 }
 
@@ -297,7 +336,10 @@ final class TimeMotionVRGame {
         TMCoverSpec(forward:2.4,right:-1.5,halfRight:0.7,halfForward:0.3,halfHeight:0.53,color:UIColor(white:0.66,alpha:1)),
         TMCoverSpec(forward:3.1,right:1.5,halfRight:0.6,halfForward:0.3,halfHeight:0.67,color:UIColor(white:0.73,alpha:1)),
         TMCoverSpec(forward:5.4,right:0,halfRight:0.55,halfForward:0.32,halfHeight:0.48,color:UIColor(white:0.68,alpha:1)),
-        TMCoverSpec(forward:0.8,right:0.45,halfRight:0.30,halfForward:0.24,halfHeight:0.48,color:UIColor(white:0.75,alpha:1))
+        TMCoverSpec(forward:0.8,right:0.45,halfRight:0.30,halfForward:0.24,halfHeight:0.48,color:UIColor(white:0.75,alpha:1)),
+        TMCoverSpec(forward:8,right:-5,halfRight:1.1,halfForward:0.4,halfHeight:0.7,color:UIColor(white:0.70,alpha:1)),
+        TMCoverSpec(forward:9,right:5,halfRight:1.1,halfForward:0.4,halfHeight:0.7,color:UIColor(white:0.70,alpha:1)),
+        TMCoverSpec(forward:13,right:0,halfRight:1.0,halfForward:0.4,halfHeight:0.65,color:UIColor(white:0.72,alpha:1))
     ]
 
     private let root = SCNNode()
@@ -309,14 +351,16 @@ final class TimeMotionVRGame {
     private let up = SIMD3<Float>(0, 1, 0)
     private var floorY: Float = 0
 
+    private var mode = TimeMotionMode.waves
     private var phase: Phase = .playing
+    private var viewRight = SIMD3<Float>(1,0,0)
+    private var viewUp = SIMD3<Float>(0,1,0)
     private var userPaused = false
     private var score = TimeMotionScore()
     private var health = PlayerHealth()
     private var director = WaveDirector()
     private var timeScale = TimeScaleController()
     private var clock = FixedStepClock()
-    private var fire = FireScheduler()
     private var meleeGate = MeleeGate()
     private var best = 0
     private var lastNow: Double?
@@ -327,7 +371,6 @@ final class TimeMotionVRGame {
     private var buttonOwner: TrackedHand?
     private var lastDamage = -Double.infinity
     private var lastHUD = -Double.infinity
-    private var shotFlash = 0.0
     private var spawnIndex = 0
     private let decor = SCNNode()
     private let reticle = SCNNode()
@@ -375,7 +418,7 @@ final class TimeMotionVRGame {
         if root.parent == nil { scene.rootNode.addChildNode(root) }
         let flat = SIMD3(direction.x,0,direction.z)
         layout(headPosition: headPosition, forward: simd_length(flat)>0.1 ? simd_normalize(flat) : SIMD3(0,0,-1))
-        best = TimeMotionBestScore.load()
+        best = TimeMotionBestScore.load(mode:mode)
         lastNow = nil
         isRunning = true
         resetRound()
@@ -412,7 +455,7 @@ final class TimeMotionVRGame {
         buttonGate.cancel()
         dwellRing.isHidden = true
         gunFiring = false
-        fire.rearm()
+        for item in items { item.fire.rearm() }
     }
 
     // MARK: Frame
@@ -428,11 +471,12 @@ final class TimeMotionVRGame {
         let position = SIMD3(c3.x,c3.y,c3.z)
         let finite = [c0.x,c0.y,c0.z,c1.x,c1.y,c1.z,c2.x,c2.y,c2.z,c3.x,c3.y,c3.z].allSatisfy { $0.isFinite }
         let rotation = finite ? simd_quatf(simd_float3x3(columns:(SIMD3(c0.x,c0.y,c0.z),SIMD3(c1.x,c1.y,c1.z),SIMD3(c2.x,c2.y,c2.z)))) : simd_quatf(angle:0,axis:SIMD3(0,1,0))
+        if finite { viewRight = SIMD3(c0.x,c0.y,c0.z); viewUp = SIMD3(c1.x,c1.y,c1.z) }
         headMotion.update(position:position,rotation:rotation.vector,timestamp:headTimestamp ?? now,now:now,
             ready:trackingReady && finite && gap >= 0 && gap < 0.25)
         let stable = headMotion.safe
         if stable { head = position }
-        else { cancelInput(); sounds.stopAll(); shotFlash = 0 }
+        else { cancelInput(); sounds.stopAll(); clearFlashes() }
         var speeds = [0.0,0.0]
         for (index,input) in [left,right].enumerated() {
             handMotion[index].update(stable ? input?.pose?.center : nil,
@@ -445,10 +489,11 @@ final class TimeMotionVRGame {
         processHands(left:left,right:right,handSpeeds:speeds,now:now,ready:stable,dwell:true)
         guard isRunning else { return }
         let effective = (userPaused || phase != .playing || !stable) ? 0 : timeScale.scale
+        sounds.setTimeScale(effective)
         let steps = clock.advance(realDt:realDt,scale:effective)
         for _ in 0..<steps where phase == .playing { simulateStep(TimeMotionTuning.fixedStep) }
-        if !gunFiring { fire.rearm() }
-        shotFlash = max(0,shotFlash-realDt)
+        for item in items where !item.triggerAllowed { item.fire.rearm() }
+        for item in items { item.flashTime = max(0,item.flashTime-realDt) }
         syncNodes()
         updateAim(visible:stable && !userPaused && phase == .playing)
         if now-lastHUD >= 0.1 { refreshHUD(now:now,effectiveScale:effective); lastHUD = now }
@@ -460,6 +505,7 @@ final class TimeMotionVRGame {
                               handSpeeds: [Double], now: Double, ready: Bool, dwell: Bool) {
         let inputs = [left,right]
         gunFiring = false; targetItem = nil
+        for item in items { item.triggerAllowed = false }
         var targetButton: Int?
         var pressing: TimeMotionHandInput?
         if ready {
@@ -489,8 +535,7 @@ final class TimeMotionVRGame {
             // The held pose is updated even during release confirmation, before throwing.
             if let held = grabGates[index].held, let pose = input?.pose, let ray = input?.aimRay {
                 let item = items[held]
-                let aim = simd_normalize(ray.direction)
-                item.aim = aim; item.position = pose.center + aim*(item.isGun ? 0.07 : 0)
+                placeHeld(item,pose:pose,ray:ray,hand:handFor(index))
                 item.velocity = .zero; item.resting = false
             }
             let interactive = (phase == .ready || phase == .playing) && !userPaused
@@ -504,13 +549,12 @@ final class TimeMotionVRGame {
             case let .began(id):
                 items[id].held = handFor(index); items[id].resting = false; items[id].velocity = .zero
                 if let pose = input?.pose, let ray = input?.aimRay {
-                    items[id].aim = simd_normalize(ray.direction)
-                    items[id].position = pose.center+items[id].aim*(items[id].isGun ? 0.07 : 0)
+                    placeHeld(items[id],pose:pose,ray:ray,hand:handFor(index))
                 }
                 sounds.play(.grab,volume:0.5)
-                if items[id].isGun && phase == .ready {
+                if (items[id].isGun || items[id].kind == .katana) && phase == .ready {
                     phase = .playing; layoutButtons()
-                    showTransient("Двигайся — время идёт. Замри — замедлится.")
+                    showTransient("Двигайся — время идёт. Замри — время остановится.")
                 }
             case let .released(id):
                 items[id].held = nil; items[id].resting = false
@@ -523,24 +567,58 @@ final class TimeMotionVRGame {
             }
             if let held = grabGates[index].held, items[held].isGun, interactive,
                phase == .playing, input?.open != true, targetButton == nil, grabGates[index].releaseProgress == 0 {
-                gunFiring = true
+                items[held].triggerAllowed = items[held].ammo > 0
+                gunFiring = gunFiring || items[held].triggerAllowed
             }
             if interactive, phase == .playing, targetButton == nil, input?.fist == true,
                handSpeeds[index] >= 0.9, let pose = input?.pose {
-                punch(from:handMotion[index].previous ?? pose.center,to:pose.center,hand:index,speed:handSpeeds[index],now:now)
+                let blade = grabGates[index].held.flatMap { items[$0].kind == .katana ? items[$0] : nil }
+                strike(from:handMotion[index].previous ?? pose.center,to:pose.center,blade:blade,hand:index,speed:handSpeeds[index],now:now)
             }
         }
     }
 
     private func returnItem(_ id: Int) {
         let item = items[id]; item.held = nil; item.position = item.home
-        item.velocity = .zero; item.spin = .zero; item.resting = true; item.aim = forward
+        item.velocity = .zero; item.spin = .zero; item.resting = true; item.aim = forward; item.fire.rearm(); item.triggerAllowed = false
+    }
+
+    private func placeHeld(_ item: TMItem, pose: VirtualHandPose, ray: WorldRay, hand: TrackedHand) {
+        let direction = simd_length(ray.direction)>0.001 ? simd_normalize(ray.direction) : forward
+        let end = ray.origin+direction*40
+        let hit = ProjectileRules.firstImpact(owner:.player,from:ray.origin,to:end,covers:coverBoxes,
+            enemies:enemies.filter { $0.alive }.flatMap { $0.targets },playerHead:nil)
+        let target = ray.origin+direction*max(1,(hit?.t ?? 0.5)*40)
+        let offset = item.isGun ? TimeMotionWeaponPose.offset(distance:simd_length(pose.center-head),left:hand == .left,right:viewRight,up:viewUp) : .zero
+        item.position = pose.center+offset
+        let delta = target-item.position
+        item.aim = simd_length(delta)>0.001 ? simd_normalize(delta) : direction
+    }
+
+    private func blockParameter(from a: SIMD3<Float>, to b: SIMD3<Float>) -> Float? {
+        var best: Float?
+        for item in items where item.available && item.held != nil {
+            let centers = item.kind == .katana ? (0...4).map { item.position+item.aim*(Float($0)*0.15) } : [item.position]
+            for center in centers {
+                if let t = TimeMotionGeometry.segmentSphere(from:a,to:b,center:center,radius:item.kind == .katana ? 0.09 : item.radius), best == nil || t < best! { best = t }
+            }
+        }
+        return best
+    }
+
+    private func strike(from previous: SIMD3<Float>, to point: SIMD3<Float>, blade: TMItem?, hand: Int, speed: Double, now: Double) {
+        let reaches: [SIMD3<Float>] = blade.map { blade in (0...4).map { blade.aim*(Float($0)*0.15) } } ?? [.zero]
+        for reach in reaches {
+            // Sweep the whole blade; cover still blocks its reach.
+            if coverBoxes.contains(where: { TimeMotionGeometry.hitBox(from:point,to:point+reach,box:$0) != nil }) { continue }
+            punch(from:previous+reach,to:point+reach,hand:hand,speed:speed,now:now)
+        }
     }
 
     private func punch(from previous: SIMD3<Float>, to point: SIMD3<Float>, hand: Int, speed: Double, now: Double) {
         guard simd_length(point-previous) < 0.25 else { return }
         for enemy in enemies where enemy.alive {
-            let contact = enemy.targets.contains { TimeMotionGeometry.segmentSphere(from:previous,to:point,center:$0.center,radius:$0.radius+0.09) != nil }
+            let contact = (mode.headshotsOnly ? [enemy.targets[1]] : enemy.targets).contains { TimeMotionGeometry.segmentSphere(from:previous,to:point,center:$0.center,radius:$0.radius+0.09) != nil }
             let blocked = coverBoxes.contains { TimeMotionGeometry.hitBox(from:previous,to:point,box:$0) != nil }
             if contact && !blocked && meleeGate.allows(key:enemy.id*2+hand,handSpeed:speed,at:now) { killEnemy(enemy) }
         }
@@ -548,9 +626,9 @@ final class TimeMotionVRGame {
 
     private func freeItem(for ray: WorldRay) -> Int? {
         var nearest: (index:Int,score:Float)?
-        for (index,item) in items.enumerated() where item.held == nil {
+        for (index,item) in items.enumerated() where item.available && item.held == nil {
             let offset = item.position-ray.origin, along = simd_dot(offset,ray.direction)
-            guard along > 0, along < 4 else { continue }
+            guard along > 0, along < 12 else { continue }
             let miss = simd_length(offset-ray.direction*along)
             guard miss < item.radius+along*0.10 else { continue }
             let blocked = coverBoxes.contains { box in
@@ -576,13 +654,13 @@ final class TimeMotionVRGame {
     }
 
     private func visibleButtonIDs() -> [Int] {
-        phase == .ready ? [1] : (phase == .playing ? (userPaused ? [0,1,2] : [0,1]) : [2,1])
+        phase == .ready ? [1,3] : (phase == .playing ? (userPaused ? [0,1,2,3] : [0,1]) : [2,1,3])
     }
 
     private func handleButton(_ id: Int) {
         switch id {
         case 0:
-            userPaused.toggle(); timeScale.reset(); fire.rearm(); sounds.stopAll(); shotFlash = 0
+            userPaused.toggle(); timeScale.reset(); rearmWeapons(); sounds.stopAll(); clearFlashes()
             throwMotion = [TimeMotionThrow(),TimeMotionThrow()]; layoutButtons()
             buttons[0].setTitle(userPaused ? "▶ ДАЛЬШЕ" : "Ⅱ ПАУЗА")
             showTransient(userPaused ? "Пауза: время остановлено" : "Продолжаем")
@@ -590,6 +668,8 @@ final class TimeMotionVRGame {
             onExitRequested?()
         case 2:
             resetRound()
+        case 3:
+            mode = mode.next; best = TimeMotionBestScore.load(mode:mode); resetRound()
         default:
             break
         }
@@ -629,51 +709,66 @@ final class TimeMotionVRGame {
         guard phase == .playing else { return }
         updateItems(dt)
         updateShards(dt)
-        if fire.advance(gameDt: dt, firing: gunFiring) {
-            fireGun()
+        for item in items where item.available && item.isGun {
+            if item.fire.advance(gameDt:dt,firing:item.triggerAllowed && item.ammo>0,interval:item.kind.interval) {
+                fireGun(item)
+            }
         }
     }
 
     private func spawnEnemy(wave: Int) {
         guard let enemy = enemies.first(where: { !$0.alive }) else { return }
-        let pads: [(Float,Float)] = [(4.3,-2.5),(4.8,2.6),(6.3,0),(6.5,-3.3),(6.8,3.2),(3.8,-3.7),(4.1,3.8)]
+        let pads: [(Float,Float)] = [(5,-3.8),(6,3.8),(9,0),(11,-6),(11,6),(5,-7),(6,7),(3,-5)]
         for offset in 0..<pads.count {
             let pad = pads[(spawnIndex+offset)%pads.count], point = place(pad.0,pad.1,0)
             if enemies.contains(where: { $0.alive && simd_length($0.position-point)<0.8 }) { continue }
             enemy.spawn(at:point,approaches:(spawnIndex+wave)%3 != 0,firstShot:1.5+Double(spawnIndex%3)*0.35)
+            enemy.role = (spawnIndex+wave)%3
             spawnIndex += offset+1; return
         }
     }
 
     private func updateEnemies(_ dt: Double) {
         for enemy in enemies where enemy.alive {
-            if enemy.approaches {
-                let toHead = SIMD3(head.x - enemy.hitCenter.x, 0, head.z - enemy.hitCenter.z)
-                let distance = simd_length(toHead)
-                if distance > 2.4 {
-                    let step = simd_normalize(toHead) * Float(0.35 * dt)
-                    let candidate = enemy.position+step
-                    let chest = candidate+SIMD3(0,0.9,0)
-                    let blocked = coverBoxes.contains { TimeMotionGeometry.hitBox(from:enemy.hitCenter,to:chest,box:$0,padding:0.24) != nil }
-                    if !blocked { enemy.move(to:candidate) }
+            enemy.previousPosition = enemy.position
+            enemy.strafePhase += dt; enemy.meleeTimer -= dt
+            let toward = SIMD3(head.x-enemy.position.x,0,head.z-enemy.position.z)
+            let distance = simd_length(toward)
+            let radial = distance>0.001 ? toward/distance : forward
+            let lateral = SIMD3(-radial.z,0,radial.x)*(sin(enemy.strafePhase*0.8) >= 0 ? Float(1) : -1)
+            let intent: SIMD3<Float>
+            if enemy.role == 0 { intent = radial }
+            else { intent = radial*(distance > 5 ? 1 : (distance < 2.5 ? -0.8 : 0.15))+lateral*(enemy.role == 1 ? 0.9 : 0.5) }
+            let speed: Float = (enemy.role == 0 ? 1.8 : 1.1)*mode.enemySpeed
+            let old = enemy.position
+            if distance > 0.7 || enemy.role != 0 {
+                var obstacles = coverBoxes
+                for other in enemies where other.alive && other !== enemy {
+                    let center = other.position+SIMD3(0,0.9,0)
+                    obstacles.append(BoxObstacle(lo:center-SIMD3(0.16,0.6,0.16),hi:center+SIMD3(0.16,0.6,0.16)))
                 }
+                let next = TimeMotionNavigation.step(position:old,direction:intent,distance:speed*Float(dt),obstacles:obstacles)
+                enemy.move(to:next)
             }
-            enemy.animate(toward:head,walking:enemy.approaches && simd_length(head-enemy.hitCenter)>2.4,dt:dt)
+            enemy.animate(toward:head,walking:simd_length(enemy.position-old)>0.001,dt:dt)
+            if enemy.role == 0 {
+                enemy.setWindup(distance < 1.3)
+                let blocked = coverBoxes.contains { TimeMotionGeometry.hitBox(from:enemy.hitCenter,to:head,box:$0) != nil }
+                if distance < 0.85 && !blocked && enemy.meleeTimer <= 0 { playerHit(); enemy.meleeTimer = 1.1 }
+                continue
+            }
             if let windup = enemy.windup {
-                let next = windup - dt
-                if next <= 0 {
-                    enemy.windup = nil
-                    enemy.setWindup(false)
-                    shootAtHead(from: enemy)
-                } else {
-                    enemy.windup = next
-                }
+                let next = windup-dt
+                if next <= 0 { enemy.windup = nil; enemy.setWindup(false); shootAtHead(from:enemy) }
+                else { enemy.windup = next }
             } else {
                 enemy.shotTimer -= dt
                 if enemy.shotTimer <= 0 {
-                    enemy.windup = TMLayout.windupSeconds
-                    enemy.setWindup(true)
-                    enemy.shotTimer = Double.random(in: 1.8...2.8)
+                    let blocked = coverBoxes.contains { TimeMotionGeometry.hitBox(from:enemy.muzzle,to:head,box:$0) != nil }
+                    if !blocked {
+                        enemy.windup = TMLayout.windupSeconds/Double(mode.enemySpeed); enemy.setWindup(true)
+                        enemy.shotTimer = (1.6+Double(enemy.id%3)*0.3)/Double(mode.enemySpeed)
+                    }
                 }
             }
         }
@@ -691,12 +786,26 @@ final class TimeMotionVRGame {
         }
     }
 
-    private func fireGun() {
-        let gun = items[0]
-        let muzzle = gun.position + gun.aim * 0.14
-        if spawnBullet(owner: .player, position: muzzle, velocity: gun.aim * TMLayout.playerBulletSpeed,
-                       lifetime: TMLayout.playerBulletLifetime) {
-            sounds.play(.shot, volume: 0.65); shotFlash = 0.065
+    private func clearFlashes() { for item in items { item.flashTime = 0; item.flash?.isHidden = true } }
+
+    private func rearmWeapons() { for item in items { item.fire.rearm(); item.triggerAllowed = false } }
+
+    private func fireGun(_ gun: TMItem) {
+        guard gun.ammo > 0, gun.held != nil else { return }
+        let muzzle = gun.muzzle
+        guard !coverBoxes.contains(where: { TimeMotionGeometry.hitBox(from:gun.position,to:muzzle,box:$0) != nil }) else { return }
+        let spread: [SIMD2<Float>] = gun.kind == .shotgun ? [.zero,SIMD2(-0.045,0),SIMD2(0.045,0),SIMD2(0,0.045),SIMD2(0,-0.045)] : [.zero]
+        var fired = false
+        let across = simd_cross(gun.aim,viewUp)
+        let sideways = simd_length(across)>0.001 ? simd_normalize(across) : viewRight
+        let upward = simd_normalize(simd_cross(sideways,gun.aim))
+        for offset in spread {
+            let direction = simd_normalize(gun.aim+sideways*offset.x+upward*offset.y)
+            fired = spawnBullet(owner:.player,position:muzzle,velocity:direction*TMLayout.playerBulletSpeed,lifetime:TMLayout.playerBulletLifetime) || fired
+        }
+        if fired {
+            gun.ammo -= 1; sounds.play(.shot,volume:gun.kind == .shotgun ? 0.8 : 0.65); gun.flashTime = 0.065
+            if gun.ammo == 0 { showTransient("Пусто — брось оружие или возьми другое") }
         }
     }
 
@@ -721,7 +830,7 @@ final class TimeMotionVRGame {
     }
 
     private func updateBullets(_ dt: Double) {
-        let enemySpheres = enemies.filter { $0.alive }.flatMap { $0.targets }
+        let enemySpheres = enemies.filter { $0.alive }.flatMap { mode.headshotsOnly ? [$0.targets[1]] : $0.targets }
         let headSphere = SphereTarget(id: -1, center: head, radius: TMLayout.headRadius)
         var kept: [TMBullet] = []
         kept.reserveCapacity(bullets.count)
@@ -729,6 +838,13 @@ final class TimeMotionVRGame {
             let segment = bullet.state.step(gameDt: dt)
             bulletNodes[bullet.slot].simdPosition = bullet.state.position
             let playerHead: SphereTarget? = bullet.state.owner == .enemy ? headSphere : nil
+            if bullet.state.owner == .enemy {
+                let block = blockParameter(from:segment.from,to:segment.to)
+                let hitHead = TimeMotionGeometry.segmentSphere(from:segment.from,to:segment.to,center:head,radius:TMLayout.headRadius)
+                if let block, hitHead == nil || block < hitHead! {
+                    freeBullet(bullet.slot); sounds.play(.thud,volume:0.35); continue
+                }
+            }
             if let hit = ProjectileRules.firstImpact(owner: bullet.state.owner, from: segment.from,
                                                      to: segment.to, covers: coverBoxes,
                                                      enemies: enemySpheres, playerHead: playerHead) {
@@ -758,7 +874,8 @@ final class TimeMotionVRGame {
         guard phase == .playing, playerTime-lastDamage > 0.65 else { return }
         lastDamage = playerTime
         sounds.play(.hit, volume: 0.65)
-        if health.takeHit() {
+        if mode == .hardcore { finish(won:false) }
+        else if health.takeHit() {
             finish(won: false)
         } else {
             showTransient("Попадание! Уворачивайся головой")
@@ -768,6 +885,11 @@ final class TimeMotionVRGame {
     private func killEnemy(_ enemy: TMEnemy) {
         guard enemy.alive, phase == .playing else { return }
         let center = enemy.hitCenter
+        let loot = items[TMLayout.lootStart+enemy.id]
+        if loot.held == nil {
+            loot.available = true; loot.ammo = loot.kind.capacity; loot.fire.rearm()
+            loot.position = enemy.muzzle; loot.aim = forward; loot.velocity = SIMD3(0,0.6,0); loot.spin = SIMD3(1,2,0.5); loot.resting = false
+        }
         enemy.die()
         score.addKill()
         spawnShards(at: center)
@@ -805,7 +927,7 @@ final class TimeMotionVRGame {
     }
 
     private func updateItems(_ dt: Double) {
-        for item in items where item.held == nil && !item.resting {
+        for item in items where item.available && item.held == nil && !item.resting {
             let previous = item.position
             item.velocity.y -= TMLayout.gravity * Float(dt)
             item.position += item.velocity * Float(dt)
@@ -840,8 +962,8 @@ final class TimeMotionVRGame {
             }
             let offset = SIMD3(item.position.x - origin.x, 0, item.position.z - origin.z)
             let distance = simd_length(offset)
-            if distance > 7 {
-                let scale = 7 / distance
+            if distance > 16 {
+                let scale = 16 / distance
                 item.position.x = origin.x + offset.x * scale
                 item.position.z = origin.z + offset.z * scale
                 item.velocity.x *= 0.3
@@ -854,7 +976,7 @@ final class TimeMotionVRGame {
             }
             if simd_length(item.velocity) > 1.6 {
                 for enemy in enemies where enemy.alive {
-                    if enemy.targets.contains(where: { TimeMotionGeometry.segmentSphere(from:previous,to:item.position,center:$0.center,radius:$0.radius+item.radius) != nil }) && !coverBoxes.contains(where: { TimeMotionGeometry.hitBox(from:previous,to:item.position,box:$0) != nil }) {
+                    if (mode.headshotsOnly ? [enemy.targets[1]] : enemy.targets).contains(where: { TimeMotionGeometry.segmentSphere(from:previous,to:item.position,center:$0.center,radius:$0.radius+item.radius) != nil }) && !coverBoxes.contains(where: { TimeMotionGeometry.hitBox(from:previous,to:item.position,box:$0) != nil }) {
                         killEnemy(enemy)
                         item.velocity *= 0.3
                         break
@@ -874,11 +996,12 @@ final class TimeMotionVRGame {
             sounds.play(.lose, volume: 0.9)
         }
         userPaused = false
-        gunFiring = false; fire.rearm(); reticle.isHidden = true
+        gunFiring = false; rearmWeapons(); reticle.isHidden = true
         dropAll()
-        if TimeMotionBestScore.record(score.points) { best = score.points }
+        if TimeMotionBestScore.record(score.points,mode:mode) { best = score.points }
         best = max(best, score.points)
         buttons[0].setTitle("Ⅱ ПАУЗА")
+        buttons[3].setTitle(mode.title)
         layoutButtons()
     }
 
@@ -890,10 +1013,9 @@ final class TimeMotionVRGame {
         userPaused = false
         score = TimeMotionScore()
         health = PlayerHealth()
-        director = WaveDirector()
+        director = WaveDirector(); director.endless = mode == .endless
         timeScale.reset()
         clock.reset()
-        fire = FireScheduler()
         meleeGate.reset()
         buttonGate = ReleaseClickGate<Int>()
         gunFiring = false
@@ -904,21 +1026,23 @@ final class TimeMotionVRGame {
             shards[index].active = false
             shards[index].node.isHidden = true
         }
-        for item in items {
+        for (index,item) in items.enumerated() {
+            item.available = index < TMLayout.lootStart; item.ammo = item.kind.capacity; item.fire.rearm(); item.triggerAllowed = false
             item.held = nil
             item.velocity = .zero
             item.resting = true
-            item.position = item.home; item.angles = .zero; item.spin = .zero
+            item.position = item.home; item.angles = .zero; item.spin = .zero; item.aim = forward
         }
         items[0].aim = forward
         headMotion.reset()
         handVelocity = [.zero, .zero]
         buttons[0].setTitle("Ⅱ ПАУЗА")
+        buttons[3].setTitle(mode.title)
         layoutButtons()
         showTransient("Наведи ладонь на пистолет и сожми кулак")
         lastHUD = -.infinity; lastNow = nil
         handMotion = [TimeMotionHandMotion(),TimeMotionHandMotion()]; throwMotion = [TimeMotionThrow(),TimeMotionThrow()]; generations = [nil,nil]
-        sounds.stopAll(); shotFlash = 0
+        sounds.stopAll(); clearFlashes()
     }
 
     private func dropAll() {
@@ -950,36 +1074,42 @@ final class TimeMotionVRGame {
             let node = SCNNode(geometry:shape); node.simdPosition = position; group.addChildNode(node)
         }
         // Floor seams and a bordered central practice lane.
-        for x in -7...7 { box(SIMD3(0.014,0.008,12),SIMD3(Float(x),0.006,-3),pale) }
-        for z in -8...2 { box(SIMD3(15,0.008,0.014),SIMD3(0,0.007,Float(z)),pale) }
-        for x in [Float(-3.8),3.8] { box(SIMD3(0.025,0.009,10),SIMD3(x,0.012,-3),red) }
+        for x in -15...15 { box(SIMD3(0.014,0.008,24),SIMD3(Float(x),0.006,-6),pale) }
+        for z in -17...5 { box(SIMD3(31,0.008,0.014),SIMD3(0,0.007,Float(z)),pale) }
+        for x in [Float(-14.8),14.8] { box(SIMD3(0.025,0.009,22),SIMD3(x,0.012,-6),red) }
         // Structural columns and high gallery, outside the player's movement space.
         for x in [Float(-4.8),4.8] { for z in [Float(-2),-7] {
             box(SIMD3(0.36,3.6,0.36),SIMD3(x,1.8,z),concrete)
             box(SIMD3(0.48,0.10,0.48),SIMD3(x,0.05,z),trim)
         } }
         for z in [Float(-2),-7] { box(SIMD3(10,0.28,0.38),SIMD3(0,3.55,z),concrete) }
-        box(SIMD3(16,0.18,1.2),SIMD3(0,2.75,-8.3),concrete)
-        box(SIMD3(16,0.055,0.055),SIMD3(0,3.3,-7.7),trim)
-        for x in -7...7 { box(SIMD3(0.025,0.5,0.025),SIMD3(Float(x),3.03,-7.7),trim) }
+        box(SIMD3(32,0.18,1.2),SIMD3(0,3.75,-17.3),concrete)
+        box(SIMD3(32,0.055,0.055),SIMD3(0,4.3,-16.7),trim)
+        for x in -15...15 { box(SIMD3(0.025,0.5,0.025),SIMD3(Float(x),4.03,-16.7),trim) }
         // Closed rear wall and ceiling keep the camera background out of the arena.
-        box(SIMD3(16,5,0.06),SIMD3(0,2.5,3),concrete)
-        box(SIMD3(16,0.08,12),SIMD3(0,5,-3),concrete)
-        for x in [Float(-7.92),7.92] {
-            for z in [Float(-1),-4,-7] {
-                box(SIMD3(0.025,1.6,2.5),SIMD3(x,2.35,z),pale)
-                box(SIMD3(0.05,0.035,2.5),SIMD3(x,2.35,z),trim)
-                box(SIMD3(0.05,1.6,0.035),SIMD3(x,2.35,z),trim)
+        box(SIMD3(32,8,0.06),SIMD3(0,4,6),concrete)
+        box(SIMD3(32,0.08,24),SIMD3(0,8,-6),concrete)
+        for x in [Float(-15.92),15.92] {
+            for z in [Float(-2),-8,-14] {
+                box(SIMD3(0.025,3,5),SIMD3(x,3.5,z),pale)
+                box(SIMD3(0.05,0.035,5),SIMD3(x,3.5,z),trim)
+                box(SIMD3(0.05,3,0.035),SIMD3(x,3.5,z),trim)
             }
         }
         // Throwing shelf; its collider is installed in layout with the same dimensions.
         box(SIMD3(0.44,0.08,1.1),SIMD3(-0.45,0.8,-0.95),concrete)
         for z in [Float(-0.5),-1.4] { box(SIMD3(0.05,0.76,0.05),SIMD3(-0.45,0.38,z),trim) }
+        box(SIMD3(0.44,0.08,1.3),SIMD3(0.95,0.96,-1.05),concrete)
+        for z in [Float(-0.5),-1.6] { box(SIMD3(0.05,0.92,0.05),SIMD3(0.95,0.46,z),trim) }
+        for x in [Float(-10),10] { for z in [Float(-5),-13] {
+            box(SIMD3(0.55,6,0.55),SIMD3(x,3,z),concrete)
+        } }
+        for z in [Float(-5),-13] { box(SIMD3(21,0.35,0.6),SIMD3(0,6,z),concrete) }
         decor.addChildNode(group.flattenedClone())
         let title = TMLabel(); title.setText("TIME / MOTION",color:UIColor(white:0.13,alpha:1),meters:3.6)
-        title.position = SCNVector3(0,2.1,-8.9); decor.addChildNode(title)
+        title.position = SCNVector3(0,2.7,-17.9); decor.addChildNode(title)
         let subtitle = TMLabel(); subtitle.setText("MOVE • AIM • SURVIVE",color:UIColor(white:0.32,alpha:1),meters:2.4)
-        subtitle.position = SCNVector3(0,1.55,-8.88); decor.addChildNode(subtitle)
+        subtitle.position = SCNVector3(0,2,-17.88); decor.addChildNode(subtitle)
         let ambient = SCNLight(); ambient.type = .ambient; ambient.intensity = 450; ambient.categoryBitMask = 1
         let fill = SCNNode(); fill.light = ambient; decor.addChildNode(fill)
         let light = SCNLight(); light.type = .directional; light.intensity = 750; light.categoryBitMask = 1; light.castsShadow = false
@@ -991,14 +1121,14 @@ final class TimeMotionVRGame {
         built = true
 
         buildDecor()
-        let floorPlane = SCNPlane(width: 16, height: 16)
+        let floorPlane = SCNPlane(width:32,height:24)
         floorPlane.firstMaterial = tmConstantMaterial(UIColor(red: 0.91, green: 0.93, blue: 0.95, alpha: 1))
         floorNode = SCNNode(geometry: floorPlane)
         root.addChildNode(floorNode)
 
         let wallColor = UIColor(red: 0.96, green: 0.97, blue: 0.98, alpha: 1)
         for node in [backWall, leftWall, rightWall] {
-            let plane = SCNPlane(width: 16, height: 5)
+            let plane = SCNPlane(width:node === backWall ? 32 : 24,height:8)
             plane.firstMaterial = tmConstantMaterial(wallColor)
             node.geometry = plane
             root.addChildNode(node)
@@ -1049,6 +1179,22 @@ final class TimeMotionVRGame {
             }
             items.append(TMItem(isGun: false, node: cube))
         }
+        items.append(TMItem(isGun:true,node:gun.clone()))
+        let shotgun = gun.clone()
+        let longBarrel = SCNBox(width:0.055,height:0.055,length:0.32,chamferRadius:0.008); longBarrel.firstMaterial = metal
+        let longNode = SCNNode(geometry:longBarrel); longNode.position = SCNVector3(0,0.01,-0.16); shotgun.addChildNode(longNode)
+        items.append(TMItem(isGun:true,node:shotgun,kind:.shotgun))
+        let sword = SCNNode()
+        let blade = SCNBox(width:0.035,height:0.015,length:0.6,chamferRadius:0.003); blade.firstMaterial = tmConstantMaterial(UIColor(white:0.78,alpha:1))
+        let bladeNode = SCNNode(geometry:blade); bladeNode.position.z = -0.34; sword.addChildNode(bladeNode)
+        let handle = SCNBox(width:0.035,height:0.035,length:0.17,chamferRadius:0.008); handle.firstMaterial = metal
+        sword.addChildNode(SCNNode(geometry:handle))
+        let guardShape = SCNBox(width:0.12,height:0.02,length:0.025,chamferRadius:0.006); guardShape.firstMaterial = metal
+        let swordGuard = SCNNode(geometry:guardShape); swordGuard.position.z = -0.06; sword.addChildNode(swordGuard)
+        items.append(TMItem(isGun:false,node:sword,kind:.katana))
+        for _ in 0..<TMLayout.enemyPoolSize {
+            let loot = TMItem(isGun:true,node:gun.clone()); loot.available = false; loot.node.isHidden = true; items.append(loot)
+        }
         for item in items { root.addChildNode(item.node) }
 
         for id in 0..<TMLayout.enemyPoolSize {
@@ -1077,10 +1223,12 @@ final class TimeMotionVRGame {
 
         buttons = [TMButton(color: UIColor(red: 0.2, green: 0.5, blue: 0.9, alpha: 1)),
                    TMButton(color: UIColor(white: 0.3, alpha: 1)),
-                   TMButton(color: UIColor(red: 0.15, green: 0.7, blue: 0.35, alpha: 1))]
+                   TMButton(color: UIColor(red: 0.15, green: 0.7, blue: 0.35, alpha: 1)),
+                   TMButton(color:UIColor(red:0.55,green:0.15,blue:0.22,alpha:1))]
         buttons[0].setTitle("Ⅱ ПАУЗА")
         buttons[1].setTitle("🚪 ВЫХОД")
         buttons[2].setTitle("↻ ЗАНОВО")
+        buttons[3].setTitle(mode.title)
         for button in buttons { root.addChildNode(button.node) }
         root.addChildNode(dwellRing)
 
@@ -1100,11 +1248,11 @@ final class TimeMotionVRGame {
         floorNode.simdPosition = place(TMLayout.arenaDistance, 0, 0)
         floorNode.simdOrientation = simd_quatf(angle: -.pi / 2, axis: SIMD3(1, 0, 0))
 
-        backWall.simdPosition = place(9, 0, 2.5)
+        backWall.simdPosition = place(18,0,4)
         backWall.simdOrientation = simd_quatf(from: SIMD3(0, 0, 1), to: -forward)
-        leftWall.simdPosition = place(4, -8, 2.5)
+        leftWall.simdPosition = place(6,-16,4)
         leftWall.simdOrientation = simd_quatf(from: SIMD3(0, 0, 1), to: right)
-        rightWall.simdPosition = place(4, 8, 2.5)
+        rightWall.simdPosition = place(6,16,4)
         rightWall.simdOrientation = simd_quatf(from: SIMD3(0, 0, 1), to: -right)
 
         coverBoxes.removeAll()
@@ -1120,15 +1268,23 @@ final class TimeMotionVRGame {
         items[1].home = place(0.65, -0.45, 0.9)
         items[2].home = place(0.95, -0.45, 0.9)
         items[3].home = place(1.25, -0.45, 0.9)
+        items[4].home = place(0.65,0.95,1.08)
+        items[5].home = place(1.05,0.95,1.08)
+        items[6].home = place(1.45,0.95,1.08)
+        for item in items.dropFirst(TMLayout.lootStart) { item.home = place(0.8,0.45,1.08) }
 
+        coverBoxes.append(obstacle(center:place(1.05,0.95,0.96),halfRight:0.22,halfForward:0.65,halfHeight:0.04))
         coverBoxes.append(obstacle(center:place(0.95,-0.45,0.80),halfRight:0.22,halfForward:0.55,halfHeight:0.04))
         for x in [Float(-4.8),4.8] { for z in [Float(2),7] {
             coverBoxes.append(obstacle(center:place(z,x,1.8),halfRight:0.18,halfForward:0.18,halfHeight:1.8))
         } }
-        coverBoxes.append(obstacle(center:place(9,0,2.5),halfRight:8,halfForward:0.06,halfHeight:2.5))
-        coverBoxes.append(obstacle(center:place(-3,0,2.5),halfRight:8,halfForward:0.06,halfHeight:2.5))
-        for x in [Float(-8),8] { coverBoxes.append(obstacle(center:place(3,x,2.5),halfRight:0.06,halfForward:6,halfHeight:2.5)) }
-        coverBoxes.append(obstacle(center:place(3,0,-0.04),halfRight:8,halfForward:6,halfHeight:0.04))
+        coverBoxes.append(obstacle(center:place(18,0,4),halfRight:16,halfForward:0.06,halfHeight:4))
+        coverBoxes.append(obstacle(center:place(-6,0,4),halfRight:16,halfForward:0.06,halfHeight:4))
+        for x in [Float(-16),16] { coverBoxes.append(obstacle(center:place(6,x,4),halfRight:0.06,halfForward:12,halfHeight:4)) }
+        coverBoxes.append(obstacle(center:place(6,0,-0.04),halfRight:16,halfForward:12,halfHeight:0.04))
+        for x in [Float(-10),10] { for z in [Float(5),13] {
+            coverBoxes.append(obstacle(center:place(z,x,3),halfRight:0.275,halfForward:0.275,halfHeight:3))
+        } }
         decor.simdPosition = SIMD3(origin.x,floorY,origin.z); decor.simdOrientation = basis
         layoutButtons()
         let hudHeight: Float = 1.5
@@ -1145,6 +1301,8 @@ final class TimeMotionVRGame {
         buttons[0].node.isHidden = !playing
         buttons[2].node.isHidden = phase == .ready || (playing && !userPaused)
         buttons[1].node.isHidden = false
+        buttons[3].node.isHidden = phase == .playing && !userPaused
+        buttons[3].node.simdPosition = place(1.35,0,0.5)
         buttons[0].node.simdPosition = place(1.35, -0.45, 1.05)
         buttons[2].node.simdPosition = place(1.35, 0, userPaused ? 0.78 : 1.05)
         buttons[1].node.simdPosition = place(1.35, 0.45, 1.05)
@@ -1163,20 +1321,28 @@ final class TimeMotionVRGame {
     }
 
     private func syncNodes() {
+        for enemy in enemies where enemy.alive {
+            enemy.root.simdPosition = enemy.previousPosition+(enemy.position-enemy.previousPosition)*clock.interpolation
+        }
         for (index,item) in items.enumerated() {
+            item.node.isHidden = !item.available
+            item.flash?.isHidden = item.held == nil || item.flashTime <= 0 || !item.triggerAllowed || userPaused || phase != .playing
             item.node.simdPosition = item.position
             if item.held != nil || item.position == item.home {
                 item.node.simdOrientation = simd_quatf(from:SIMD3(0,0,-1),to:item.aim)
             } else { item.node.simdEulerAngles = item.angles }
-            item.node.scale = SCNVector3(1,1,1)
+            let size: Float = item.held != nil && item.isGun ? 0.70 : 1
+            item.node.scale = SCNVector3(repeating:size)
             if targetItem == index && item.held == nil { item.node.scale = SCNVector3(1.08,1.08,1.08) }
         }
-        muzzleFlash.isHidden = shotFlash <= 0 || !gunFiring || userPaused || phase != .playing
+        for bullet in bullets {
+            bulletNodes[bullet.slot].simdPosition = bullet.state.previous+(bullet.state.position-bullet.state.previous)*clock.interpolation
+        }
     }
 
     private func updateAim(visible: Bool) {
-        guard visible, let gun = items.first, gun.held != nil else { reticle.isHidden = true; return }
-        let from = gun.position+gun.aim*0.14, to = from+gun.aim*20
+        guard visible, let gun = items.first(where: { $0.available && $0.isGun && $0.held != nil }) else { reticle.isHidden = true; return }
+        let from = gun.muzzle, to = from+gun.aim*40
         let hit = ProjectileRules.firstImpact(owner:.player,from:from,to:to,covers:coverBoxes,
             enemies:enemies.filter { $0.alive }.flatMap { $0.targets },playerHead:nil)
         let t = hit?.t ?? 0.25
@@ -1189,21 +1355,22 @@ final class TimeMotionVRGame {
 
     func recenterControls(head node: SCNNode) {
         guard isRunning else { return }
-        userPaused = phase == .playing; gunFiring = false; fire.rearm(); sounds.stopAll(); shotFlash = 0
+        userPaused = phase == .playing; gunFiring = false; rearmWeapons(); sounds.stopAll(); clearFlashes()
         buttons[0].setTitle("▶ ДАЛЬШЕ"); layoutButtons()
         let t = node.simdWorldTransform, position = node.simdWorldPosition
         let look = SIMD3(-t.columns.2.x,0,-t.columns.2.z)
         let facing = simd_length(look)>0.1 ? simd_normalize(look) : forward
         let side = simd_cross(facing,up)
         for (index,button) in buttons.enumerated() {
-            button.node.simdPosition = position+facing*1.2+side*(Float(index-1)*0.46)-up*0.25
+            button.node.simdPosition = position+facing*1.2+side*(Float(index%2)*0.50-0.25)-up*(index<2 ? 0.25 : 0.52)
         }
     }
 
     private func refreshHUD(now: Double, effectiveScale: Double) {
         scoreLabel.setText("Очки \(score.points) · Рекорд \(max(best, score.points))", meters: 0.5)
-        healthLabel.setText("Жизни \(health.remaining) из \(TimeMotionTuning.playerHits)", meters: 0.3)
-        waveLabel.setText("Волна \(min(director.wave + 1, WaveDirector.waveSizes.count)) из \(WaveDirector.waveSizes.count)",
+        let lives = mode == .hardcore ? (phase == .defeat ? 0 : 1) : health.remaining
+        healthLabel.setText("Жизни \(lives) из \(mode == .hardcore ? 1 : TimeMotionTuning.playerHits)", meters: 0.3)
+        waveLabel.setText(mode == .endless ? "Волна \(director.wave+1) · ∞" : "\(mode.title) · \(min(director.wave + 1, WaveDirector.waveSizes.count))/\(WaveDirector.waveSizes.count)",
                           meters: 0.4)
         let speedText: String
         if userPaused {
@@ -1211,13 +1378,16 @@ final class TimeMotionVRGame {
         } else if timeScale.isPaused {
             speedText = "Нет отслеживания — игра остановлена"
         } else {
-            speedText = String(format: "Время ×%.2f", effectiveScale)
+            speedText = effectiveScale == 0 ? "ВРЕМЯ ОСТАНОВЛЕНО" : String(format: "Время ×%.2f", effectiveScale)
         }
         speedLabel.setText(speedText, meters: 0.45)
         let releasing = grabGates.map { $0.releaseProgress }.max() ?? 0
         let hint: String
         if releasing > 0 { hint = String(format:"Отпускаю… %.1f с",2*(1-releasing)) }
-        else if items.first?.held != nil { hint = "Стрельба автоматическая · ладонь 2 с — отпустить" }
+        else if items.contains(where: { $0.held != nil && $0.isGun }) {
+            let ammo = items.filter { $0.held != nil && $0.isGun }.map { "\($0.held == .left ? "Л" : "П"): \($0.ammo)" }.joined(separator:" · ")
+            hint = "\(ammo) · ладонь 2 с — отпустить"
+        }
         else if targetItem != nil { hint = "Сожми кулак — взять предмет" }
         else { hint = "Наведи ладонь на пистолет · сожми кулак" }
         hintLabel.setText(hint,meters:0.95)
@@ -1225,7 +1395,7 @@ final class TimeMotionVRGame {
         switch phase {
         case .victory: central = "ПОБЕДА · очки \(score.points)"
         case .defeat: central = "ПОРАЖЕНИЕ · очки \(score.points)"
-        case .ready: central = "ВОЗЬМИ ПИСТОЛЕТ, ЧТОБЫ НАЧАТЬ"
+        case .ready: central = "ВОЗЬМИ ОРУЖИЕ, ЧТОБЫ НАЧАТЬ"
         case .playing: central = now < transientUntil ? transientText : ""
         }
         centerLabel.setText(central, meters: 0.9)

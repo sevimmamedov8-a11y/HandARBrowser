@@ -166,7 +166,10 @@ with tempfile.TemporaryDirectory(prefix='handar-head-') as directory:
 
 assert 'guard inVR, !usesHeadAim || lensCalibrationView != nil || graffitiActive else' in method('handleHands')
 assert 'if !self.usesHeadAim || self.lensCalibrationView != nil' in source
-assert '!self.usesHeadAim, self.handOwnership.hand != nil' in source
+watchdog = source[source.index('handInputWatchdog = Timer.scheduledTimer'):source.index('if let watchdog = handInputWatchdog')]
+assert '!self.usesHeadAim' in watchdog
+assert 'self.handOwnership.hand != nil || self.securityGame.inputHand != nil' in watchdog
+assert 'self.lastHandDeliveryTime > 0.2' in watchdog
 for name in ['handleControllerStick','handleControllerGyro','updateControllerHand']:
     assert 'guard !usesHeadAim || lensCalibrationView != nil else' in method(name)
 assert 'aim-head' in source and 'aim-hand' in source

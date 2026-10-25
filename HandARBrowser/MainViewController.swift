@@ -1009,7 +1009,8 @@ final class MainViewController: UIViewController, MTKViewDelegate {
             guard let self,self.inVR else { return };self.leaveVRToMenu()
         }
         handInputWatchdog = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
-            guard let self, self.inVR, !self.usesHeadAim, self.handOwnership.hand != nil,
+            guard let self, self.inVR, !self.usesHeadAim,
+                  (self.handOwnership.hand != nil || self.securityGame.inputHand != nil),
                   CACurrentMediaTime()-self.lastHandDeliveryTime > 0.2 else { return }
             self.cancelHandInteraction()
             self.handOwnership.reset()
@@ -3543,6 +3544,21 @@ final class MainViewController: UIViewController, MTKViewDelegate {
             return
         }
         lastHandDeliveryTime = max(freshLeft?.timestamp ?? -.infinity, freshRight?.timestamp ?? -.infinity)
+        if securityGameActive {
+            let samples = [freshRight,freshLeft].compactMap { $0 }
+            let sample = samples.first { $0.hand == securityGame.inputHand } ?? samples.first
+            if let sample { lastHandSeenTime = now }
+            else if controllerConnected, now-lastHandSeenTime > 0.45 { updateControllerHand(); return }
+            var ray: WorldRay?
+            if let sample, let wrist = sample.maskJoints[.wrist], let base = sample.maskJoints[.middleMCP] {
+                ray = tracking.worldRay(visionPoint:CGPoint(x:(wrist.x+base.x)*0.5,y:(wrist.y+base.y)*0.5))
+            }
+            securityGame.update(ray:ray,pinch:sample?.clickPinch ?? false,allowBegin:sample?.clickBegan ?? false,
+                                dwell:usesDwell,fist:sample?.isFist,open:sample?.openPalmCenter != nil,
+                                hand:sample?.hand,trackingGeneration:sample?.trackingGeneration)
+            controllerHandRoot.isHidden = true
+            return
+        }
         if freshLeft != nil || freshRight != nil { lastHandSeenTime = now }
         if graffitiActive {
             handleGraffitiHands(left: freshLeft, right: freshRight, at: now)
@@ -3622,17 +3638,6 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         }
         if cinemaWebScreenActive {
             handleCinemaWebHands(left: left, right: right)
-            return
-        }
-        if securityGameActive {
-            if let sample = right ?? left,
-               let ray = tracking.worldRay(visionPoint: sample.indexTip) {
-                securityGame.update(ray: ray, pinch: sample.clickPinch, allowBegin:sample.clickBegan, dwell:usesDwell)
-            } else {
-                securityGame.update(ray: nil, pinch: false)
-            }
-            lastHandSeenTime = CACurrentMediaTime()
-            controllerHandRoot.isHidden = true
             return
         }
 

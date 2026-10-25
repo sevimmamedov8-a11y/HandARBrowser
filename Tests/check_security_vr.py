@@ -23,7 +23,7 @@ final class Label { var text = ""; func setText(_ value: String) { text = value 
 final class Guest {
  var phase = Phase.atGate
  var hasContraband = false, isDrunk = false, isAggressive = false
- var scanned = false, breathTested = false
+ var scanned = false, breathTested = false, resolved = false
  func beginAttack() { phase = .attacking }
  func leave(accepted: Bool) { phase = .leaving }
 }
@@ -86,8 +86,22 @@ update = source[source.index('    func update(ray: WorldRay?'):source.index('   
 assert update.index('if ray == nil') < update.index('updateGuest(dt: dt)')
 assert update.index('if paused || rulesVisible') < update.index('updateGuest(dt: dt)')
 assert 'releaseHold(cancelled: true)' in source
-assert 'if !dwell, heldItem == nil' in update
+assert 'if (fist == true || !dwell), heldItem == nil' in update
 assert '(pinch || dwell)' in update and 'guest.cancelScan()' in update
 assert 'toolDwellGate.update' in update
 assert 'securityVR.bestScore' in source
 print('PASS: Security VR pause/loss/scan/dwell integration guards')
+
+# Fist interaction bypasses pointer ownership/pinch cancellation, using fresh palm joints.
+vc = (root/'HandARBrowser/MainViewController.swift').read_text(encoding='utf-8')
+handler = vc[vc.index('    private func handleHands('):vc.index('        // Dwell needs a fresh index')]
+assert 'fist:sample?.isFist' in handler and 'trackingGeneration:sample?.trackingGeneration' in handler
+assert 'sample.maskJoints[.wrist]' in handler and 'sample.maskJoints[.middleMCP]' in handler
+assert 'samples.first { $0.hand == securityGame.inputHand }' in handler
+assert 'grabGate.update(' in update and 'if case .released = event { releaseHold() }' in update
+assert 'inputHand != hand || inputGeneration != trackingGeneration' in update
+assert 'radius: hitRadius * abs(node.scale.x)' in source
+assert 'position += localTarget - localHand' in source
+assert 'maximumWidth / Float(plane.width)' in source
+print('PASS: Security VR fist/palm/identity routing, confirmed release, scaled hit areas and bounded HUD')
+assert 'self.handOwnership.hand != nil || self.securityGame.inputHand != nil' in vc

@@ -757,6 +757,10 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     private var cinemaNeedsAlignment = false
     private let securityGame = SecurityVRGame()
     private var timeMotionActive = false
+    private var timeMotionCameraOverridden = false
+    private var timeMotionAligned = false
+    private var timeMotionHeadTimestamp: Double?
+    private var timeMotionHeadMode: CameraMode?
     private var timeMotionLeft: HandSample?
     private var timeMotionRight: HandSample?
     private let timeMotion = TimeMotionVRGame()
@@ -779,7 +783,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     private let cinemaControlMasks = [CAShapeLayer(), CAShapeLayer()]
     private let cinemaPlayback = CinemaPlayback()
     private var cameraPassthroughRequested: Bool {
-        graffitiActive ? graffiti.mode == .home : (panoramaActive ? false : (cinemaActive ? cinemaHall.comfort.isPeeking : profile.passthrough))
+        timeMotionActive ? false : (graffitiActive ? graffiti.mode == .home : (panoramaActive ? false : (cinemaActive ? cinemaHall.comfort.isPeeking : profile.passthrough)))
     }
     private var cinemaProbeTimer: Timer?
     private var cinemaProbeGeneration = UUID()
@@ -2077,6 +2081,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         let cameraDelivery = LatestMainDelivery<CameraFrame> { [weak self] frame in
             guard let self, self.inVR, self.tracking.isCurrent(frame) else { return }
             self.headNode.simdTransform = self.tracking.headTransform(frame)
+            self.timeMotionHeadTimestamp = frame.timestamp; self.timeMotionHeadMode = frame.mode
             if self.cinemaActive, self.cinemaNeedsAlignment {
                 self.alignCinemaToCurrentPose()
             }
@@ -2347,48 +2352,41 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     // MARK: Time Motion
 
     private func startTimeMotionVR() {
-        guard inVR else { return }
+        guard inVR, !cinemaActive, !graffitiActive, !panoramaActive, !securityGameActive else { return }
         guard !usesHeadAim else {
-            showAlert("Time Motion работает с управлением рукой. Переключите управление на «рука» в настройках.")
+            showAlert("Для Time Motion включи управление рукой в настройках. Кнопки игры работают удержанием указателя.")
             return
         }
-        cancelHandInteraction()
-        handOwnership.suppressUntilOpen()
-        securityGameActive = true
-        timeMotionActive = true
-        timeMotionLeft = nil
-        timeMotionRight = nil
-
-        stopBrowserCapture()
-        hideDirectVideoStage()
-        browserPlaneNode.isHidden = true
-        toolbarNode.isHidden = true
-        hidePointer()
-        hidePointerDot()
-        releasePointer()
-
-        let headForward = headNode.simdWorldTransform.columns.2
-        let forward = simd_normalize(SIMD3<Float>(-headForward.x, 0, -headForward.z))
+        activateMediaAudioSession()
+        cancelHandInteraction(); endDrag(); endResize(); hands.reset(); handOwnership.reset(); menuSwipe.reset()
+        queueHandForegroundMask(left: nil, right: nil)
+        securityGameActive = true; timeMotionActive = true; timeMotionAligned = false
+        timeMotionLeft = nil; timeMotionRight = nil
+        spatialHomeVisible = false
+        stopBrowserCapture(); browser.stopLoading(); pauseAndMute(browser); hideDirectVideoStage()
+        browserPlaneNode.isHidden = true; toolbarNode.isHidden = true
+        hidePointer(); hidePointerDot(); releasePointer(); controllerHandRoot.isHidden = true
         virtualHands.start(in: worldScene)
         timeMotion.onExitRequested = { [weak self] in self?.exitTimeMotionVR() }
-        timeMotion.start(in: worldScene, headPosition: headNode.simdWorldPosition, forward: forward)
+        let axis = headNode.simdWorldTransform.columns.2
+        timeMotion.start(in: worldScene, headPosition: headNode.simdWorldPosition, forward: SIMD3(-axis.x,0,-axis.z))
+        timeMotion.showLoading()
+        timeMotionCameraOverridden = (tracking.latestFrameCopy?.mode ?? CameraMode.load(ultraWideAvailable: UltraWideCapture.isAvailable)) != .worldTracking
+        if timeMotionCameraOverridden { tracking.start(mode: .worldTracking) }
         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
     }
 
     private func exitTimeMotionVR() {
         guard timeMotionActive else { return }
-        timeMotion.stop()
-        virtualHands.stop()
-        timeMotionActive = false
-        securityGameActive = false
-        timeMotionLeft = nil
-        timeMotionRight = nil
-        toolbarNode.isHidden = false
-        browserPlaneNode.isHidden = false
-        openVRDesktop()
-        startBrowserCapture()
-        hidePointer()
-        hidePointerDot()
+        timeMotion.stop(); virtualHands.stop()
+        timeMotionActive = false; securityGameActive = false; timeMotionAligned = false
+        timeMotionLeft = nil; timeMotionRight = nil
+        if timeMotionCameraOverridden { tracking.start() }
+        timeMotionCameraOverridden = false
+        cancelHandInteraction(); hands.reset(); handOwnership.reset()
+        queueHandForegroundMask(left: nil, right: nil)
+        resetBrowserAnchor(); openVRDesktop(); startBrowserCapture()
+        hidePointer(); hidePointerDot()
     }
 
     private func timeMotionInput(_ sample: HandSample?, now: Double) -> TimeMotionHandInput? {
@@ -2408,11 +2406,20 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     /// Runs once per rendered frame, so the game clock does not depend on hand delivery.
     private func tickTimeMotion(at now: Double) {
         guard timeMotionActive, inVR else { return }
-        let ready = graffitiTrackingReady
+        let ready = graffitiTrackingReady && timeMotionHeadMode == .worldTracking
+        if !timeMotionAligned {
+            guard ready else { return }
+            let axis = headNode.simdWorldTransform.columns.2
+            let flat = SIMD3<Float>(-axis.x,0,-axis.z)
+            let direction = simd_length(flat) > 0.1 ? simd_normalize(flat) : SIMD3<Float>(0,0,-1)
+            timeMotion.stop()
+            timeMotion.start(in: worldScene, headPosition: headNode.simdWorldPosition, forward: direction)
+            timeMotionAligned = true
+        }
         let left = timeMotionInput(timeMotionLeft, now: now)
         let right = timeMotionInput(timeMotionRight, now: now)
         timeMotion.update(now: now, left: left, right: right, headTransform: headNode.simdWorldTransform,
-                          trackingReady: ready, dwell: usesDwell)
+                          trackingReady: ready, dwell: true, headTimestamp: timeMotionHeadTimestamp)
         guard timeMotionActive else { return }
         controllerHandRoot.isHidden = true
         virtualHands.tick(at: now, ready: ready, head: headNode)
@@ -3086,7 +3093,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         if timeMotionActive {
             timeMotion.stop()
             virtualHands.stop()
-            timeMotionActive = false
+            timeMotionActive = false; timeMotionAligned = false; timeMotionCameraOverridden = false
             timeMotionLeft = nil
             timeMotionRight = nil
         }
@@ -3117,6 +3124,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     @objc private func handleRecenterTap() {
         // В кинотеатре тап по экрану не должен перетягивать экран зала.
         guard inVR, !cinemaActive else { return }
+        if timeMotionActive { timeMotion.recenterControls(head: headNode); return }
         if graffitiActive { graffiti.recenterControls(head: headNode); return }
         if panoramaActive { panorama.recenter(head: headNode); return }
         resetBrowserAnchor()
@@ -3235,6 +3243,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     }
 
     private func resetBrowserAnchor() {
+        if timeMotionActive { timeMotion.recenterControls(head: headNode); return }
         if graffitiActive { graffiti.recenterControls(head: headNode); return }
         if panoramaActive { panorama.recenter(head: headNode); return }
         if cinemaActive { alignCinemaToCurrentPose(); return }
@@ -3527,6 +3536,12 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         let now = CACurrentMediaTime()
         let freshLeft = rawLeft.flatMap { now-$0.timestamp <= 0.2 && now >= $0.timestamp && tracking.acceptsHand(timestamp:$0.timestamp) ? $0 : nil }
         let freshRight = rawRight.flatMap { now-$0.timestamp <= 0.2 && now >= $0.timestamp && tracking.acceptsHand(timestamp:$0.timestamp) ? $0 : nil }
+        if timeMotionActive {
+            timeMotionLeft = freshLeft
+            timeMotionRight = freshRight
+            controllerHandRoot.isHidden = true
+            return
+        }
         lastHandDeliveryTime = max(freshLeft?.timestamp ?? -.infinity, freshRight?.timestamp ?? -.infinity)
         if freshLeft != nil || freshRight != nil { lastHandSeenTime = now }
         if graffitiActive {
@@ -3576,12 +3591,6 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         func route(_ sample: HandSample?) -> HandRoutingState? {
             guard let sample else { return nil }
             return usesDwell ? HandRoutingState(hand:sample.hand,generation:0,down:sample.clickPinch,openConfirmed:!sample.clickPinch) : sample.routing
-        }
-        if timeMotionActive {
-            timeMotionLeft = freshLeft
-            timeMotionRight = freshRight
-            controllerHandRoot.isHidden = true
-            return
         }
         let decision = handOwnership.select(left:route(inputLeft),right:route(inputRight))
         if decision.cancel { cancelHandInteraction() }

@@ -21,8 +21,14 @@ assert vc.count("post('time-motion-game')") == 1
 assert vc.count('case "time-motion-game":') == 1 and vc.count('startTimeMotionVR()') == 2
 assert vc.count('tickTimeMotion(at: CACurrentMediaTime())') == 1
 assert vc.count('timeMotion.cancelInput()') == 1
-assert vc.count('timeMotion.stop()') == 2  # exitTimeMotionVR and leaveVRToMenu
-assert vc.count('if timeMotionActive {') == 2  # hand routing and leave-VR cleanup
+assert vc.count('timeMotion.stop()') == 3  # exit, leave-VR and loading scene realignment
+assert 'if timeMotionActive {' in vc  # hand routing and leave-VR cleanup
+start=vc[vc.index('    private func startTimeMotionVR()'):vc.index('    private func timeMotionInput(')]
+assert 'tracking.start(mode: .worldTracking)' in start and 'if timeMotionCameraOverridden { tracking.start() }' in start
+assert 'pauseAndMute(browser)' in start and 'queueHandForegroundMask(left: nil, right: nil)' in start
+assert 'timeMotionActive ? false' in vc
+assert 'guard ready else { return }' in vc[vc.index('    private func tickTimeMotion('):vc.index('    // MARK: Graffiti')]
+assert vc.index('timeMotionLeft = freshLeft') < vc.index('        func eligible(_ sample: HandSample?)')
 assert vc.count('post(\'security-game\')') == 1 and 'case "security-game":' in vc  # existing game kept
 
 # Pistol and firing rules must come from the shared, tested components.

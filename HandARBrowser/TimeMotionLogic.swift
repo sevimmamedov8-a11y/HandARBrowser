@@ -1,5 +1,4 @@
 import Foundation
-import simd
 
 // Pure rules for the time-motion shooter: no SceneKit, UIKit or ARKit.
 // Covered by Tests/TimeMotionTests.swift. Game scene code lives in TimeMotionGame.swift.
@@ -14,21 +13,19 @@ enum TimeMotionTuning {
     /// Head angular speed (rad/s) and hand speed (m/s) below these values are sensor jitter.
     static let headNoise: Double = 0.25
     static let handNoise: Double = 0.08
-    /// Faster than these is a tracking jump. The sample is ignored and the speed is held.
+    /// Faster than these is a tracking jump; gameplay pauses until a valid sample.
     static let headGlitch: Double = 6.0
     static let handGlitch: Double = 4.0
     /// Speeds that reach full game speed.
     static let headFull: Double = 1.2
     static let handFull: Double = 0.9
-    /// Missing tracking for this long (real seconds) pauses the game.
-    static let trackingLossPause: Double = 0.2
     static let fireInterval: Double = 0.28
     static let fireRearm: Double = 0.12
     static let meleeCooldown: Double = 0.35
     static let meleeMaxHandSpeed: Double = 4.0
-    static let introSeconds: Double = 1.5
+    static let introSeconds: Double = 0.15
     static let spawnGapSeconds: Double = 0.6
-    static let breatherSeconds: Double = 2.5
+    static let breatherSeconds: Double = 0.3
     static let playerHits = 3
     /// Radius of the player's head for enemy bullets, metres.
     static let playerHeadRadius: Float = 0.18
@@ -36,9 +33,9 @@ enum TimeMotionTuning {
 
 /// One reading per camera frame. Only `.motion` changes game speed.
 enum MotionSample: Equatable {
-    /// No fresh head pose or hand. The game pauses after `trackingLossPause`.
+    /// No reliable camera pose: pause immediately. Missing hands alone do not pause.
     case lost
-    /// A fresh but implausible reading. The current speed is kept and the game does not pause.
+    /// An implausible camera pose: pause rather than damage the player.
     case glitch
     /// Head angular speed (rad/s) and the faster hand's speed (m/s).
     case motion(head: Double, hand: Double)
@@ -49,7 +46,6 @@ enum MotionSample: Equatable {
 struct TimeScaleController {
     private(set) var scale: Double = TimeMotionTuning.minimumScale
     private(set) var isPaused = false
-    private var lostFor: Double = 0
     private var target: Double = TimeMotionTuning.minimumScale
 
     mutating func reset() { self = TimeScaleController() }
@@ -67,22 +63,16 @@ struct TimeScaleController {
         let dt = min(realDt, TimeMotionTuning.maxRealStep)
         switch sample {
         case .lost:
-            lostFor += dt
+            isPaused = true; scale = 0; target = TimeMotionTuning.minimumScale
+            return
         case .glitch:
-            lostFor = 0
+            isPaused = true; scale = 0; target = TimeMotionTuning.minimumScale
+            return
         case let .motion(head, hand):
-            lostFor = 0
             if head.isFinite, hand.isFinite, head >= 0, hand >= 0,
                head <= TimeMotionTuning.headGlitch, hand <= TimeMotionTuning.handGlitch {
                 target = Self.targetScale(head: head, hand: hand)
-            }
-        }
-        if lostFor >= TimeMotionTuning.trackingLossPause {
-            if !isPaused {
-                isPaused = true
-                scale = 0
-            }
-            return
+            } else { isPaused = true; scale = 0; target = TimeMotionTuning.minimumScale; return }
         }
         if isPaused {
             // Resume from the slowest speed, never from the last value. Nothing jumps.
@@ -128,10 +118,10 @@ struct FireScheduler {
             cooldown = TimeMotionTuning.fireRearm
             return false
         }
-        guard gameDt.isFinite, gameDt >= 0 else { return false }
+        guard gameDt.isFinite, gameDt > 0 else { return false }
         cooldown -= gameDt
         guard cooldown <= 0 else { return false }
-        cooldown = TimeMotionTuning.fireInterval
+        cooldown = max(0, cooldown + TimeMotionTuning.fireInterval)
         return true
     }
 
@@ -139,15 +129,17 @@ struct FireScheduler {
 }
 
 enum TimeMotionGeometry {
+    static func dot(_ a: SIMD3<Float>, _ b: SIMD3<Float>) -> Float { a.x*b.x+a.y*b.y+a.z*b.z }
+    static func length(_ a: SIMD3<Float>) -> Float { sqrt(dot(a,a)) }
     /// First hit parameter t in 0...1 along the segment a→b, or nil. Sweeping the whole
     /// step is what stops fast bullets from passing through a target between frames.
     static func segmentSphere(from a: SIMD3<Float>, to b: SIMD3<Float>,
                               center: SIMD3<Float>, radius: Float) -> Float? {
         let d = b - a
         let f = a - center
-        let qa = simd_dot(d, d)
-        let qb = simd_dot(f, d)
-        let qc = simd_dot(f, f) - radius * radius
+        let qa = dot(d, d)
+        let qb = dot(f, d)
+        let qc = dot(f, f) - radius * radius
         guard qa.isFinite, qb.isFinite, qc.isFinite else { return nil }
         if qc <= 0 { return 0 }
         if qa < 1e-12 { return nil }
@@ -163,6 +155,7 @@ enum TimeMotionGeometry {
         var entry: Float = 0
         var exit: Float = 1
         for axis in 0..<3 {
+            guard a[axis].isFinite, b[axis].isFinite, lo[axis].isFinite, hi[axis].isFinite, lo[axis] <= hi[axis] else { return nil }
             let origin = a[axis]
             let delta = b[axis] - origin
             if abs(delta) < 1e-9 {
@@ -177,6 +170,11 @@ enum TimeMotionGeometry {
             if entry > exit { return nil }
         }
         return entry
+    }
+
+    static func hitBox(from a: SIMD3<Float>, to b: SIMD3<Float>, box: BoxObstacle, padding: Float = 0) -> Float? {
+        let half = (box.hi-box.lo)*0.5+SIMD3(repeating:padding)
+        return segmentBox(from:box.local(a),to:box.local(b),min:-half,max:half)
     }
 }
 
@@ -211,6 +209,13 @@ struct ProjectileState: Equatable {
 struct BoxObstacle: Equatable {
     let lo: SIMD3<Float>
     let hi: SIMD3<Float>
+    var axisX = SIMD3<Float>(1,0,0)
+    var axisZ = SIMD3<Float>(0,0,1)
+    func local(_ point: SIMD3<Float>) -> SIMD3<Float> {
+        let delta = point-(lo+hi)*0.5
+        return SIMD3(TimeMotionGeometry.dot(delta,axisX),delta.y,TimeMotionGeometry.dot(delta,axisZ))
+    }
+    func worldVector(_ vector: SIMD3<Float>) -> SIMD3<Float> { axisX*vector.x+SIMD3(0,vector.y,0)+axisZ*vector.z }
 }
 
 struct SphereTarget: Equatable {
@@ -237,7 +242,7 @@ enum ProjectileRules {
             if best == nil || t < best!.t { best = (impact, t) }
         }
         for box in covers {
-            consider(.cover, TimeMotionGeometry.segmentBox(from: a, to: b, min: box.lo, max: box.hi))
+            consider(.cover, TimeMotionGeometry.hitBox(from:a,to:b,box:box))
         }
         switch owner {
         case .player:
@@ -372,5 +377,80 @@ enum TimeMotionBestScore {
         guard score > load(defaults: defaults) else { return false }
         defaults.set(score, forKey: key)
         return true
+    }
+}
+
+/// Head activity also uses capture timestamps so 30 Hz tracking on a 60/120 Hz
+/// display produces the same activity, including translation while dodging.
+struct TimeMotionHeadMotion {
+    private var position: SIMD3<Float>?
+    private var rotation: SIMD4<Float>?
+    private var timestamp: Double?
+    private(set) var safe = false
+    private(set) var speed = 0.0
+    mutating func reset() { self = Self() }
+    mutating func update(position point: SIMD3<Float>, rotation quaternion: SIMD4<Float>, timestamp stamp: Double, now: Double, ready: Bool) {
+        guard ready, stamp.isFinite, now.isFinite, now >= stamp, now-stamp <= 0.2,
+              [point.x,point.y,point.z,quaternion.x,quaternion.y,quaternion.z,quaternion.w].allSatisfy({ $0.isFinite }) else { reset(); return }
+        if let previous = timestamp, stamp == previous { return }
+        var activity = 0.0, valid = true
+        if let previous = timestamp, let old = position, let q = rotation {
+            let dt = stamp-previous, travel = Double(TimeMotionGeometry.length(point-old))
+            let dot = q.x*quaternion.x+q.y*quaternion.y+q.z*quaternion.z+q.w*quaternion.w
+            let angle = Double(2*acos(min(1,abs(dot))))
+            valid = dt > 0 && dt <= 0.2 && travel < 0.25 && angle/max(0.00001,dt) < 6
+            if valid {
+                let translation = travel/dt
+                activity = min(5.9,max(angle/dt,translation > 0.035 ? translation*2.4 : 0))
+            }
+        }
+        position = point; rotation = quaternion; timestamp = stamp; speed = activity; safe = valid
+    }
+}
+
+/// Velocity belongs to camera samples, never repeated render frames. A new
+/// tracking generation or implausible jump requires a fresh baseline.
+struct TimeMotionHandMotion {
+    private(set) var position: SIMD3<Float>?
+    private(set) var previous: SIMD3<Float>?
+    private(set) var velocity = SIMD3<Float>.zero
+    private(set) var safe = false
+    private var stamp: Double?
+    private var generation: UInt64?
+    mutating func reset() { self = Self() }
+    mutating func update(_ point: SIMD3<Float>?, timestamp: Double, generation: UInt64?, now: Double) {
+        guard let point, let generation, timestamp.isFinite, now.isFinite,
+              now >= timestamp, now-timestamp <= 0.18,
+              [point.x,point.y,point.z].allSatisfy({ $0.isFinite }) else { reset(); return }
+        if self.generation != generation || stamp == nil || timestamp < stamp! || timestamp-stamp! > 0.2 {
+            reset(); self.generation = generation; position = point; previous = point; stamp = timestamp; return
+        }
+        guard timestamp > stamp! else { previous = position; return }
+        let dt = Float(timestamp-stamp!), delta = point-position!
+        previous = position; position = point; stamp = timestamp
+        let speed = TimeMotionGeometry.length(delta)/dt
+        guard speed <= 4, TimeMotionGeometry.length(delta) < 0.25 else {
+            velocity = .zero; previous = point; safe = false; return
+        }
+        velocity += (delta/dt-velocity)*(1-exp(-dt/0.055))
+        safe = true
+    }
+}
+
+/// Preserve a recent deliberate swing through the two-second open-palm release.
+/// An idle hand or tracking break cannot throw an object using an old velocity.
+struct TimeMotionThrow {
+    private var peak = SIMD3<Float>.zero
+    private var peakTime = -Double.infinity
+    mutating func reset() { self = Self() }
+    mutating func observe(_ velocity: SIMD3<Float>, at time: Double, safe: Bool) {
+        guard safe else { reset(); return }
+        if time-peakTime > 0.22 || TimeMotionGeometry.length(velocity) >= TimeMotionGeometry.length(peak) {
+            peak = velocity; peakTime = time
+        }
+    }
+    func release(at time: Double) -> SIMD3<Float> {
+        guard time >= peakTime, time-peakTime <= 0.22 else { return .zero }
+        return peak*min(1,6/max(0.001,TimeMotionGeometry.length(peak)))
     }
 }

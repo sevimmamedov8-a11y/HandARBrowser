@@ -1,5 +1,4 @@
 import Foundation
-import simd
 
 @main struct TimeMotionTests {
     static func main() {
@@ -25,16 +24,15 @@ import simd
 
         var glitch = TimeScaleController()
         for _ in 0..<120 { glitch.update(.motion(head: 2.0, hand: 0.6), realDt: dt60) }
-        let beforeGlitch = glitch.scale
         for _ in 0..<60 { glitch.update(.motion(head: 20, hand: 0), realDt: dt60) }
-        check(abs(glitch.scale - beforeGlitch) < 1e-6 && !glitch.isPaused, "a tracking jump holds the current speed and does not pause")
+        check(glitch.scale == 0 && glitch.isPaused, "a tracking jump immediately freezes gameplay")
         for _ in 0..<60 { glitch.update(.glitch, realDt: dt60) }
-        check(!glitch.isPaused && glitch.scale > 0.9, "an unreliable frame does not pause or slow the game")
+        check(glitch.isPaused && glitch.scale == 0, "unreliable camera poses cannot advance gameplay")
 
         var lost = TimeScaleController()
         for _ in 0..<120 { lost.update(.motion(head: 2.0, hand: 0.6), realDt: dt60) }
         for _ in 0..<6 { lost.update(.lost, realDt: dt60) }
-        check(!lost.isPaused, "a short tracking gap of 0.1 s does not pause")
+        check(lost.isPaused, "even a short camera tracking gap pauses damage and time")
         for _ in 0..<9 { lost.update(.lost, realDt: dt60) }
         check(lost.isPaused && lost.scale == 0, "losing tracking for 0.25 s pauses the game completely")
         lost.update(.motion(head: 2.0, hand: 0), realDt: dt60)
@@ -90,7 +88,7 @@ import simd
         let fast = TimeMotionGeometry.segmentSphere(from: SIMD3(0, 0, 0), to: SIMD3(1, 0, 0),
                                                     center: SIMD3(0.5, 0, 0), radius: 0.05)
         check(fast != nil && abs((fast ?? 0) - 0.45) < 0.001, "a bullet crossing a target between frames is caught")
-        check(simd_length(SIMD3<Float>(1, 0, 0) - SIMD3(0.5, 0, 0)) > 0.05, "endpoints alone would have missed the target")
+        check(TimeMotionGeometry.length(SIMD3<Float>(1, 0, 0) - SIMD3(0.5, 0, 0)) > 0.05, "endpoints alone would have missed the target")
 
         let boxHit = TimeMotionGeometry.segmentBox(from: SIMD3(-1, 0.5, 0), to: SIMD3(1, 0.5, 0),
                                                    min: SIMD3(-0.2, 0, -0.2), max: SIMD3(0.2, 1, 0.2))
@@ -198,6 +196,65 @@ import simd
               "a higher score replaces the record")
         defaults.removePersistentDomain(forName: suite)
 
+        // Camera samples repeated at 60/120 Hz must not change measured hand speed.
+        var headMotion = TimeMotionHeadMotion()
+        let identity = SIMD4<Float>(0,0,0,1)
+        headMotion.update(position:.zero,rotation:identity,timestamp:0,now:0,ready:true)
+        headMotion.update(position:SIMD3(0.025,0,0),rotation:identity,timestamp:0.05,now:0.05,ready:true)
+        check(headMotion.safe && abs(headMotion.speed-1.2)<0.001,"translation alone produces head activity")
+        for i in 1...5 {
+            headMotion.update(position:SIMD3(0.025,0,0),rotation:identity,timestamp:0.05,now:0.05+Double(i)*0.008,ready:true)
+            check(abs(headMotion.speed-1.2)<0.001,"repeated display frames preserve the captured head speed")
+        }
+        headMotion.update(position:SIMD3(3,0,0),rotation:identity,timestamp:0.1,now:0.1,ready:true)
+        check(!headMotion.safe && headMotion.speed == 0,"relocalisation jump stops game time")
+        headMotion.update(position:SIMD3(3,0,0),rotation:identity,timestamp:0.1,now:0.11,ready:true)
+        check(!headMotion.safe,"repeated unsafe camera frame cannot resume the game")
+        headMotion.update(position:SIMD3(3,0,0),rotation:identity,timestamp:0.15,now:0.15,ready:true)
+        check(headMotion.safe && headMotion.speed == 0,"fresh stable frame recovers with no phantom movement")
+        headMotion.update(position:SIMD3(3,0,0),rotation:identity,timestamp:0.15,now:0.5,ready:true)
+        check(!headMotion.safe,"stale camera pose cannot continue the fight")
+        var handMotion = TimeMotionHandMotion()
+        handMotion.update(.zero,timestamp:0,generation:1,now:0)
+        check(!handMotion.safe,"first hand sample establishes a baseline without a throw")
+        handMotion.update(SIMD3(0.03,0,0),timestamp:0.05,generation:1,now:0.05)
+        let measured = handMotion.velocity
+        for i in 1...5 {
+            handMotion.update(SIMD3(0.03,0,0),timestamp:0.05,generation:1,now:0.05+Double(i)*0.008)
+            check(handMotion.velocity == measured,"repeated render frames do not decay the camera-sample velocity")
+        }
+        handMotion.update(SIMD3(0.04,0,0),timestamp:0.10,generation:2,now:0.10)
+        check(!handMotion.safe && handMotion.velocity == .zero,"generation change clears velocity")
+        handMotion.update(SIMD3(2,0,0),timestamp:0.15,generation:2,now:0.15)
+        check(!handMotion.safe && handMotion.velocity == .zero,"tracking jump cannot become a punch or throw")
+        handMotion.update(SIMD3(2,0,0),timestamp:0.15,generation:2,now:0.4)
+        check(handMotion.position == nil && !handMotion.safe,"stale hand cannot keep firing")
+        var throwing = TimeMotionThrow()
+        throwing.observe(SIMD3(2,0,0),at:1,safe:true)
+        throwing.observe(SIMD3(0.1,0,0),at:1.05,safe:true)
+        check(throwing.release(at:1.1).x == 2,"release preserves a recent deliberate swing")
+        check(throwing.release(at:1.4) == .zero,"old swing cannot throw later")
+        throwing.observe(SIMD3(2,0,0),at:2,safe:true)
+        throwing.observe(.zero,at:2.01,safe:false)
+        check(throwing.release(at:2.02) == .zero,"tracking loss clears a pending throw")
+        let rotated = BoxObstacle(lo:SIMD3(-1,-1,-0.1),hi:SIMD3(1,1,0.1),
+            axisX:SIMD3(0.7071068,0,0.7071068),axisZ:SIMD3(-0.7071068,0,0.7071068))
+        check(TimeMotionGeometry.hitBox(from:SIMD3(-0.6,0,0.6),to:SIMD3(-0.6,0,0.5),box:rotated) == nil,
+              "empty corner of a rotated cover's bounding box does not block a bullet")
+        check(TimeMotionGeometry.hitBox(from:SIMD3(0,0,1),to:SIMD3(0,0,-1),box:rotated) != nil,
+              "actual rotated cover surface blocks a bullet")
+        check(TimeMotionGeometry.segmentBox(from:SIMD3(.nan,0,0),to:.zero,min:SIMD3(repeating:-1),max:SIMD3(repeating:1)) == nil,
+              "non-finite geometry cannot produce a phantom hit")
+        func shotsAt(_ fps:Int)->Int {
+            var clock=FixedStepClock(),fire=FireScheduler(),shots=0
+            for _ in 0..<(fps*10) {
+                for _ in 0..<clock.advance(realDt:1/Double(fps),scale:0.7) {
+                    if fire.advance(gameDt:TimeMotionTuning.fixedStep,firing:true) {shots += 1}
+                }
+            }
+            return shots
+        }
+        check(shotsAt(30)==shotsAt(60) && shotsAt(60)==shotsAt(120),"auto-fire timing is equal at 30, 60 and 120 display FPS")
         print("PASS: \(count) time-motion checks")
     }
 }

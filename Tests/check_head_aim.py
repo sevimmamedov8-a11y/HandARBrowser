@@ -55,6 +55,7 @@ typealias CinemaHall=Controls
 final class Resettable {var resets=0;func reset(){resets+=1}}
 final class Menu {var updates=0;func updatePointerControlMode(){updates+=1}}
 final class Harness {
+ var neonFlightActive=false
  var inVR=true,pointerControlMode=PointerControlMode.head
  var usesHeadAim:Bool{pointerControlMode == .head}
  var headAimSession=HeadAimSession(),handClickMode=HandClickMode.pinch

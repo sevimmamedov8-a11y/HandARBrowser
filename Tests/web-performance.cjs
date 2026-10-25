@@ -19,3 +19,17 @@ assert(a>=0&&b>a);vm.runInContext(source.slice(a,b),pc);
 const first={},second={};mutationCallback([{addedNodes:[first]},{addedNodes:[second]}]);
 assert.deepEqual(added,[first,second],'patch only added subtrees');
 console.log('PASS: mutation coalescing, hidden-page handling and incremental video patching');
+
+const signalSource=source.slice(source.indexOf('  function startDesktopSnapshotSignals()'),source.lastIndexOf('})();'));
+let signals=0,scheduled=[],changedMenu;
+const menuContext={document:{readyState:'complete',hidden:false,documentElement:{},querySelector(){return {}}},
+ window:{webkit:{messageHandlers:{handarFeedback:{postMessage(message){assert.equal(message.type,'menu-snapshot');signals++}}}}},
+ setTimeout(fn){scheduled.push(fn)},MutationObserver:class{constructor(fn){changedMenu=fn}observe(){}}};
+vm.createContext(menuContext);vm.runInContext(signalSource,menuContext);
+for(let i=0;i<100;i++)changedMenu();
+assert.equal(scheduled.length,1,'desktop DOM bursts coalesce into one signal');scheduled.shift()();assert.equal(signals,1);
+menuContext.document.hidden=true;changedMenu();scheduled.shift()();assert.equal(signals,1,'hidden desktop sends no signal');
+let outsideObservers=0;
+const outsideContext={document:{readyState:'complete',querySelector(){return null}},MutationObserver:class{constructor(){outsideObservers++}}};
+vm.createContext(outsideContext);vm.runInContext(signalSource,outsideContext);assert.equal(outsideObservers,0,'external pages do not get a desktop observer');
+console.log('PASS: desktop dirty signaling, coalescing, visibility and external-page isolation');

@@ -30,6 +30,7 @@ final class Harness {
  var directVideoActive=true,liveBrowserActive=true,directVideoSyncInFlight=true
  var liveProcessRecoveries:Set<ObjectIdentifier>=[];var liveLoadError:String?
  var directVideoGeneration=UUID(),snapshotGeneration=UUID()
+ var menuSnapshotGate=VRMenuSnapshotGate()
  var cinemaWebLoadStartedAt:Double=0,recovery=false
  func setCinemaWebRecovery(_ value:Bool){recovery=value}
  var notice="",opened:[URL]=[],cancels=0,opaque=false,fallbacks=0
@@ -88,6 +89,10 @@ struct Tests {
   h.directVideoActive=false;h.cinemaActive=true
   h.reportVideoNavigationFailure(h.browser,error:NSError(domain:NSURLErrorDomain,code:NSURLErrorTimedOut))
   check(h.fallbacks==1,"cinema retains live-video fallback")
+  check(h.menuSnapshotGate.shouldCapture(at:0,home:true,loading:false),"desktop initially needs a texture")
+  check(!h.menuSnapshotGate.shouldCapture(at:0.1,home:true,loading:false),"unchanged desktop reuses its texture")
+  h.webView(h.browser,didStartProvisionalNavigation:nil)
+  check(h.menuSnapshotGate.shouldCapture(at:0.11,home:true,loading:false),"new navigation invalidates the old desktop cache")
   h.panoramaActive=true
   let reloads=h.browser.reloads,opened=h.opened.count
   check(policy(h.browser,url) == .cancel && h.opened.count==opened,"hidden page cannot open over a panorama")
@@ -100,5 +105,6 @@ Tests.main()
 '''
 with tempfile.TemporaryDirectory(prefix='handar-navigation-') as directory:
     path=Path(directory)/'navigation.swift'
-    path.write_text(stubs+methods+tests,encoding='utf-8')
+    policy=source[source.index('struct VRMenuSnapshotGate {'):source.index('/// Resolution changes at most once')]
+    path.write_text(policy+stubs+methods+tests,encoding='utf-8')
     run_swift_sources([path])

@@ -498,4 +498,22 @@
       if(delta>0)window.__handarEnableAudio(true);
     } catch (e) {}
   };
+  // Static desktop snapshots wake only for actual DOM changes, never for third-party pages.
+  function startDesktopSnapshotSignals() {
+    if (typeof document.querySelector !== 'function' || !document.querySelector('meta[name="handar-desktop"]')) return;
+    let pending = false;
+    function changed() {
+      if (pending) return;
+      pending = true;
+      setTimeout(function () {
+        pending = false;
+        if (document.hidden) return;
+        try { window.webkit.messageHandlers.handarFeedback.postMessage({type:'menu-snapshot'}); } catch(e) {}
+      }, 80);
+    }
+    new MutationObserver(changed).observe(document.documentElement,{subtree:true,childList:true,attributes:true,characterData:true});
+    changed();
+  }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded',startDesktopSnapshotSignals,{once:true});
+  else startDesktopSnapshotSignals();
 })();

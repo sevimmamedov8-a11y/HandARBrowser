@@ -515,6 +515,39 @@ struct VRPerformanceBudget {
     }
 }
 
+/// Static desktop pixels are reused; world/head rendering continues at 60 Hz.
+struct VRMenuSnapshotGate {
+    private var dirty = true
+    private var changed = -Double.infinity
+    private var captured = -Double.infinity
+    mutating func markChanged(at time:Double) {dirty=true;changed=time}
+    mutating func reset() {self=Self()}
+    mutating func shouldCapture(at time:Double,home:Bool,loading:Bool)->Bool {
+        guard time.isFinite else {return false}
+        if !home || loading || dirty || time-changed<0.28 || time-captured>=2 {
+            dirty=false;captured=time;return true
+        }
+        return false
+    }
+}
+
+/// Resolution changes at most once a second; recovery is intentionally slower.
+struct VRMenuFrameGovernor {
+    private(set) var scale:Double=0.90
+    private var previous:Double?,adjusted = -Double.infinity
+    private var slow=0.0,fast=0.0
+    mutating func sample(at time:Double,home:Bool) {
+        guard home,time.isFinite else {previous=nil;slow=0;fast=0;return}
+        defer {previous=time}
+        guard let old=previous else {return}
+        let dt=time-old
+        guard dt>0,dt<0.2 else {slow=0;fast=0;return}
+        if dt>1.0/52 {slow+=1;fast=0} else {slow=max(0,slow-0.25);fast+=dt}
+        if slow>=8,time-adjusted>=1 {scale=max(0.70,scale-0.05);adjusted=time;slow=0;fast=0}
+        else if fast>=3,time-adjusted>=3 {scale=min(1,scale+0.05);adjusted=time;fast=0}
+    }
+}
+
 // Unit-square to quadrilateral mapping. Independent of UIKit and SceneKit.
 struct CinemaScreenHomography {
     let a: Double, b: Double, c: Double
@@ -658,6 +691,8 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         return webView
     }()
     private var browserTimer: Timer?
+    private var menuSnapshotGate = VRMenuSnapshotGate()
+    private var menuFrameGovernor = VRMenuFrameGovernor()
     private var browserCaptureEnabled = false
     private var lastBrowserInteractionTime: CFTimeInterval = 0
     private var snapshotInProgress = false
@@ -756,6 +791,8 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     private var menuSwipe = OpenPalmSwipeGesture()
     private var cinemaNeedsAlignment = false
     private let securityGame = SecurityVRGame()
+    private var neonFlightActive = false
+    private let neonFlight = NeonFlightGame()
     private var timeMotionActive = false
     private var timeMotionCameraOverridden = false
     private var timeMotionAligned = false
@@ -783,7 +820,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     private let cinemaControlMasks = [CAShapeLayer(), CAShapeLayer()]
     private let cinemaPlayback = CinemaPlayback()
     private var cameraPassthroughRequested: Bool {
-        timeMotionActive ? false : (graffitiActive ? graffiti.mode == .home : (panoramaActive ? false : (cinemaActive ? cinemaHall.comfort.isPeeking : profile.passthrough)))
+        timeMotionActive ? false : (neonFlightActive ? false : (graffitiActive ? graffiti.mode == .home : (panoramaActive ? false : (cinemaActive ? cinemaHall.comfort.isPeeking : profile.passthrough))))
     }
     private var cinemaProbeTimer: Timer?
     private var cinemaProbeGeneration = UUID()
@@ -2073,7 +2110,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
 
     private func wireServices() {
         tracking.onFrame = { [weak self] pixelBuffer, orientation in
-            guard let self, self.inVR else { return }
+            guard let self, self.inVR, !self.neonFlightActive else { return }
             if !self.usesHeadAim || self.lensCalibrationView != nil || self.graffitiActive {
                 self.hands.process(pixelBuffer: pixelBuffer, orientation: orientation)
             }
@@ -2348,6 +2385,39 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         startBrowserCapture()
         hidePointer()
         hidePointerDot()
+    }
+
+    // MARK: Neon Flight
+
+    private func startNeonFlight() {
+        guard inVR,!cinemaActive,!graffitiActive,!panoramaActive,!securityGameActive else { return }
+        activateMediaAudioSession()
+        cancelHandInteraction();endDrag();endResize();hands.reset();handOwnership.reset();menuSwipe.reset()
+        queueHandForegroundMask(left:nil,right:nil)
+        neonFlightActive=true;securityGameActive=true;spatialHomeVisible=false
+        stopBrowserCapture();browser.stopLoading();pauseAndMute(browser);hideDirectVideoStage()
+        browserPlaneNode.isHidden=true;toolbarNode.isHidden=true
+        hidePointer();hidePointerDot();releasePointer();controllerHandRoot.isHidden=true
+        neonFlight.onExit = { [weak self] in self?.exitNeonFlight() }
+        neonFlight.start(in:worldScene,head:headNode)
+    }
+
+    private func exitNeonFlight() {
+        guard neonFlightActive else {return}
+        neonFlight.stop();neonFlightActive=false;securityGameActive=false
+        cancelHandInteraction();hands.reset();handOwnership.reset()
+        resetBrowserAnchor();openVRDesktop();startBrowserCapture()
+    }
+
+    private func tickNeonFlight(at time:Double) {
+        guard neonFlightActive,inVR else {return}
+        let frame=tracking.latestFrameCopy
+        var ready=frame.map {tracking.isCurrent($0)} ?? false
+        if let frame,frame.mode == .worldTracking {
+            if let camera=frame.camera.arCamera,case .normal = camera.trackingState {} else {ready=false}
+        }
+        neonFlight.update(now:time,head:headNode,stamp:timeMotionHeadTimestamp ?? -.infinity,ready:ready)
+        controllerHandRoot.isHidden=true
     }
 
     // MARK: Time Motion
@@ -3091,6 +3161,8 @@ final class MainViewController: UIViewController, MTKViewDelegate {
             securityGameActive = false
         }
 
+        if neonFlightActive {neonFlight.stop();neonFlightActive=false}
+
         if timeMotionActive {
             timeMotion.stop()
             virtualHands.stop()
@@ -3125,6 +3197,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     @objc private func handleRecenterTap() {
         // В кинотеатре тап по экрану не должен перетягивать экран зала.
         guard inVR, !cinemaActive else { return }
+        if neonFlightActive { neonFlight.recenter(head:headNode); return }
         if timeMotionActive { timeMotion.recenterControls(head: headNode); return }
         if graffitiActive { graffiti.recenterControls(head: headNode); return }
         if panoramaActive { panorama.recenter(head: headNode); return }
@@ -3244,6 +3317,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     }
 
     private func resetBrowserAnchor() {
+        if neonFlightActive { neonFlight.recenter(head:headNode); return }
         if timeMotionActive { timeMotion.recenterControls(head: headNode); return }
         if graffitiActive { graffiti.recenterControls(head: headNode); return }
         if panoramaActive { panorama.recenter(head: headNode); return }
@@ -3284,6 +3358,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     private func stopBrowserCapture() {
         browserCaptureEnabled = false
         snapshotGeneration = UUID()
+        menuSnapshotGate.reset()
         browserTimer?.invalidate()
         browserTimer = nil
     }
@@ -3293,6 +3368,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         // они бы затирали кадры AVPlayer.
         guard inVR, !directVideoActive, !snapshotInProgress, !cinemaPlayback.isActive else { return }
         guard browser.bounds.width > 1, browser.bounds.height > 1 else { return }
+        guard menuSnapshotGate.shouldCapture(at:CACurrentMediaTime(),home:spatialHomeVisible,loading:browser.isLoading) else {return}
         snapshotInProgress = true
         let generation = snapshotGeneration
 
@@ -3303,6 +3379,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         browser.takeSnapshot(with: configuration) { [weak self] image, _ in
             guard let self else { return }
             self.snapshotInProgress = false
+            if self.snapshotGeneration == generation,image == nil {self.menuSnapshotGate.markChanged(at:CACurrentMediaTime())}
             guard self.snapshotGeneration == generation, self.inVR, !self.directVideoActive, !self.cinemaPlayback.isActive,
                   let image else { return }
             self.browserMaterial.diffuse.contents = image
@@ -3328,6 +3405,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     }
 
     private func updateHeadAim(at time: Double) {
+        if neonFlightActive { return }
         guard inVR, usesHeadAim, lensCalibrationView == nil else { return }
         let frame = tracking.latestFrameCopy
         let ready = headAimSession.update(at: time, poseTime: frame?.timestamp ?? -.infinity,
@@ -3402,6 +3480,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     }
 
     private func handleControllerButton(_ button: VRBoxButton, pressed: Bool) {
+        if neonFlightActive { if pressed, button == .menu { exitNeonFlight() };return }
         if graffitiActive {
             if pressed, button == .menu || button == .b { exitGraffiti() }
             if pressed, button == .y { graffiti.recenterControls(head: headNode) }
@@ -3464,6 +3543,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     }
 
     private func updateControllerHand() {
+        if neonFlightActive { controllerHandRoot.isHidden=true;return }
         if graffitiActive { controllerHandRoot.isHidden = true; return }
         guard !usesHeadAim || lensCalibrationView != nil else { return }
         if let calibration=lensCalibrationView {
@@ -3533,6 +3613,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     }
 
     private func handleHands(left rawLeft: HandSample?, right rawRight: HandSample?) {
+        if neonFlightActive { return }
         guard inVR, !usesHeadAim || lensCalibrationView != nil || graffitiActive else { return }
         let now = CACurrentMediaTime()
         let freshLeft = rawLeft.flatMap { now-$0.timestamp <= 0.2 && now >= $0.timestamp && tracking.acceptsHand(timestamp:$0.timestamp) ? $0 : nil }
@@ -4237,6 +4318,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
             return
         }
 
+        menuFrameGovernor.sample(at:CACurrentMediaTime(),home:spatialHomeVisible)
         let drawableSize = view.drawableSize
         guard drawableSize.width > 1, drawableSize.height > 1 else { return }
         if graffitiActive {
@@ -4247,6 +4329,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
         panorama.followPosition(head: headNode)
         updateHeadAim(at: CACurrentMediaTime())
         tickTimeMotion(at: CACurrentMediaTime())
+        tickNeonFlight(at: CACurrentMediaTime())
         tickCinemaComfort(at: CACurrentMediaTime())
         if directVideoActive { updateCinemaWebScreen() }
         updateCinemaControlOcclusion()
@@ -4422,7 +4505,7 @@ final class MainViewController: UIViewController, MTKViewDelegate {
     private func ensureEyeTextures(for drawableSize: CGSize) {
         let budget = VRPerformanceBudget(thermalLevel: ProcessInfo.processInfo.thermalState.rawValue)
         let requested = profile.supersample.isFinite ? Double(max(profile.supersample, 1)) : 1
-        let menuLimit = spatialHomeVisible ? 1.0 : 2.0
+        let menuLimit = spatialHomeVisible ? menuFrameGovernor.scale : (neonFlightActive ? 1.0 : 2.0)
         let factor = CGFloat(min(requested, min(budget.maximumRenderScale, menuLimit)))
         // Equal integer eye widths, including after thermal resolution changes.
         let target = CGSize(
@@ -4469,6 +4552,9 @@ extension MainViewController: WKScriptMessageHandler {
                 }
                 return
             }
+            if body["type"] as? String == "menu-snapshot",message.webView === browser,spatialHomeVisible {
+                menuSnapshotGate.markChanged(at:CACurrentMediaTime());return
+            }
             guard body["type"] as? String == "click" else { return }
             playUIConfirmation()
         case "handarVideo":
@@ -4502,7 +4588,7 @@ extension MainViewController: WKScriptMessageHandler {
 
 extension MainViewController {
     private static let vrDesktopHTML = #"""
-<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><title>HandAR · Главный экран</title><style>:root{color-scheme:dark;--text:#fff;--muted:#ffffffa3;--glass:linear-gradient(150deg,#e1f0ff50,#8595b23b 45%,#c6abe63b);--edge:#ffffff58}
+<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><meta name="handar-desktop" content="1"><title>HandAR · Главный экран</title><style>:root{color-scheme:dark;--text:#fff;--muted:#ffffffa3;--glass:linear-gradient(150deg,#e1f0ff50,#8595b23b 45%,#c6abe63b);--edge:#ffffff58}
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
 html,body{margin:0;width:100%;height:100%;overflow:hidden;background:transparent;color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display",sans-serif;-webkit-user-select:none;user-select:none}
 button{font:inherit;color:inherit;cursor:pointer;border:0;background:none}button:focus-visible{outline:3px solid #fff;outline-offset:5px}
@@ -4574,7 +4660,7 @@ document.querySelectorAll('[data-view]').forEach(b=>b.onclick=()=>showView(b.dat
 document.querySelectorAll('[data-show-page]').forEach(b=>b.onclick=()=>showPage(Number(b.dataset.showPage)));
 document.querySelectorAll('[data-id]').forEach(b=>b.onclick=()=>{b.classList.add('launch');post(b.dataset.id);setTimeout(()=>b.classList.remove('launch'),250);});
 document.querySelectorAll('[data-system]').forEach(b=>b.onclick=()=>{system(b.dataset.system);if(b.dataset.system.startsWith('environment-')){const n=document.getElementById('notice');n.textContent=b.dataset.system==='environment-camera'?'Сквозное видео включено':'Тёмное пространство';n.hidden=false;clearTimeout(window.noticeTimer);window.noticeTimer=setTimeout(()=>n.hidden=true,2200);}});
-function clock(){const d=new Date();document.getElementById('time').textContent=d.toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit'});document.getElementById('date').textContent=d.toLocaleDateString('ru-RU',{weekday:'long',day:'numeric',month:'long'});}clock();setInterval(clock,1000);
+function clock(){const d=new Date();const time=d.toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit'}),date=d.toLocaleDateString('ru-RU',{weekday:'long',day:'numeric',month:'long'});if(document.getElementById('time').textContent!==time)document.getElementById('time').textContent=time;if(document.getElementById('date').textContent!==date)document.getElementById('date').textContent=date;}clock();setTimeout(function(){clock();setInterval(clock,60000)},60000-Date.now()%60000);
 document.addEventListener('keydown',e=>{if(e.key==='Escape'){closeControl();showView('apps');}if(e.key==='ArrowRight')showPage(1);if(e.key==='ArrowLeft')showPage(0);});
 </script></body></html>
 """#
@@ -4586,17 +4672,17 @@ document.addEventListener('keydown',e=>{if(e.key==='Escape'){closeControl();show
 <meta charset="utf-8"><title>HandAR VR App</title>
 <style>
 :root{--accent:%ACCENT%}
-*{box-sizing:border-box}html,body{margin:0;width:100%%;height:100%%;overflow:hidden;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","Helvetica Neue",Arial,sans-serif;background:linear-gradient(135deg,#0d1118,#1a2030);color:#fff}body:before{content:"";position:fixed;inset:0;background:radial-gradient(circle at 70%% 20%%,var(--accent),transparent 42%%);opacity:.28}.wrap{position:relative;height:100%%;padding:22px 34px;display:flex;flex-direction:column;gap:18px}.top{height:44px;display:flex;align-items:center;justify-content:space-between}.brand{display:flex;align-items:center;gap:12px}.back{border:1px solid rgba(255,255,255,.2);background:rgba(255,255,255,.1);color:#fff;border-radius:15px;padding:10px 15px;font-size:15px}.title{font-size:22px;font-weight:700}.card{flex:1;border:1px solid rgba(255,255,255,.15);background:rgba(255,255,255,.07);backdrop-filter:blur(25px);border-radius:28px;padding:26px;overflow:auto}.hero{display:flex;align-items:center;gap:18px}.bigicon{width:74px;height:74px;border-radius:22px;background:var(--accent);display:flex;align-items:center;justify-content:center;font-size:34px;box-shadow:0 10px 30px rgba(0,0,0,.24)}h1{margin:0;font-size:32px}p{color:rgba(255,255,255,.7);line-height:1.45}.row{display:flex;gap:12px;flex-wrap:wrap}.btn{border:1px solid rgba(255,255,255,.2);background:rgba(255,255,255,.12);color:#fff;border-radius:17px;padding:13px 18px;font-size:15px}.btn.primary{background:var(--accent);border-color:transparent}.small{font-size:12px;color:rgba(255,255,255,.48)}textarea{width:100%%;height:58%%;resize:none;border:1px solid rgba(255,255,255,.18);background:rgba(0,0,0,.2);color:#fff;border-radius:18px;padding:16px;font:inherit;outline:none}.display{font-size:48px;text-align:right;padding:18px;background:rgba(0,0,0,.25);border-radius:20px;margin-bottom:14px}.keys{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}.key{padding:20px 10px;border:0;border-radius:16px;background:rgba(255,255,255,.1);color:#fff;font-size:22px}.key.op{background:var(--accent)}.photo-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-top:22px}.photo{aspect-ratio:1.25;border-radius:22px;display:flex;align-items:flex-end;padding:14px;font-weight:700;background:linear-gradient(145deg,var(--accent),rgba(255,255,255,.1)),radial-gradient(circle at 70% 25%,#fff5,transparent 35%);border:1px solid rgba(255,255,255,.14)}.p2{filter:saturate(.75)}.p3{filter:hue-rotate(28deg)}.p4{filter:hue-rotate(90deg)}.p5{filter:hue-rotate(145deg)}.p6{filter:hue-rotate(220deg)}.file-list,.chat-list{display:flex;flex-direction:column;gap:10px;margin-top:24px}.file-row,.chat{border:1px solid rgba(255,255,255,.13);background:rgba(255,255,255,.06);color:#fff;border-radius:18px;padding:15px 17px;text-align:left}.file-row{display:grid;grid-template-columns:34px 1fr;gap:3px 10px}.file-row span{grid-row:1/3;font-size:22px}.file-row small{color:rgba(255,255,255,.48)}.chat{display:grid;grid-template-columns:1fr auto;gap:4px 12px}.chat span{color:rgba(255,255,255,.68)}.chat time{grid-column:2;grid-row:1/3;color:rgba(255,255,255,.38);font-size:12px}.phone-display{font-size:36px;letter-spacing:2px;text-align:center;padding:18px;border-radius:18px;background:rgba(0,0,0,.22);margin:22px 0 14px}.phone-keys{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
+*{box-sizing:border-box}html,body{margin:0;width:100%%;height:100%%;overflow:hidden;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","Helvetica Neue",Arial,sans-serif;background:linear-gradient(135deg,#0d1118,#1a2030);color:#fff}body:before{content:"";position:fixed;inset:0;background:radial-gradient(circle at 70%% 20%%,var(--accent),transparent 42%%);opacity:.28}.wrap{position:relative;height:100%%;padding:22px 34px;display:flex;flex-direction:column;gap:18px}.top{height:44px;display:flex;align-items:center;justify-content:space-between}.brand{display:flex;align-items:center;gap:12px}.back{border:1px solid rgba(255,255,255,.2);background:rgba(255,255,255,.1);color:#fff;border-radius:15px;padding:10px 15px;font-size:15px}.title{font-size:22px;font-weight:700}.card{flex:1;border:1px solid rgba(255,255,255,.15);background:rgba(255,255,255,.07);backdrop-filter:none;border-radius:28px;padding:26px;overflow:auto}.hero{display:flex;align-items:center;gap:18px}.bigicon{width:74px;height:74px;border-radius:22px;background:var(--accent);display:flex;align-items:center;justify-content:center;font-size:34px;box-shadow:0 10px 30px rgba(0,0,0,.24)}h1{margin:0;font-size:32px}p{color:rgba(255,255,255,.7);line-height:1.45}.row{display:flex;gap:12px;flex-wrap:wrap}.btn{border:1px solid rgba(255,255,255,.2);background:rgba(255,255,255,.12);color:#fff;border-radius:17px;padding:13px 18px;font-size:15px}.btn.primary{background:var(--accent);border-color:transparent}.small{font-size:12px;color:rgba(255,255,255,.48)}textarea{width:100%%;height:58%%;resize:none;border:1px solid rgba(255,255,255,.18);background:rgba(0,0,0,.2);color:#fff;border-radius:18px;padding:16px;font:inherit;outline:none}.display{font-size:48px;text-align:right;padding:18px;background:rgba(0,0,0,.25);border-radius:20px;margin-bottom:14px}.keys{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}.key{padding:20px 10px;border:0;border-radius:16px;background:rgba(255,255,255,.1);color:#fff;font-size:22px}.key.op{background:var(--accent)}.photo-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-top:22px}.photo{aspect-ratio:1.25;border-radius:22px;display:flex;align-items:flex-end;padding:14px;font-weight:700;background:linear-gradient(145deg,var(--accent),rgba(255,255,255,.1)),radial-gradient(circle at 70% 25%,#fff5,transparent 35%);border:1px solid rgba(255,255,255,.14)}.p2{filter:saturate(.75)}.p3{filter:hue-rotate(28deg)}.p4{filter:hue-rotate(90deg)}.p5{filter:hue-rotate(145deg)}.p6{filter:hue-rotate(220deg)}.file-list,.chat-list{display:flex;flex-direction:column;gap:10px;margin-top:24px}.file-row,.chat{border:1px solid rgba(255,255,255,.13);background:rgba(255,255,255,.06);color:#fff;border-radius:18px;padding:15px 17px;text-align:left}.file-row{display:grid;grid-template-columns:34px 1fr;gap:3px 10px}.file-row span{grid-row:1/3;font-size:22px}.file-row small{color:rgba(255,255,255,.48)}.chat{display:grid;grid-template-columns:1fr auto;gap:4px 12px}.chat span{color:rgba(255,255,255,.68)}.chat time{grid-column:2;grid-row:1/3;color:rgba(255,255,255,.38);font-size:12px}.phone-display{font-size:36px;letter-spacing:2px;text-align:center;padding:18px;border-radius:18px;background:rgba(0,0,0,.22);margin:22px 0 14px}.phone-keys{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
 html,body{background:transparent!important;color:#fff;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display",sans-serif}
 body:before{display:none}.wrap{padding:28px 38px 75px 148px;gap:0;position:relative}
-.top{height:64px;flex-shrink:0;padding:0 25px;background:linear-gradient(130deg,#bcbcbc65,#64646475);border:1px solid #ffffff40;border-bottom:0;border-radius:28px 28px 0 0;backdrop-filter:blur(30px);-webkit-backdrop-filter:blur(30px)}
+.top{height:64px;flex-shrink:0;padding:0 25px;background:linear-gradient(130deg,#bcbcbc65,#64646475);border:1px solid #ffffff40;border-bottom:0;border-radius:28px 28px 0 0;backdrop-filter:none;-webkit-backdrop-filter:none}
 .title{font-size:21px;font-weight:650;letter-spacing:-.4px}.brand{gap:14px}.back{border:0;background:#ffffff1d;border-radius:50%;width:35px;height:35px;padding:0;font-size:0}.back:before{content:"‹";font-size:30px;line-height:30px}.top>.small{font-size:12px;color:#ffffff80}
-.card{border-radius:0 0 28px 28px;border-top:0;padding:28px;background:linear-gradient(135deg,#87878780,#4242429c);border-color:#ffffff36;backdrop-filter:blur(35px) saturate(110%);-webkit-backdrop-filter:blur(35px) saturate(110%);box-shadow:0 18px 45px #0002;scrollbar-width:thin}
+.card{border-radius:0 0 28px 28px;border-top:0;padding:28px;background:linear-gradient(135deg,#87878780,#4242429c);border-color:#ffffff36;backdrop-filter:none;-webkit-backdrop-filter:none;box-shadow:0 18px 45px #0002;scrollbar-width:thin}
 h1{font-size:28px;font-weight:650;letter-spacing:-.6px}.hero{gap:16px}.hero p{font-size:14px}.bigicon{width:58px;height:58px;border-radius:50%;font-size:27px;box-shadow:inset 0 1px 2px #fff5,0 6px 12px #0002}
 .btn,.key,.file-row,.chat{border-color:#ffffff27;background:#ffffff17;border-radius:18px;box-shadow:inset 0 1px 0 #ffffff10}.btn{border-radius:30px;padding:12px 22px}.btn.primary{background:#ffffffdf;color:#202020;font-weight:600}.btn:hover,.key:hover,.file-row:hover,.handar-hover{background:#ffffff35}.btn.primary:hover{background:#fff}.key.op{background:#ffffff45}.key{padding:15px 10px}.display{background:#00000015;font-weight:300}.file-row,.chat{padding:17px}.photo{border-radius:20px}textarea{border-radius:20px;background:#00000012;border-color:#ffffff25}.small{color:#ffffff90}p{color:#ffffffb5}
-.spatial-sidebar{position:absolute;top:50%;left:34px;transform:translateY(-50%);display:flex;flex-direction:column;gap:8px;padding:9px;background:linear-gradient(145deg,#d1d1d14d,#67676766);border:1px solid #ffffff40;border-radius:34px;backdrop-filter:blur(25px);-webkit-backdrop-filter:blur(25px)}
+.spatial-sidebar{position:absolute;top:50%;left:34px;transform:translateY(-50%);display:flex;flex-direction:column;gap:8px;padding:9px;background:linear-gradient(145deg,#d1d1d14d,#67676766);border:1px solid #ffffff40;border-radius:34px;backdrop-filter:none;-webkit-backdrop-filter:none}
 .spatial-sidebar button{width:47px;height:47px;display:grid;place-items:center;color:#fff;background:transparent;border:0;border-radius:50%;cursor:pointer}.spatial-sidebar button:hover,.spatial-sidebar button.handar-hover{background:#ffffff38}.spatial-sidebar svg{width:23px;height:23px;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
-.window-ornament{position:absolute;bottom:15px;left:calc(50% + 55px);transform:translateX(-50%);display:flex;gap:5px;align-items:center;padding:7px;background:linear-gradient(145deg,#c5c5c54f,#60606075);border:1px solid #ffffff40;border-radius:35px;box-shadow:0 8px 25px #0002;backdrop-filter:blur(25px);-webkit-backdrop-filter:blur(25px)}.window-ornament button{padding:9px 18px;border-radius:22px;background:none;color:#fff;border:0;font:inherit;font-size:13px;cursor:pointer}.window-ornament button:hover,.window-ornament button.handar-hover{background:#ffffff2b}.window-ornament .separator{width:1px;height:20px;background:#ffffff30}
+.window-ornament{position:absolute;bottom:15px;left:calc(50% + 55px);transform:translateX(-50%);display:flex;gap:5px;align-items:center;padding:7px;background:linear-gradient(145deg,#c5c5c54f,#60606075);border:1px solid #ffffff40;border-radius:35px;box-shadow:0 8px 25px #0002;backdrop-filter:none;-webkit-backdrop-filter:none}.window-ornament button{padding:9px 18px;border-radius:22px;background:none;color:#fff;border:0;font:inherit;font-size:13px;cursor:pointer}.window-ornament button:hover,.window-ornament button.handar-hover{background:#ffffff2b}.window-ornament .separator{width:1px;height:20px;background:#ffffff30}
 button:focus-visible,a:focus-visible{outline:2px solid white;outline-offset:3px}button{touch-action:manipulation}
 @media(max-height:560px){.wrap{padding:14px 22px 65px 115px}.spatial-sidebar{left:22px}.top{height:54px}.card{padding:20px}.hero p{margin:8px 0 16px}.window-ornament{bottom:10px}}
 
@@ -4750,6 +4836,7 @@ body{background:#05060b}
       <div class="gamecard" onclick="startFruit()"><div><div class="gameemoji">🍉🍓</div><h3>Fruit Slice VR</h3><p>Твоя версия игры с нарезкой фруктов. Двигай рукой и режь летящие фрукты, избегая бомб.</p><span class="tag">Рука + pinch</span></div><div>▶ Играть</div></div>
       <div class="gamecard" onclick="startNeon()"><div><div class="gameemoji">☄️✨</div><h3>Neon Dodge</h3><p>Держи указатель подальше от метеоров и продержись 30 секунд, собирая очки.</p><span class="tag">Рука + движение</span></div><div>▶ Играть</div></div>
       <div class="gamecard" onclick="startStack()"><div><div class="gameemoji">🧱🏗️</div><h3>Stack Rush</h3><p>Точно ставь движущиеся блоки друг на друга и строй башню как можно выше.</p><span class="tag">Рука + pinch</span></div><div>▶ Играть</div></div>
+      <div class="gamecard" onclick="post('neon-flight')"><div><div class="gameemoji">🚀</div><h3>Неоновый полёт</h3><p>Управление только головой. Собирай кольца и энергию, обходи лазерные ворота и астероиды. Щиты, три корабля и рекорды.</p><span class="tag">Без рук · Повороты головы · 3 трассы</span></div><div>▶ Лететь</div></div>
       <div class=\"gamecard\" onclick=\"post('time-motion-game')\"><div><div class=\"gameemoji\">🔫⏱️</div><h3>Time Motion</h3><p>Замедление времени: почти неподвижный мир, движение ускоряет его. Возьми пистолет кулаком — он стреляет сам, укрывайся за ящиками и уворачивайся головой от красных врагов. Три волны, очки и локальный рекорд.</p><span class=\"tag\">Рука · Пистолет · Замедление · Рекорд</span></div><div>▶ Играть</div></div>
       <div class="gamecard" onclick="post('security-game')"><div><div class="gameemoji">🔦🪪</div><h3>Security VR</h3><p>Охрана клуба: сканер и алкотестер работают наведением. Каждые 5 решений меняются правила смены. Собирай серии правильных решений, улучшай точность и личный рекорд. Есть пауза, захват гостей и предметов.</p><span class="tag">Смены · Серии · Рекорд · Управление наведением</span></div><div>▶ Играть</div></div>
     </div>
@@ -4883,6 +4970,8 @@ addEventListener('resize',()=>{if(current==='fruit')[fruitW,fruitH]=fitCanvas(fc
             browser.loadHTMLString(Self.vrGamesHTML, baseURL: URL(string: "https://handar.vision/"))
         case "security-game":
             startSecurityVR()
+        case "neon-flight":
+            startNeonFlight()
         case "time-motion-game":
             startTimeMotionVR()
         case "cinema":
@@ -5089,6 +5178,7 @@ extension MainViewController: WKNavigationDelegate, WKUIDelegate {
             setDirectVideoNotice("Загружаю страницу…")
         }
         if webView === browser {
+            menuSnapshotGate.reset()
             snapshotGeneration = UUID()
         }
     }
